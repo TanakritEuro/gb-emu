@@ -42,6 +42,10 @@ pub struct Ppu {
     wy_triggered: bool,
     /// Which window row the next window line draws; reset at VBlank.
     window_line: u8,
+    /// The STAT interrupt line as of the last check, for edge detection.
+    stat_line: bool,
+    /// IF bits raised by register writes, handed over on the next `tick`.
+    pending_irq: u8,
     framebuffer: Vec<u8>,
 }
 
@@ -72,6 +76,8 @@ impl Ppu {
             dot: 0,
             wy_triggered: false,
             window_line: 0,
+            stat_line: false,
+            pending_irq: 0,
             framebuffer: DMG_PALETTE[0].repeat(SCREEN_WIDTH * SCREEN_HEIGHT),
         }
     }
@@ -113,13 +119,30 @@ impl Ppu {
 
     pub fn write_reg(&mut self, addr: u16, val: u8) {
         match addr {
-            0xFF40 => self.lcdc = val,
-            // Bits 0-2 (mode, LYC flag) are read-only.
-            0xFF41 => self.stat = (self.stat & 0x07) | (val & 0x78),
+            0xFF40 => {
+                let was_on = self.lcd_on();
+                self.lcdc = val;
+                if was_on && !self.lcd_on() {
+                    self.turn_off();
+                }
+            }
+            // Bits 0-2 (mode, LYC flag) are read-only. A new enable mask can
+            // raise the STAT line right away.
+            // TODO(accuracy): on DMG, writing STAT briefly acts as if $FF were
+            // written, which can fire a spurious STAT interrupt.
+            0xFF41 => {
+                self.stat = (self.stat & 0x07) | (val & 0x78);
+                self.check_stat_line();
+            }
             0xFF42 => self.scy = val,
             0xFF43 => self.scx = val,
             0xFF44 => {} // LY is read-only
-            0xFF45 => self.lyc = val,
+            // LY == LYC is compared constantly, so a new LYC counts at once.
+            0xFF45 => {
+                self.lyc = val;
+                self.update_stat_bits();
+                self.check_stat_line();
+            }
             0xFF46 => self.dma = val,
             0xFF47 => self.bgp = val,
             0xFF48 => self.obp0 = val,
@@ -130,40 +153,58 @@ impl Ppu {
         }
     }
 
-    /// Advances by `cycles` dots. Returns IF bits to request.
-    pub fn tick(&mut self, cycles: u32) -> u8 {
-        if self.lcdc & 0x80 == 0 {
-            // TODO(milestone 3): turning the LCD off resets LY to 0 and mode to 0.
-            return 0;
-        }
-        let mut irq = 0;
-        self.dot += cycles;
-        while self.dot >= DOTS_PER_LINE {
-            self.dot -= DOTS_PER_LINE;
-            if self.ly < VBLANK_LINE {
-                self.render_scanline();
-            }
-            self.ly = (self.ly + 1) % LINES_PER_FRAME;
-            if self.ly == VBLANK_LINE {
-                irq |= interrupt::VBLANK;
-                self.wy_triggered = false;
-                self.window_line = 0;
-            }
-            let coincide = self.ly == self.lyc;
-            self.stat = (self.stat & !0x04) | if coincide { 0x04 } else { 0 };
-            if coincide && self.stat & 0x40 != 0 {
-                irq |= interrupt::STAT;
-            }
-        }
-        self.update_mode();
-        // TODO(milestone 3): STAT interrupts on mode 0/1/2 entry (bits 3-5).
-        irq
+    fn lcd_on(&self) -> bool {
+        self.lcdc & 0x80 != 0
     }
 
-    /// Mode 2 (OAM scan) → 3 (drawing) → 0 (HBlank) per line; 1 during VBlank.
-    /// Mode 3 really lasts 172-289 dots depending on sprites and scrolling.
-    fn update_mode(&mut self) {
-        let mode = if self.ly >= VBLANK_LINE {
+    /// LCDC bit 7 cleared: the PPU stops, LY goes back to 0, STAT reports
+    /// mode 0, and the screen goes blank (white on DMG). When it's turned back
+    /// on, it starts over from the top of line 0.
+    /// TODO(accuracy): the first frame after turning it back on stays blank,
+    /// and line 0 of that frame skips mode 2.
+    fn turn_off(&mut self) {
+        self.ly = 0;
+        self.dot = 0;
+        self.stat &= !0x03;
+        self.stat_line = false;
+        self.framebuffer = DMG_PALETTE[0].repeat(SCREEN_WIDTH * SCREEN_HEIGHT);
+    }
+
+    /// Advances by `cycles` dots, one at a time, so mode and LY == LYC change
+    /// exactly when they should. Returns IF bits to request.
+    pub fn tick(&mut self, cycles: u32) -> u8 {
+        let mut irq = std::mem::take(&mut self.pending_irq);
+        if !self.lcd_on() {
+            return irq;
+        }
+        for _ in 0..cycles {
+            self.dot += 1;
+            if self.dot == DOTS_PER_LINE {
+                self.dot = 0;
+                if self.ly < VBLANK_LINE {
+                    self.render_scanline();
+                }
+                self.ly = (self.ly + 1) % LINES_PER_FRAME;
+                if self.ly == VBLANK_LINE {
+                    irq |= interrupt::VBLANK;
+                    self.wy_triggered = false;
+                    self.window_line = 0;
+                }
+            }
+            self.update_stat_bits();
+            self.check_stat_line();
+        }
+        irq | std::mem::take(&mut self.pending_irq)
+    }
+
+    /// Sets STAT's mode bits and LY == LYC flag. Each line is mode 2 (OAM
+    /// scan), 3 (drawing), then 0 (HBlank); lines 144-153 are mode 1 (VBlank).
+    /// TODO(accuracy): mode 3 really lasts 172-289 dots depending on sprites,
+    /// SCX and the window, which also moves the start of mode 0.
+    fn update_stat_bits(&mut self) {
+        let mode = if !self.lcd_on() {
+            0
+        } else if self.ly >= VBLANK_LINE {
             1
         } else if self.dot < 80 {
             2
@@ -172,7 +213,30 @@ impl Ppu {
         } else {
             0
         };
-        self.stat = (self.stat & !0x03) | mode;
+        let coincide = if self.ly == self.lyc { 0x04 } else { 0 };
+        self.stat = (self.stat & !0x07) | coincide | mode;
+    }
+
+    /// The four STAT sources, each gated by its enable bit (6: LY == LYC,
+    /// 5: mode 2, 4: mode 1, 3: mode 0), are OR'd into one line, and the
+    /// interrupt fires only on that line's rising edge. So a source turning
+    /// on while another already holds the line high fires nothing ("STAT
+    /// blocking"). https://gbdev.io/pandocs/Interrupt_Sources.html
+    /// TODO(accuracy): on DMG the mode 2 source also fires at the start of
+    /// line 144.
+    fn check_stat_line(&mut self) {
+        if !self.lcd_on() {
+            return;
+        }
+        let mode = self.stat & 0x03;
+        let line = (self.stat & 0x40 != 0 && self.stat & 0x04 != 0)
+            || (self.stat & 0x20 != 0 && mode == 2)
+            || (self.stat & 0x10 != 0 && mode == 1)
+            || (self.stat & 0x08 != 0 && mode == 0);
+        if line && !self.stat_line {
+            self.pending_irq |= interrupt::STAT;
+        }
+        self.stat_line = line;
     }
 
     /// Draws line LY into the framebuffer, all at once at the end of the line:
@@ -380,6 +444,92 @@ mod tests {
         p.tick(456 * 2 - 110);
         assert_eq!(p.ly, 2);
         assert_ne!(p.stat & 0x04, 0, "LY == LYC flag");
+    }
+
+    /// A PPU with STAT interrupt enables `enable`, 100 dots into line 0
+    /// (past the line's start, in mode 3).
+    fn stat_ppu(enable: u8) -> Ppu {
+        let mut p = Ppu::new();
+        p.write_reg(0xFF41, enable);
+        p.tick(100);
+        p
+    }
+
+    /// STAT interrupts requested over the next `dots` dots.
+    fn count_stat(p: &mut Ppu, dots: u32) -> u32 {
+        (0..dots)
+            .map(|_| u32::from(p.tick(1) & interrupt::STAT != 0))
+            .sum()
+    }
+
+    const FRAME: u32 = crate::CYCLES_PER_FRAME;
+
+    #[test]
+    fn each_mode_source_fires_on_entry() {
+        // 144 visible lines each enter mode 0 and mode 2 once (the mode 2
+        // count includes line 0 of the next frame); mode 1 once per frame.
+        assert_eq!(count_stat(&mut stat_ppu(0x08), FRAME), 144, "HBlank");
+        assert_eq!(count_stat(&mut stat_ppu(0x20), FRAME), 144, "OAM scan");
+        assert_eq!(count_stat(&mut stat_ppu(0x10), FRAME), 1, "VBlank");
+    }
+
+    #[test]
+    fn lyc_source_fires_once_when_ly_reaches_lyc() {
+        let mut p = stat_ppu(0x40);
+        p.write_reg(0xFF45, 10);
+        assert_eq!(count_stat(&mut p, 456 * 9), 0);
+        assert_eq!(p.tick(456) & interrupt::STAT, interrupt::STAT);
+        assert_eq!(p.ly, 10);
+        assert_eq!(count_stat(&mut p, FRAME - 456 * 10), 0, "once per frame");
+    }
+
+    #[test]
+    fn stat_blocking_back_to_back_sources_fire_once() {
+        // HBlank of line 143 runs straight into VBlank: the line never drops,
+        // so VBlank adds nothing.
+        assert_eq!(count_stat(&mut stat_ppu(0x18), FRAME), 144);
+        // Each HBlank runs straight into the next line's OAM scan, so only
+        // the OAM scan right after VBlank (line 0) gets a fresh edge.
+        assert_eq!(count_stat(&mut stat_ppu(0x28), FRAME), 145);
+    }
+
+    #[test]
+    fn register_writes_can_raise_the_stat_line_immediately() {
+        // LYC moved onto the current line. (LYC starts at 0 == LY, which
+        // already holds the line high, so move it away first to drop it.)
+        let mut p = stat_ppu(0x40);
+        p.write_reg(0xFF45, 99);
+        assert_eq!(p.tick(1) & interrupt::STAT, 0);
+        p.write_reg(0xFF45, p.ly);
+        assert_eq!(p.tick(1) & interrupt::STAT, interrupt::STAT);
+
+        // Enabling the HBlank source while in HBlank
+        let mut p = stat_ppu(0x00);
+        p.tick(200); // dot 300: mode 0
+        p.write_reg(0xFF41, 0x08);
+        assert_eq!(p.tick(1) & interrupt::STAT, interrupt::STAT);
+    }
+
+    #[test]
+    fn lcd_off_resets_ly_reports_mode_0_and_goes_quiet() {
+        let mut p = stat_ppu(0x78); // every STAT source on
+        p.tick(456 * 50);
+        p.write_reg(0xFF40, p.lcdc & !0x80);
+        assert_eq!(p.read_reg(0xFF44), 0, "LY");
+        assert_eq!(p.read_reg(0xFF41) & 0x03, 0, "mode 0");
+        assert!(
+            p.framebuffer().chunks(4).all(|px| px == DMG_PALETTE[0]),
+            "blank"
+        );
+        assert_eq!(p.tick(FRAME), 0, "no VBlank or STAT while off");
+        assert_eq!(p.ly, 0);
+
+        // Back on: starts over from the top of line 0.
+        p.write_reg(0xFF40, p.lcdc | 0x80);
+        p.tick(10);
+        assert_eq!((p.ly, p.read_reg(0xFF41) & 0x03), (0, 2));
+        p.tick(456 - 10);
+        assert_eq!(p.ly, 1);
     }
 
     /// Writes one 8x8 tile (16 bytes) at VRAM address `addr`.
