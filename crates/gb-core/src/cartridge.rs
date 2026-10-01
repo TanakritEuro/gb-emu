@@ -447,16 +447,17 @@ impl Cartridge {
         (self.rom.len() / ROM_BANK).max(1)
     }
 
-    pub fn read_rom(&self, addr: u16) -> u8 {
-        let offset = match self.mbc {
-            Mbc::None => addr as usize,
+    /// Which 16 KiB ROM bank is mapped at `addr` ($0000-$7FFF) right now.
+    pub fn rom_bank(&self, addr: u16) -> usize {
+        let bank = match self.mbc {
+            Mbc::None => return usize::from(addr >= 0x4000),
             Mbc::Mbc1 {
                 rom_bank_low,
                 bank2,
                 mode,
                 ..
             } => {
-                let bank = if addr < 0x4000 {
+                if addr < 0x4000 {
                     if mode == 1 {
                         (bank2 as usize) << 5
                     } else {
@@ -464,19 +465,29 @@ impl Cartridge {
                     }
                 } else {
                     ((bank2 as usize) << 5) | rom_bank_low as usize
-                };
-                (bank % self.rom_banks()) * ROM_BANK + (addr as usize & 0x3FFF)
+                }
             }
             // $0000-$3FFF is always bank 0; $4000-$7FFF any bank, $20/$40/$60 too.
             Mbc::Mbc2 { rom_bank, .. } | Mbc::Mbc3 { rom_bank, .. } => {
-                let bank = if addr < 0x4000 { 0 } else { rom_bank as usize };
-                (bank % self.rom_banks()) * ROM_BANK + (addr as usize & 0x3FFF)
+                if addr < 0x4000 {
+                    0
+                } else {
+                    rom_bank as usize
+                }
             }
             Mbc::Mbc5 { rom_bank, .. } => {
-                let bank = if addr < 0x4000 { 0 } else { rom_bank as usize };
-                (bank % self.rom_banks()) * ROM_BANK + (addr as usize & 0x3FFF)
+                if addr < 0x4000 {
+                    0
+                } else {
+                    rom_bank as usize
+                }
             }
         };
+        bank % self.rom_banks()
+    }
+
+    pub fn read_rom(&self, addr: u16) -> u8 {
+        let offset = self.rom_bank(addr) * ROM_BANK + (addr as usize & 0x3FFF);
         self.rom.get(offset).copied().unwrap_or(0xFF)
     }
 
@@ -712,6 +723,39 @@ pub(crate) mod tests {
     /// Which ROM bank is mapped at `base` ($0000 or $4000), from make_rom's tags.
     fn bank_at(cart: &Cartridge, base: u16) -> u16 {
         u16::from_le_bytes([cart.read_rom(base), cart.read_rom(base + 1)])
+    }
+
+    #[test]
+    fn rom_bank_names_the_bank_that_reads_come_from() {
+        // After each MBC write, rom_bank must agree with the bank make_rom's
+        // tags say is mapped.
+        type Case = (u8, usize, &'static [(u16, u8)]); // type, ROM banks, writes
+        let cases: [Case; 5] = [
+            (0x00, 2, &[]),
+            // MBC1: bank 5, then mode 1 with bank2 = 1 maps bank $20 at $0000.
+            (
+                0x01,
+                64,
+                &[(0x2000, 5), (0x4000, 1), (0x6000, 1), (0x2000, 0)],
+            ),
+            (0x06, 16, &[(0x2100, 0x0F)]),
+            (0x11, 128, &[(0x2000, 0x7F), (0x2000, 0)]),
+            (0x19, 512, &[(0x2000, 0x23), (0x3000, 1), (0x2000, 0)]),
+        ];
+        for (cart_type, banks, writes) in cases {
+            let mut cart = Cartridge::from_rom(make_rom(cart_type, banks, 0)).unwrap();
+            for &(addr, val) in [(0x0000, 0x00)].iter().chain(writes) {
+                cart.write_rom(addr, val);
+                for base in [0x0000, 0x4000, 0x7FFE] {
+                    let tag = bank_at(&cart, base & 0x4000);
+                    assert_eq!(
+                        cart.rom_bank(base),
+                        usize::from(tag),
+                        "type {cart_type:02X} after ${addr:04X} = {val:02X}, at ${base:04X}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -8,6 +8,7 @@ import { FRAME_MS, TURBO, framesDue, nextSpeed, audioFramesDue } from "./timing.
 import { nowSeconds, saveKey, readSave, writeSave, saveFileName } from "./saves.js";
 import { AudioOut } from "./audio.js";
 import { DebugPanel } from "./debugger.js";
+import { MemoryView } from "./memview.js";
 
 const audio = new AudioOut();
 
@@ -20,6 +21,18 @@ const debug = new DebugPanel({
   flags: $("flags"),
   disasm: $("disasm"),
   note: $("debug-note"),
+  memory: new MemoryView(
+    {
+      view: $("mem-view"),
+      addr: $("mem-addr"),
+      follow: $("mem-follow"),
+      prev: $("mem-prev"),
+      next: $("mem-next"),
+      jumps: $("mem-jumps"),
+      info: $("mem-info"),
+    },
+    () => debug.update(emu),
+  ),
 });
 // An ImageData whose pixels *are* the emulator's framebuffer in wasm memory
 // (see screenImage()), so drawing a frame copies nothing on the JS side.
@@ -309,7 +322,12 @@ function syncButtons() {
   sentMask = mask;
 }
 
+/** True while typing into a text field, e.g. the debugger's address box:
+ * keys then belong to the field, not the game. */
+const typing = (e) => Boolean(e.target.closest?.("input, select, textarea"));
+
 function onKey(e, pressed) {
+  if (pressed && typing(e)) return;
   const button = KEYMAP[e.code];
   if (button === undefined) return;
   if (emu) e.preventDefault(); // without a game, let arrows scroll the page
@@ -332,7 +350,7 @@ function setTurbo(on) {
   showStatus();
 }
 addEventListener("keydown", (e) => {
-  if (!emu || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (!emu || e.ctrlKey || e.metaKey || e.altKey || typing(e)) return;
   if (e.code === "Space") {
     e.preventDefault(); // don't scroll the page
     setTurbo(true);
@@ -414,6 +432,9 @@ function debugRun(run) {
   collectSerial();
   debug.update(emu);
 }
+
+// Like the toolbar: a focused button would be pressed again by Enter or Space.
+$("debug-panel").addEventListener("click", (e) => e.target.closest("button")?.blur());
 
 $("debug-panel").addEventListener("toggle", () => {
   showPaused();

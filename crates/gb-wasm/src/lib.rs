@@ -130,6 +130,19 @@ impl Emulator {
         }
     }
 
+    /// `len` bytes of memory from `start` as the CPU sees it (wrapping past
+    /// $FFFF), read without side effects.
+    pub fn memory(&self, start: u16, len: u16) -> Vec<u8> {
+        (0..len)
+            .map(|i| self.gb.peek(start.wrapping_add(i)))
+            .collect()
+    }
+
+    /// The ROM bank mapped at `addr` ($0000-$7FFF).
+    pub fn rom_bank(&self, addr: u16) -> usize {
+        self.gb.rom_bank(addr)
+    }
+
     /// `count` instructions from `addr`, one line each, like
     /// `"0150  3E 01     LD A,$01"`.
     pub fn disassemble(&self, addr: u16, count: usize) -> Vec<String> {
@@ -138,7 +151,7 @@ impl Emulator {
         for _ in 0..count {
             let ins = self.gb.disassemble(addr);
             let bytes: Vec<String> = (0..ins.len)
-                .map(|i| format!("{:02X}", self.gb.bus().read(addr.wrapping_add(i))))
+                .map(|i| format!("{:02X}", self.gb.peek(addr.wrapping_add(i))))
                 .collect();
             lines.push(format!("{addr:04X}  {:<9} {}", bytes.join(" "), ins.text));
             addr = addr.wrapping_add(ins.len);

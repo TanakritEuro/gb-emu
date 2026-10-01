@@ -1,4 +1,5 @@
-// The debugger panel: CPU registers, flags and the next few instructions.
+// The debugger panel: CPU registers, flags and the next few instructions,
+// plus the memory view (memview.js).
 // The formatting helpers are plain functions, tested with
 // node --test "web/*.test.js"; only DebugPanel touches the page.
 
@@ -28,7 +29,8 @@ export function flagStates(f) {
 export const DISASM_LINES = 12;
 
 export class DebugPanel {
-  /** `els`: { panel (the <details>), regs, flags, disasm, note }. */
+  /** `els`: { panel (the <details>), regs, flags, disasm, note, memory (a
+   * MemoryView) }. */
   constructor(els) {
     this.els = els;
   }
@@ -61,6 +63,7 @@ export class DebugPanel {
       );
       const lines = emu.disassemble(state.pc, DISASM_LINES);
       this.els.disasm.replaceChildren(...lines.map((line) => el("div", line)));
+      this.els.memory.update(emu, state);
     } finally {
       state.free();
     }

@@ -109,6 +109,32 @@ fn disassembles_from_memory() {
 }
 
 #[test]
+fn peeking_reads_memory_without_running_anything() {
+    // $0150 LD A,$42 ; LD ($C000),A ; spin
+    let mut gb = GameBoy::new(rom(&[0x3E, 0x42, 0xEA, 0x00, 0xC0, 0x18, 0xFE])).unwrap();
+    assert_eq!(gb.peek(0x0150), 0x3E, "ROM");
+    for _ in 0..4 {
+        gb.step().unwrap(); // NOP, JP, LD, LD
+    }
+    assert_eq!(gb.peek(0xC000), 0x42, "work RAM");
+    assert_eq!(gb.peek(0xE000), 0x42, "its echo");
+    let (pc, ly) = (gb.cpu().regs.pc, gb.peek(0xFF44));
+    for _ in 0..100 {
+        gb.peek(0xFF44);
+    }
+    assert_eq!(
+        (gb.cpu().regs.pc, gb.peek(0xFF44)),
+        (pc, ly),
+        "no time passed"
+    );
+    assert_eq!(
+        (gb.rom_bank(0x0000), gb.rom_bank(0x4000)),
+        (0, 1),
+        "ROM only"
+    );
+}
+
+#[test]
 fn framebuffer_never_moves() {
     // The browser keeps a view on this buffer in wasm memory instead of
     // copying it every frame, so its address must stay put, including when

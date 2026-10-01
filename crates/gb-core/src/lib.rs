@@ -165,10 +165,22 @@ impl GameBoy {
         )
     }
 
-    /// The instruction at `addr`, as text. Reading memory this way has no
-    /// side effects, so a debugger can call it at any time.
+    /// The byte the CPU would read at `addr`, for a debugger. Unlike a CPU
+    /// read it takes no time and changes nothing.
+    pub fn peek(&self, addr: u16) -> u8 {
+        self.bus.read(addr)
+    }
+
+    /// The instruction at `addr`, as text. Reads memory like [`peek`](Self::peek).
     pub fn disassemble(&self, addr: u16) -> Instruction {
         disasm::disassemble(|a| self.bus.read(a), addr)
+    }
+
+    /// Which ROM bank the cartridge maps at `addr` ($0000-$7FFF): 0 at
+    /// $0000-$3FFF on most cartridges, and whatever the game picked at
+    /// $4000-$7FFF.
+    pub fn rom_bank(&self, addr: u16) -> usize {
+        self.bus.cart.rom_bank(addr)
     }
 
     pub fn cpu(&self) -> &Cpu {

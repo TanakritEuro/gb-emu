@@ -2,7 +2,8 @@
 
 A Game Boy emulator written in Rust, running in the browser through WebAssembly.
 
-Status: early. The CPU runs a handful of instructions; see [docs/ROADMAP.md](docs/ROADMAP.md).
+Status: plays original Game Boy (DMG) games with sound, battery saves and a debugger, in the
+browser or headless. Next up: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Setup (once)
 
@@ -55,6 +56,9 @@ or M mutes it. Fast-forward is silent.
 The Debugger panel under the screen shows the CPU registers, flags and the next instructions.
 Step (or N) pauses and runs one instruction; while the CPU sleeps in HALT, one step runs until
 an interrupt wakes it. Step frame runs one frame.
+Under that, a memory view shows 256 bytes at a time, live: type an address (`C000`, `PC`, `LY`)
+and press Enter, jump to a region, or follow PC, SP or HL. Bytes the game just wrote light up;
+click one to see its value and what it is.
 
 ## Working with Claude Code
 

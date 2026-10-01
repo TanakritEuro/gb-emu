@@ -240,3 +240,49 @@ main > * { min-width: 0; }
 .disasm div:first-child { color: var(--accent); }
 .disasm div:first-child::before { content: "▶ "; }
 .disasm div:not(:first-child)::before { content: "  "; }
+
+/* Memory hex view */
+.memory { margin-top: 16px; display: grid; gap: 8px; }
+.memory .toolbar { align-items: center; font-size: 13px; }
+.memory input, .memory select {
+  font: 13px ui-monospace, monospace;
+  padding: 5px 8px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid #3a444e;
+  border-radius: 6px;
+}
+.memory input.invalid { border-color: var(--error); }
+.mem-jumps button { padding: 3px 10px; font-size: 12px; }
+.memview {
+  overflow-x: auto;
+  font: 13px/1.5 ui-monospace, monospace;
+  white-space: pre;
+  user-select: none;
+}
+.memview .addr { color: var(--muted); margin-right: 12px; }
+.memview .byte { padding: 0 3px; border-radius: 3px; cursor: pointer; }
+.memview .byte:hover { background: #2c343c; }
+.memview .ascii { margin-left: 12px; color: var(--muted); }
+/* Markers: a coloured outline for PC/SP/HL, a fill for recent changes. */
+.memview .changed, .mem-legend i.changed { background: #4a5a1c; color: var(--text); }
+.memview .pc, .mem-legend i.pc { box-shadow: inset 0 0 0 1px var(--accent); }
+.memview .sp, .mem-legend i.sp { box-shadow: inset 0 0 0 1px #7ab8ff; }
+.memview .hl, .mem-legend i.hl { box-shadow: inset 0 0 0 1px #ffb86b; }
+.memview .selected { background: var(--accent); color: var(--bg); }
+.mem-legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 16px;
+  font-size: 13px;
+}
+#mem-info { font-variant-numeric: tabular-nums; }
+.mem-legend i {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin: 0 4px 0 8px;
+  border-radius: 2px;
+  vertical-align: -1px;
+}

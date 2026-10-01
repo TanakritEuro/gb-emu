@@ -97,7 +97,7 @@ Pick whichever sound most fun:
 - [ ] Deploy to GitHub Pages from CI, so the README has a "Play it" link
 - [ ] Debugger panel: registers, memory hex view, VRAM tile viewer, breakpoints, step button
   - [x] Registers, flags and the next instructions (a disassembler), with Step and Step frame
-  - [ ] Memory hex view: any address, live while running
+  - [x] Memory hex view: any address, live while running
   - [ ] VRAM tile viewer: all 384 tiles, and the background map with the visible area
   - [ ] Breakpoints: stop when PC reaches an address
 - [ ] Save states and rewind (hold a key to run time backwards)

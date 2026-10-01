@@ -77,6 +77,28 @@
         </div>
         <pre id="disasm" class="disasm" aria-label="Next instructions"></pre>
       </div>
+      <div class="memory">
+        <div class="toolbar">
+          <input id="mem-addr" type="text" size="12" spellcheck="false" autocomplete="off"
+                 placeholder="C000, PC, LY…" aria-label="Go to address (Enter)">
+          <button id="mem-prev" type="button" title="Back $100">◀</button>
+          <button id="mem-next" type="button" title="Forward $100">▶</button>
+          <label class="muted">Follow
+            <select id="mem-follow">
+              <option value="">nothing</option>
+              <option>PC</option>
+              <option>SP</option>
+              <option>HL</option>
+            </select>
+          </label>
+        </div>
+        <div id="mem-jumps" class="toolbar mem-jumps"></div>
+        <div id="mem-view" class="memview" aria-label="Memory"></div>
+        <div class="mem-legend muted">
+          <span id="mem-info"></span>
+          <span><i class="pc"></i>PC <i class="sp"></i>SP <i class="hl"></i>HL <i class="changed"></i>changed</span>
+        </div>
+      </div>
     </details>
 
     <details id="serial-panel">
