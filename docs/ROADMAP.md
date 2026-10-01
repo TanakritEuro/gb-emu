@@ -81,13 +81,14 @@ page reachable from a phone: `serve.js` on the LAN, or the GitHub Pages deploy i
 (Saves survive reloads, with the clock catching up. Mooneye MBC: 27/28; `mbc1/multicart_rom_8Mb`
 needs MBC1 multicart wiring, which isn't planned.)
 
-## Milestone 6 — Sound
+## Milestone 6 — Sound ✅
 
 - [x] Four channels: two square waves (one with sweep), wave, noise (plus mixer, high-pass filter, `gb-cli --wav`)
 - [x] Frame sequencer: length, envelope, sweep (blargg `dmg_sound`: 9/12; 09, 10 and 12 need CH3 wave-RAM access while playing)
 - [x] Output through a Web Audio `AudioWorklet`; let audio drive timing to avoid crackle
 
 **Done when:** music sounds right and doesn't pop.
+(Done: Tobu Tobu Girl's music plays cleanly, paced by the audio clock with no underruns.)
 
 ## Milestone 7 — Show-off features
 
