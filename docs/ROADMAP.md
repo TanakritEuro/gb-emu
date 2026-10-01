@@ -36,14 +36,14 @@ The big one: all 256 base opcodes and 256 `CB`-prefixed opcodes (minus 11 illega
 **Done when:** `cpu_instrs/individual/` 01 and 03–11 print "Passed".
 (02 needs interrupts, which is the next milestone.)
 
-## Milestone 2 — Interrupts and timing
+## Milestone 2 — Interrupts and timing ✅
 
 - [x] Interrupt dispatch in `Cpu::step`: priority order, push PC,
       clear IF bit and IME, 20 T-cycles
 - [x] `HALT` wake-up rules, the HALT bug (IME=0 with a pending interrupt). (`RETI` itself landed in milestone 1: `cpu_instrs` 07 needs it.)
 - [x] `STOP` ($10 $00): the combined `cpu_instrs.gb` runs it between tests. On DMG, treat it as a
       2-byte NOP for now (real hardware sleeps until a button press; `TODO(accuracy)` that)
-- [ ] Timer edge cases marked `TODO(accuracy)`
+- [x] Timer edge cases marked `TODO(accuracy)` (Mooneye `acceptance/timer`: 13/13)
 
 **Done when:** `cpu_instrs.gb` (all 11 in one ROM) passes, and `instr_timing.gb` passes.
 

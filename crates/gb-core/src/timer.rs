@@ -1,10 +1,25 @@
 //! DIV/TIMA/TMA/TAC timer.
 //!
 //! DIV is the upper byte of a 16-bit counter that ticks every T-cycle. TIMA
-//! increments when a selected bit of that counter falls from 1 to 0, which is
-//! how real hardware does it (and why writing DIV can bump TIMA).
+//! increments on a falling edge of "timer enabled AND selected counter bit",
+//! which is how real hardware does it. That's why writing DIV or TAC can bump
+//! TIMA: anything that makes that signal fall counts.
 //!
-//! Reference: https://gbdev.io/pandocs/Timer_and_Divider_Registers.html
+//! Reference: https://gbdev.io/pandocs/Timer_and_Divider_Registers.html and
+//! https://gbdev.io/pandocs/Timer_Obscure_Behaviour.html
+
+/// Where TIMA is in the two M-cycles after it overflows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Reload {
+    #[default]
+    Idle,
+    /// "Cycle A": TIMA reads $00. Holds the T-cycles left before the reload.
+    /// Writing TIMA now cancels the reload and the interrupt.
+    Pending(u8),
+    /// "Cycle B": TMA was just copied in and the interrupt requested. Holds
+    /// the T-cycles left. TIMA writes are ignored; TMA writes go to TIMA too.
+    Reloading(u8),
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct Timer {
@@ -12,6 +27,7 @@ pub struct Timer {
     tima: u8,
     tma: u8,
     tac: u8,
+    reload: Reload,
 }
 
 impl Timer {
@@ -19,36 +35,54 @@ impl Timer {
         Self::default()
     }
 
-    /// Which bit of the internal counter clocks TIMA, if the timer is enabled.
-    fn tima_bit(&self) -> Option<u16> {
+    /// The signal TIMA's falling-edge detector watches: the timer is enabled
+    /// and the counter bit TAC selects is 1. Pan Docs numbers these bits per
+    /// M-cycle (1, 3, 5, 7); counting T-cycles they're 3, 5, 7, 9.
+    fn signal(&self) -> bool {
         let bit = match self.tac & 0x03 {
             0 => 9, // 4096 Hz
             1 => 3, // 262144 Hz
             2 => 5, // 65536 Hz
             _ => 7, // 16384 Hz
         };
-        (self.tac & 0x04 != 0).then_some(bit)
+        self.tac & 0x04 != 0 && (self.counter >> bit) & 1 == 1
     }
 
-    fn increment_tima(&mut self) -> bool {
+    /// Runs `change` and increments TIMA if it made the signal fall.
+    fn update(&mut self, change: impl FnOnce(&mut Self)) {
+        let before = self.signal();
+        change(self);
+        if before && !self.signal() {
+            self.increment_tima();
+        }
+    }
+
+    /// On overflow TIMA reads $00 for one M-cycle; the reload comes after.
+    fn increment_tima(&mut self) {
         let (v, overflow) = self.tima.overflowing_add(1);
-        // TODO(accuracy): on hardware the reload and interrupt happen 4
-        // T-cycles after the overflow, and TIMA reads 0 meanwhile.
-        self.tima = if overflow { self.tma } else { v };
-        overflow
+        self.tima = v;
+        if overflow {
+            self.reload = Reload::Pending(4);
+        }
     }
 
-    /// Advances by `cycles` T-cycles. Returns true if TIMA overflowed.
+    /// Advances by `cycles` T-cycles. Returns true if TIMA was reloaded from
+    /// TMA, which is when the timer interrupt is requested.
     pub fn tick(&mut self, cycles: u32) -> bool {
         let mut irq = false;
         for _ in 0..cycles {
-            let old = self.counter;
-            self.counter = self.counter.wrapping_add(1);
-            if let Some(bit) = self.tima_bit() {
-                if (old >> bit) & 1 == 1 && (self.counter >> bit) & 1 == 0 {
-                    irq |= self.increment_tima();
+            self.reload = match self.reload {
+                Reload::Idle => Reload::Idle,
+                Reload::Pending(1) => {
+                    self.tima = self.tma;
+                    irq = true;
+                    Reload::Reloading(4)
                 }
-            }
+                Reload::Pending(n) => Reload::Pending(n - 1),
+                Reload::Reloading(1) => Reload::Idle,
+                Reload::Reloading(n) => Reload::Reloading(n - 1),
+            };
+            self.update(|t| t.counter = t.counter.wrapping_add(1));
         }
         irq
     }
@@ -65,10 +99,25 @@ impl Timer {
 
     pub fn write(&mut self, addr: u16, val: u8) {
         match addr {
-            0xFF04 => self.counter = 0,
-            0xFF05 => self.tima = val,
-            0xFF06 => self.tma = val,
-            0xFF07 => self.tac = val & 0x07,
+            // Resetting the counter can make the watched bit fall.
+            0xFF04 => self.update(|t| t.counter = 0),
+            0xFF05 => match self.reload {
+                Reload::Pending(_) => {
+                    self.tima = val;
+                    self.reload = Reload::Idle;
+                }
+                Reload::Reloading(_) => {}
+                Reload::Idle => self.tima = val,
+            },
+            0xFF06 => {
+                self.tma = val;
+                if let Reload::Reloading(_) = self.reload {
+                    self.tima = val;
+                }
+            }
+            // A new clock select or disabling the timer can make it fall too
+            // (DMG behavior; CGB differs).
+            0xFF07 => self.update(|t| t.tac = val & 0x07),
             _ => {}
         }
     }
@@ -97,14 +146,92 @@ mod tests {
         assert_eq!(t.read(0xFF05), 3);
     }
 
-    #[test]
-    fn tima_overflow_reloads_tma_and_requests_interrupt() {
+    /// A timer at the fastest rate (every 16 T-cycles) about to overflow, with
+    /// TMA = $42.
+    fn about_to_overflow() -> Timer {
         let mut t = Timer::new();
         t.write(0xFF06, 0x42);
         t.write(0xFF05, 0xFF);
         t.write(0xFF07, 0b101);
-        assert!(t.tick(16));
+        t
+    }
+
+    #[test]
+    fn tima_overflow_reads_zero_for_one_m_cycle_then_reloads() {
+        let mut t = about_to_overflow();
+        assert!(!t.tick(16), "overflow itself doesn't request the interrupt");
+        assert_eq!(t.read(0xFF05), 0x00);
+        assert!(!t.tick(3));
+        assert_eq!(t.read(0xFF05), 0x00, "still $00 for the whole M-cycle");
+        assert!(t.tick(1), "reload and interrupt 4 T-cycles after overflow");
         assert_eq!(t.read(0xFF05), 0x42);
+    }
+
+    #[test]
+    fn writing_tima_while_it_reads_zero_cancels_the_reload() {
+        let mut t = about_to_overflow();
+        t.tick(16);
+        t.write(0xFF05, 0x10);
+        assert!(!t.tick(8), "no interrupt");
+        assert_eq!(t.read(0xFF05), 0x10, "no TMA reload");
+    }
+
+    #[test]
+    fn writing_tima_during_the_reload_cycle_is_ignored() {
+        let mut t = about_to_overflow();
+        t.tick(20);
+        t.write(0xFF05, 0x10);
+        assert_eq!(t.read(0xFF05), 0x42);
+        t.tick(4);
+        t.write(0xFF05, 0x10);
+        assert_eq!(t.read(0xFF05), 0x10, "writes work again a cycle later");
+    }
+
+    #[test]
+    fn writing_tma_during_the_reload_cycle_reaches_tima() {
+        let mut t = about_to_overflow();
+        t.tick(20);
+        t.write(0xFF06, 0x99);
+        assert_eq!(t.read(0xFF05), 0x99);
+        assert_eq!(t.read(0xFF06), 0x99);
+    }
+
+    #[test]
+    fn writing_div_ticks_tima_if_the_watched_bit_was_set() {
+        // Fastest rate watches counter bit 3.
+        let mut t = Timer::new();
+        t.write(0xFF07, 0b101);
+        t.tick(8); // bit 3 is now 1
+        t.write(0xFF04, 0);
+        assert_eq!(t.read(0xFF05), 1, "reset made bit 3 fall");
+
+        t.tick(4); // bit 3 is 0
+        t.write(0xFF04, 0);
+        assert_eq!(t.read(0xFF05), 1, "no falling edge, no tick");
+    }
+
+    #[test]
+    fn writing_tac_ticks_tima_when_the_signal_falls() {
+        // Switch from bit 3 (set) to bit 5 (clear): falling edge.
+        let mut t = Timer::new();
+        t.write(0xFF07, 0b101);
+        t.tick(8);
+        t.write(0xFF07, 0b110);
+        assert_eq!(t.read(0xFF05), 1);
+
+        // Disabling while the watched bit is set: falling edge (DMG).
+        let mut t = Timer::new();
+        t.write(0xFF07, 0b101);
+        t.tick(8);
+        t.write(0xFF07, 0b001);
+        assert_eq!(t.read(0xFF05), 1);
+
+        // Enabling while the bit is set is a rising edge: nothing.
+        let mut t = Timer::new();
+        t.write(0xFF07, 0b001);
+        t.tick(8);
+        t.write(0xFF07, 0b101);
+        assert_eq!(t.read(0xFF05), 0);
     }
 
     #[test]
