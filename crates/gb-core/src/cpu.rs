@@ -156,6 +156,9 @@ pub struct Cpu {
     /// EI takes effect after the instruction that follows it.
     ime_pending: bool,
     pub halted: bool,
+    /// Set by HALT when it hits the HALT bug: the next opcode fetch doesn't
+    /// advance PC. See the HALT arm in `execute`.
+    halt_bug: bool,
 }
 
 impl Cpu {
@@ -180,6 +183,7 @@ impl Cpu {
         self.ime = false;
         self.ime_pending = false;
         self.halted = false;
+        self.halt_bug = false;
     }
 
     fn fetch8(&mut self, bus: &Bus) -> u8 {
@@ -484,7 +488,15 @@ impl Cpu {
         let bit = pending.trailing_zeros() as u8;
         bus.if_reg &= !(1 << bit);
         self.ime = false;
-        self.push16(bus, self.regs.pc);
+        // EI ; HALT with an interrupt pending hits the HALT bug and then
+        // dispatches here: the handler returns to the HALT, which runs again.
+        // https://gbdev.io/pandocs/halt.html
+        let ret = if std::mem::take(&mut self.halt_bug) {
+            self.regs.pc.wrapping_sub(1)
+        } else {
+            self.regs.pc
+        };
+        self.push16(bus, ret);
         self.regs.pc = 0x40 + 8 * u16::from(bit);
         20
     }
@@ -509,7 +521,13 @@ impl Cpu {
 
         let enable_ime_after = std::mem::take(&mut self.ime_pending);
         let pc = self.regs.pc;
-        let opcode = self.fetch8(bus);
+        // After the HALT bug, PC isn't advanced past this opcode, so the
+        // byte after HALT is read twice.
+        let opcode = if std::mem::take(&mut self.halt_bug) {
+            bus.read(pc)
+        } else {
+            self.fetch8(bus)
+        };
 
         let cycles = match self.execute(Opcode::new(opcode), bus) {
             Ok(cycles) => cycles,
@@ -655,8 +673,18 @@ impl Cpu {
             },
 
             // Block 1: LD r[y], r[z]. The slot for LD (HL),(HL) is HALT.
+            // HALT sleeps until an interrupt is pending (`step` wakes it). With
+            // IME off and one already pending, it doesn't sleep and instead
+            // triggers the HALT bug. https://gbdev.io/pandocs/halt.html
+            // TODO(accuracy): HALT ; HALT under the bug just retriggers it here.
+            // Check against nitro2k01's double-halt-cancel test
+            // (github.com/nitro2k01/little-things-gb, not in the c-sp bundle).
             1 if op.y == 6 && op.z == 6 => {
-                self.halted = true;
+                if !self.ime && bus.pending_interrupts() != 0 {
+                    self.halt_bug = true;
+                } else {
+                    self.halted = true;
+                }
                 Ok(4)
             }
             1 => {
@@ -2081,5 +2109,95 @@ mod tests {
         assert!(!cpu.halted);
         assert_eq!(cpu.regs.pc, 0x50);
         assert_eq!(bus.read16(cpu.regs.sp), 0xC001, "returns after the HALT");
+    }
+
+    #[test]
+    fn halt_with_ime_off_wakes_without_calling_the_handler() {
+        // HALT ; INC A with IME off and nothing pending yet
+        let (mut cpu, mut bus) = setup_irq(&[0x76, 0x3C], interrupt::TIMER, 0);
+        cpu.ime = false;
+        cpu.regs.a = 0;
+        cpu.step(&mut bus).unwrap();
+        assert!(cpu.halted);
+        assert_eq!(cpu.step(&mut bus), Ok(4), "still halted");
+
+        bus.if_reg |= interrupt::TIMER;
+        assert_eq!(cpu.step(&mut bus), Ok(4), "wakes and runs INC A");
+        assert!(!cpu.halted);
+        assert_eq!(cpu.regs.a, 1);
+        assert_eq!(cpu.regs.pc, 0xC002);
+        assert_eq!(cpu.regs.sp, 0xD000, "no handler call");
+        assert_eq!(
+            bus.if_reg & interrupt::TIMER,
+            interrupt::TIMER,
+            "IF stays set"
+        );
+    }
+
+    #[test]
+    fn pending_interrupt_with_ime_on_is_served_before_halt_runs() {
+        // Interrupts are checked between instructions, so HALT never gets to
+        // sleep; the handler returns to it and it sleeps then.
+        let (mut cpu, mut bus) = setup_irq(&[0x76], interrupt::TIMER, interrupt::TIMER);
+        assert_eq!(cpu.step(&mut bus), Ok(20));
+        assert!(!cpu.halted);
+        assert_eq!(cpu.regs.pc, 0x50);
+        assert_eq!(bus.read16(cpu.regs.sp), 0xC000, "returns to the HALT");
+    }
+
+    #[test]
+    fn halt_bug_runs_the_next_byte_twice() {
+        // HALT ; INC A with IME off and an interrupt already pending
+        let (mut cpu, mut bus) = setup_irq(&[0x76, 0x3C, 0x00], interrupt::TIMER, interrupt::TIMER);
+        cpu.ime = false;
+        cpu.regs.a = 0;
+        cpu.step(&mut bus).unwrap();
+        assert!(!cpu.halted, "HALT doesn't sleep");
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.regs.pc, 0xC001, "PC didn't advance");
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.regs.a, 2, "INC A ran twice");
+        assert_eq!(cpu.regs.pc, 0xC002);
+    }
+
+    #[test]
+    fn halt_bug_rereads_the_opcode_as_its_own_operand() {
+        // HALT ; LD A,$3C runs as LD A,$3E (the opcode byte read again as the
+        // operand) followed by INC A ($3C).
+        let (mut cpu, mut bus) = setup_irq(&[0x76, 0x3E, 0x3C], interrupt::TIMER, interrupt::TIMER);
+        cpu.ime = false;
+        cpu.step(&mut bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.regs.a, 0x3E);
+        assert_eq!(cpu.regs.pc, 0xC002);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.regs.a, 0x3F);
+    }
+
+    #[test]
+    fn halt_bug_then_rst_returns_to_the_rst() {
+        // HALT ; RST $28 under the bug: the pushed return address is the RST.
+        let (mut cpu, mut bus) = setup_irq(&[0x76, 0xEF], interrupt::TIMER, interrupt::TIMER);
+        cpu.ime = false;
+        cpu.step(&mut bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.regs.pc, 0x28);
+        assert_eq!(bus.read16(cpu.regs.sp), 0xC001);
+    }
+
+    #[test]
+    fn ei_then_halt_with_pending_interrupt_returns_to_the_halt() {
+        // EI ; HALT with IME off and an interrupt pending
+        let (mut cpu, mut bus) = setup_irq(&[0xFB, 0x76, 0x00], interrupt::TIMER, interrupt::TIMER);
+        cpu.ime = false;
+        cpu.step(&mut bus).unwrap(); // EI
+        cpu.step(&mut bus).unwrap(); // HALT: IME is still off, so the bug
+        assert_eq!(cpu.step(&mut bus), Ok(20));
+        assert_eq!(cpu.regs.pc, 0x50);
+        assert_eq!(
+            bus.read16(cpu.regs.sp),
+            0xC001,
+            "returns to the HALT itself"
+        );
     }
 }
