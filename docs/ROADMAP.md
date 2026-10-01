@@ -67,8 +67,8 @@ First homebrew title screen shows up in the browser. 🎉
 
 **Done when:** you can play a homebrew game from [Homebrew Hub](https://hh.gbdev.io/)
 start to finish on your phone.
-(Pending: all four steps are in, but the phone playthrough hasn't been done yet. Needs the
-page reachable from a phone: `serve.js` on the LAN, or the GitHub Pages deploy in milestone 7.)
+(Pending: all four steps are in, but the phone playthrough hasn't been done yet. The page is
+now reachable from a phone at https://tanakriteuro.github.io/gb-emu/.)
 
 ## Milestone 5 — More cartridges and saves
 
@@ -94,7 +94,8 @@ needs MBC1 multicart wiring, which isn't planned.)
 
 Pick whichever sound most fun:
 
-- [ ] Deploy to GitHub Pages from CI, so the README has a "Play it" link
+- [x] Deploy to GitHub Pages from CI, so the README has a "Play it" link
+      (https://tanakriteuro.github.io/gb-emu/, from `.github/workflows/ci.yml`)
 - [x] Debugger panel: registers, memory hex view, VRAM tile viewer, breakpoints, step button
   - [x] Registers, flags and the next instructions (a disassembler), with Step and Step frame
   - [x] Memory hex view: any address, live while running
