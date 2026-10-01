@@ -28,19 +28,21 @@ fn runs_a_frame_of_a_tiny_program() {
 }
 
 #[test]
-fn reports_the_first_missing_instruction() {
-    // STOP isn't implemented yet. When it is, change this test to use an
-    // opcode that still isn't (or delete it once the CPU is complete).
-    let mut gb = GameBoy::new(rom(&[0x10, 0x00])).unwrap();
+fn reports_illegal_opcodes() {
+    // $DD is one of the 11 holes in the opcode table.
+    let mut gb = GameBoy::new(rom(&[0xDD])).unwrap();
     let err = gb.run_frame().unwrap_err();
     assert_eq!(
         err,
-        CpuError::Unimplemented {
-            opcode: 0x10,
+        CpuError::Illegal {
+            opcode: 0xDD,
             pc: 0x0150
         }
     );
-    assert_eq!(err.to_string(), "unimplemented opcode 10 at $0150");
+    assert_eq!(
+        err.to_string(),
+        "illegal opcode DD at $0150 (real hardware locks up here)"
+    );
 }
 
 #[test]

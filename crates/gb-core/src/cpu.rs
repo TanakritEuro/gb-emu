@@ -2,7 +2,8 @@
 //!
 //! Opcodes are decoded by bit pattern (see `Opcode`); `Cpu::execute` is the
 //! whole instruction table laid out by group, and `Cpu::execute_cb` the
-//! $CB-prefixed one. Arms that return `MISSING` (now only STOP) report [`CpuError::Unimplemented`] with the opcode and where it was hit.
+//! $CB-prefixed one. Every legal opcode is implemented; the 11 illegal ones
+//! return [`CpuError::Illegal`].
 //!
 //! Opcode reference: https://gbdev.io/gb-opcodes/optables/
 //! Cycle counts here are T-cycles (4 per M-cycle).
@@ -136,17 +137,12 @@ impl Opcode {
     }
 }
 
-/// Why [`Cpu::execute`] couldn't run an opcode. `step` adds the address and
-/// turns it into a [`CpuError`].
+/// [`Cpu::execute`] hit an illegal opcode. `step` adds the opcode and address
+/// and turns it into [`CpuError::Illegal`].
 #[derive(Debug)]
-enum Fault {
-    Unimplemented,
-    Illegal,
-}
+struct Illegal;
 
-/// An instruction group that hasn't been written yet.
-const MISSING: Result<u32, Fault> = Err(Fault::Unimplemented);
-const ILLEGAL: Result<u32, Fault> = Err(Fault::Illegal);
+const ILLEGAL: Result<u32, Illegal> = Err(Illegal);
 
 #[derive(Debug, Clone, Default)]
 pub struct Cpu {
@@ -531,8 +527,7 @@ impl Cpu {
 
         let cycles = match self.execute(Opcode::new(opcode), bus) {
             Ok(cycles) => cycles,
-            Err(Fault::Unimplemented) => return Err(CpuError::Unimplemented { opcode, pc }),
-            Err(Fault::Illegal) => return Err(CpuError::Illegal { opcode, pc }),
+            Err(Illegal) => return Err(CpuError::Illegal { opcode, pc }),
         };
 
         // EI followed directly by DI leaves interrupts disabled.
@@ -546,7 +541,7 @@ impl Cpu {
     ///
     /// Arms follow the four blocks (`x`), then `z`, then `y`/`p`/`q`.
     /// Notation is explained on [`Opcode`].
-    fn execute(&mut self, op: Opcode, bus: &mut Bus) -> Result<u32, Fault> {
+    fn execute(&mut self, op: Opcode, bus: &mut Bus) -> Result<u32, Illegal> {
         match op.x {
             // Block 0: misc, 16-bit loads and arithmetic, INC/DEC, LD r,d8.
             0 => match op.z {
@@ -558,7 +553,16 @@ impl Cpu {
                         bus.write16(addr, self.regs.sp);
                         Ok(20)
                     }
-                    2 => MISSING, // STOP
+                    // STOP: two bytes, the second ignored. Resets DIV.
+                    // https://gbdev.io/pandocs/Reducing_Power_Consumption.html
+                    // TODO(accuracy): a DMG really stops the CPU, timer and LCD
+                    // until a button is pressed, and in some situations (Pan
+                    // Docs' STOP flowchart) acts as 1 byte. Few games rely on it.
+                    2 => {
+                        self.fetch8(bus);
+                        bus.write(0xFF04, 0);
+                        Ok(4)
+                    }
                     // JR e8
                     3 => {
                         let offset = self.fetch8(bus);
@@ -1088,18 +1092,28 @@ mod tests {
     }
 
     #[test]
-    fn unimplemented_opcode_reports_where() {
-        // STOP is the last unimplemented opcode. Delete this test once it's
-        // written (nothing will be left to report).
-        let (mut cpu, mut bus) = setup(&[0x00, 0x10, 0x00]);
+    fn stop_skips_its_second_byte_and_resets_div() {
+        // STOP $00 ; INC A
+        let (mut cpu, mut bus) = setup(&[0x10, 0x00, 0x3C]);
+        bus.tick(1000);
+        assert_ne!(bus.read(0xFF04), 0, "DIV has been counting");
+        cpu.regs.a = 0;
+        assert_eq!(cpu.step(&mut bus), Ok(4));
+        assert_eq!(cpu.regs.pc, 0x0102);
+        assert_eq!(bus.read(0xFF04), 0);
         cpu.step(&mut bus).unwrap();
-        assert_eq!(
-            cpu.step(&mut bus),
-            Err(CpuError::Unimplemented {
-                opcode: 0x10,
-                pc: 0x0101
-            })
-        );
+        assert_eq!(cpu.regs.a, 1, "execution carries on after STOP");
+    }
+
+    #[test]
+    fn every_legal_opcode_runs() {
+        for op in 0..=255u8 {
+            let (mut cpu, mut bus) = setup_wram(&[op, 0x00, 0x00]);
+            match cpu.step(&mut bus) {
+                Ok(_) | Err(CpuError::Illegal { .. }) => {}
+                Err(e) => panic!("opcode {op:02X}: {e}"),
+            }
+        }
     }
 
     /// A CPU with distinct values in every register and HL pointing at
