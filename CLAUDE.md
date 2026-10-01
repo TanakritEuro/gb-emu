@@ -8,7 +8,7 @@ A Game Boy (DMG) emulator in Rust that runs in the browser via WebAssembly.
   - `cpu.rs` SM83 CPU (registers, fetch/decode/execute)
   - `bus.rs` memory map; routes every read/write; IF/IE; serial; OAM DMA
   - `cartridge.rs` header parsing + MBCs (ROM-only, MBC1)
-  - `ppu.rs` scanline timing, STAT/LY, framebuffer (background and window rendering; sprites next)
+  - `ppu.rs` scanline timing, STAT/LY, framebuffer (scanline renderer: background, window, sprites)
   - `timer.rs` DIV/TIMA/TMA/TAC
   - `joypad.rs` $FF00
   - `tests/smoke.rs` end-to-end tests through the public `GameBoy` API

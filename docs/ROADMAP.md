@@ -51,7 +51,7 @@ The big one: all 256 base opcodes and 256 `CB`-prefixed opcodes (minus 11 illega
 
 - [x] Background: tile data, tile maps, SCX/SCY scrolling, BGP palette
 - [x] Window layer (WX/WY, its own line counter)
-- [ ] Sprites: OAM scan (10 per line), 8×8 and 8×16, flips, OBP0/OBP1, priority
+- [x] Sprites: OAM scan (10 per line), 8×8 and 8×16, flips, OBP0/OBP1, priority (dmg-acid2 matches pixel for pixel)
 - [ ] STAT interrupts on mode changes; LCD off/on behavior
 
 **Done when:** `dmg-acid2.gb` matches its reference image pixel for pixel.

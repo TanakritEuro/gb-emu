@@ -2,7 +2,7 @@
 //!
 //! Timing is in place: LY advances every 456 dots, VBlank fires at line 144,
 //! and the LYC=LY comparison sets STAT. Each finished line is drawn into the
-//! framebuffer; so far that's the background layer only.
+//! framebuffer: background, window, then sprites.
 //!
 //! Reference: https://gbdev.io/pandocs/Rendering.html
 
@@ -176,17 +176,19 @@ impl Ppu {
     }
 
     /// Draws line LY into the framebuffer, all at once at the end of the line:
-    /// the background, with the window over it from WX-7 rightward.
+    /// the background, the window over it from WX-7 rightward, then sprites.
     /// TODO(accuracy): hardware pushes pixels through a FIFO during mode 3, so
     /// register writes in the middle of a line (e.g. SCX) take effect mid-line.
-    /// TODO(milestone 3): sprites.
     fn render_scanline(&mut self) {
+        let (sprites, count) = self.sprites_on_line();
+        let sprites = &sprites[..count];
         // The window's "Y condition": once WY == LY at the start of a line, it
         // holds for the rest of the frame. https://gbdev.io/pandocs/Window.html
         if self.ly == self.wy {
             self.wy_triggered = true;
         }
-        // LCDC bit 0 off blanks the background and the window on DMG.
+        // LCDC bit 0 off blanks the background and the window on DMG: they
+        // count as color 0 (for sprite priority too), shown through BGP.
         let bg_on = self.lcdc & 0x01 != 0;
         let window_on = bg_on && self.lcdc & 0x20 != 0 && self.wy_triggered && self.wx <= 166;
         // Screen column where the window starts. TODO(accuracy): WX 0 also
@@ -195,20 +197,34 @@ impl Ppu {
 
         let row = usize::from(self.ly) * SCREEN_WIDTH;
         for x in 0..SCREEN_WIDTH as u8 {
-            let shade = if !bg_on {
+            // Background/window color index; a blanked background counts as 0.
+            let bg_index = if !bg_on {
                 0
+            } else if window_on && i16::from(x) >= window_x {
+                // The window doesn't scroll: its own map, from its (0,0).
+                let wx = (i16::from(x) - window_x) as u8;
+                self.map_pixel(self.lcdc & 0x40 != 0, wx, self.window_line)
             } else {
-                let index = if window_on && i16::from(x) >= window_x {
-                    // The window doesn't scroll: its own map, from its (0,0).
-                    let wx = (i16::from(x) - window_x) as u8;
-                    self.map_pixel(self.lcdc & 0x40 != 0, wx, self.window_line)
-                } else {
-                    let map_x = x.wrapping_add(self.scx);
-                    let map_y = self.ly.wrapping_add(self.scy);
-                    self.map_pixel(self.lcdc & 0x08 != 0, map_x, map_y)
-                };
-                (self.bgp >> (index * 2)) & 0x03
+                let map_x = x.wrapping_add(self.scx);
+                let map_y = self.ly.wrapping_add(self.scy);
+                self.map_pixel(self.lcdc & 0x08 != 0, map_x, map_y)
             };
+            // A blanked background shows BGP's color 0 (usually white).
+            let mut shade = (self.bgp >> (bg_index * 2)) & 0x03;
+
+            // The winning sprite pixel is picked first; only then does its
+            // "BG over OBJ" bit decide whether BG colors 1-3 cover it.
+            if let Some((color, attrs)) = self.sprite_pixel(sprites, x) {
+                if attrs & 0x80 == 0 || bg_index == 0 {
+                    let palette = if attrs & 0x10 != 0 {
+                        self.obp1
+                    } else {
+                        self.obp0
+                    };
+                    shade = (palette >> (color * 2)) & 0x03;
+                }
+            }
+
             let i = (row + usize::from(x)) * 4;
             self.framebuffer[i..i + 4].copy_from_slice(&DMG_PALETTE[usize::from(shade)]);
         }
@@ -242,11 +258,88 @@ impl Ppu {
         } else {
             0x1000u16.wrapping_add_signed(i16::from(tile as i8) * 16)
         };
-        let addr = usize::from(base) + usize::from(row) * 2;
+        self.tile_data_pixel(usize::from(base), col, row)
+    }
+
+    /// Color index of pixel (`col`, `row`) in the tile at VRAM offset `base`.
+    fn tile_data_pixel(&self, base: usize, col: u8, row: u8) -> u8 {
+        let addr = base + usize::from(row) * 2;
         let (lo, hi) = (self.vram[addr], self.vram[addr + 1]);
         let bit = 7 - col;
         (((hi >> bit) & 1) << 1) | ((lo >> bit) & 1)
     }
+
+    /// Sprite height from LCDC bit 2: 8 or 16 pixels.
+    fn sprite_height(&self) -> i16 {
+        if self.lcdc & 0x04 != 0 {
+            16
+        } else {
+            8
+        }
+    }
+
+    /// The sprites on line LY, in drawing-priority order (first wins), and how
+    /// many there are. Like the hardware: walk OAM in order, keep the first 10
+    /// whose rows cover LY (X doesn't matter, so off-screen ones still use up
+    /// slots), then on DMG the smaller X wins, and OAM order breaks ties.
+    /// Empty when LCDC bit 1 turns sprites off. https://gbdev.io/pandocs/OAM.html
+    fn sprites_on_line(&self) -> ([Sprite; 10], usize) {
+        let mut found = [Sprite::default(); 10];
+        let mut count = 0;
+        if self.lcdc & 0x02 != 0 {
+            let height = self.sprite_height();
+            for &[y, x, tile, attrs] in self.oam.as_chunks::<4>().0 {
+                let top = i16::from(y) - 16;
+                if (top..top + height).contains(&i16::from(self.ly)) {
+                    found[count] = Sprite { y, x, tile, attrs };
+                    count += 1;
+                    if count == found.len() {
+                        break;
+                    }
+                }
+            }
+        }
+        // A stable sort, so equal X keeps OAM order.
+        found[..count].sort_by_key(|s| s.x);
+        (found, count)
+    }
+
+    /// The color index (1-3) and attributes of the highest-priority sprite
+    /// with a visible pixel at screen column `x`. Color 0 is transparent, so a
+    /// lower sprite can show through it.
+    fn sprite_pixel(&self, sprites: &[Sprite], x: u8) -> Option<(u8, u8)> {
+        let height = self.sprite_height();
+        sprites.iter().find_map(|s| {
+            let col = i16::from(x) - (i16::from(s.x) - 8);
+            if !(0..8).contains(&col) {
+                return None;
+            }
+            let mut row = i16::from(self.ly) - (i16::from(s.y) - 16);
+            if s.attrs & 0x40 != 0 {
+                row = height - 1 - row; // Y flip, over all 16 rows in 8x16
+            }
+            let col = if s.attrs & 0x20 != 0 { 7 - col } else { col }; // X flip
+                                                                       // Sprites always use $8000 addressing. In 8x16 mode the tile
+                                                                       // number's low bit is ignored: top half even, bottom half odd.
+            let tile = if height == 16 {
+                (s.tile & 0xFE) | u8::from(row >= 8)
+            } else {
+                s.tile
+            };
+            let color = self.tile_data_pixel(usize::from(tile) * 16, col as u8, (row % 8) as u8);
+            (color != 0).then_some((color, s.attrs))
+        })
+    }
+}
+
+/// One OAM entry: Y+16, X+8, tile number, attributes (bit 7 BG over OBJ,
+/// 6 Y flip, 5 X flip, 4 OBP1). https://gbdev.io/pandocs/OAM.html
+#[derive(Debug, Clone, Copy, Default)]
+struct Sprite {
+    y: u8,
+    x: u8,
+    tile: u8,
+    attrs: u8,
 }
 
 #[cfg(test)]
@@ -398,12 +491,17 @@ mod tests {
     }
 
     #[test]
-    fn lcdc_bit_0_off_blanks_the_background() {
+    fn lcdc_bit_0_off_shows_bgp_color_0() {
         let mut p = bg_ppu();
         put_tile(&mut p, 0x8000, striped(0xFF, 0xFF));
         p.lcdc &= !0x01;
         p.render_scanline();
-        assert_eq!(shade_at(&p, 0, 0), 0);
+        assert_eq!(shade_at(&p, 0, 0), 0, "identity BGP: white");
+
+        // dmg-acid2's hair rows rely on this being BGP's color 0, not white.
+        p.bgp = 0b00_00_00_10;
+        p.render_scanline();
+        assert_eq!(shade_at(&p, 0, 0), 2);
     }
 
     /// Background all blank (tile 0). Window on, using the $9C00 map, whose
@@ -511,5 +609,193 @@ mod tests {
         assert_eq!(shade_at(&p, 0, 7), 0);
         assert_eq!(shade_at(&p, 0, 8), 3);
         assert_eq!(shade_at(&p, 8, 8), 0);
+    }
+
+    /// Background blank, sprites on (8x8), OBP0 identity, OBP1 sends color 1
+    /// to shade 3. Tiles 1/2/3 are solid colors 1/2/3; tile 4 is color 0 on
+    /// its left half and color 1 on its right half.
+    fn sprite_ppu() -> Ppu {
+        let mut p = bg_ppu();
+        p.lcdc |= 0x02;
+        p.obp0 = 0b11_10_01_00;
+        p.obp1 = 0b00_00_11_00;
+        put_tile(&mut p, 0x8010, striped(0xFF, 0x00));
+        put_tile(&mut p, 0x8020, striped(0x00, 0xFF));
+        put_tile(&mut p, 0x8030, striped(0xFF, 0xFF));
+        put_tile(&mut p, 0x8040, striped(0x0F, 0x00));
+        p
+    }
+
+    /// OAM entry `i` with *screen* coordinates (the +16/+8 offsets added here).
+    fn put_sprite(p: &mut Ppu, i: u16, x: i16, y: i16, tile: u8, attrs: u8) {
+        let base = 0xFE00 + i * 4;
+        p.write_oam(base, (y + 16) as u8);
+        p.write_oam(base + 1, (x + 8) as u8);
+        p.write_oam(base + 2, tile);
+        p.write_oam(base + 3, attrs);
+    }
+
+    fn draw_line(p: &mut Ppu, ly: u8) {
+        p.ly = ly;
+        p.render_scanline();
+    }
+
+    fn shades(p: &Ppu, y: usize, xs: std::ops::Range<usize>) -> Vec<usize> {
+        xs.map(|x| shade_at(p, x, y)).collect()
+    }
+
+    #[test]
+    fn sprite_position_is_offset_by_8_and_16() {
+        let mut p = sprite_ppu();
+        put_sprite(&mut p, 0, 20, 10, 1, 0);
+        draw_line(&mut p, 10);
+        assert_eq!(shades(&p, 10, 19..29), [0, 1, 1, 1, 1, 1, 1, 1, 1, 0]);
+        draw_line(&mut p, 9);
+        assert_eq!(shade_at(&p, 20, 9), 0, "above it");
+        draw_line(&mut p, 17);
+        assert_eq!(shade_at(&p, 20, 17), 1, "its last row");
+        draw_line(&mut p, 18);
+        assert_eq!(shade_at(&p, 20, 18), 0, "below it");
+    }
+
+    #[test]
+    fn sprite_color_0_is_transparent_and_palette_comes_from_obp() {
+        let mut p = sprite_ppu();
+        for col in 0..32 {
+            p.write_vram(0x9800 + col, 2); // background color 2
+        }
+        put_sprite(&mut p, 0, 0, 0, 4, 0);
+        draw_line(&mut p, 0);
+        assert_eq!(shades(&p, 0, 0..8), [2, 2, 2, 2, 1, 1, 1, 1], "OBP0");
+
+        put_sprite(&mut p, 0, 0, 0, 4, 0x10);
+        draw_line(&mut p, 0);
+        assert_eq!(shades(&p, 0, 0..8), [2, 2, 2, 2, 3, 3, 3, 3], "OBP1");
+    }
+
+    #[test]
+    fn sprites_flip_horizontally_and_vertically() {
+        let mut p = sprite_ppu();
+        // Tile 5: just its top-left pixel set.
+        let mut tile = [0; 16];
+        tile[0] = 0x80;
+        put_tile(&mut p, 0x8050, tile);
+
+        put_sprite(&mut p, 0, 0, 0, 5, 0);
+        draw_line(&mut p, 0);
+        assert_eq!((shade_at(&p, 0, 0), shade_at(&p, 7, 0)), (1, 0));
+
+        put_sprite(&mut p, 0, 0, 0, 5, 0x20); // X flip
+        draw_line(&mut p, 0);
+        assert_eq!((shade_at(&p, 0, 0), shade_at(&p, 7, 0)), (0, 1));
+
+        put_sprite(&mut p, 0, 0, 0, 5, 0x40); // Y flip: now the bottom row
+        draw_line(&mut p, 0);
+        assert_eq!(shade_at(&p, 0, 0), 0);
+        draw_line(&mut p, 7);
+        assert_eq!(shade_at(&p, 0, 7), 1);
+    }
+
+    #[test]
+    fn tall_sprites_ignore_the_low_tile_bit_and_flip_all_16_rows() {
+        let mut p = sprite_ppu();
+        p.lcdc |= 0x04;
+        put_tile(&mut p, 0x8060, striped(0xFF, 0x00)); // tile 6: color 1
+        put_tile(&mut p, 0x8070, striped(0x00, 0xFF)); // tile 7: color 2
+        put_sprite(&mut p, 0, 0, 0, 7, 0); // odd number: top is still tile 6
+        for (ly, want) in [(0, 1), (7, 1), (8, 2), (15, 2), (16, 0)] {
+            draw_line(&mut p, ly);
+            assert_eq!(shade_at(&p, 0, usize::from(ly)), want, "line {ly}");
+        }
+        put_sprite(&mut p, 0, 0, 0, 6, 0x40);
+        for (ly, want) in [(0, 2), (15, 1)] {
+            draw_line(&mut p, ly);
+            assert_eq!(shade_at(&p, 0, usize::from(ly)), want, "flipped, line {ly}");
+        }
+    }
+
+    #[test]
+    fn lcdc_bit_1_turns_sprites_off() {
+        let mut p = sprite_ppu();
+        p.lcdc &= !0x02;
+        put_sprite(&mut p, 0, 0, 0, 3, 0);
+        draw_line(&mut p, 0);
+        assert_eq!(shade_at(&p, 0, 0), 0);
+    }
+
+    #[test]
+    fn only_the_first_10_sprites_on_a_line_count_even_off_screen_ones() {
+        let mut p = sprite_ppu();
+        for i in 0..9 {
+            put_sprite(&mut p, i, -8, 0, 3, 0); // X = 0: off-screen, still counted
+        }
+        put_sprite(&mut p, 9, 50, 0, 3, 0); // the 10th: drawn
+        put_sprite(&mut p, 10, 90, 0, 3, 0); // the 11th: dropped
+        draw_line(&mut p, 0);
+        assert_eq!(shade_at(&p, 50, 0), 3);
+        assert_eq!(shade_at(&p, 90, 0), 0);
+    }
+
+    #[test]
+    fn overlapping_sprites_smaller_x_then_oam_order_wins() {
+        let mut p = sprite_ppu();
+        put_sprite(&mut p, 0, 10, 0, 1, 0);
+        put_sprite(&mut p, 1, 6, 0, 3, 0); // later in OAM but further left
+        draw_line(&mut p, 0);
+        assert_eq!(shades(&p, 0, 10..16), [3, 3, 3, 3, 1, 1]);
+
+        let mut p = sprite_ppu();
+        put_sprite(&mut p, 0, 10, 0, 1, 0);
+        put_sprite(&mut p, 1, 10, 0, 3, 0); // same X: OAM order decides
+        draw_line(&mut p, 0);
+        assert_eq!(shade_at(&p, 10, 0), 1);
+    }
+
+    #[test]
+    fn a_winning_sprites_transparent_pixel_shows_the_one_below() {
+        let mut p = sprite_ppu();
+        put_sprite(&mut p, 0, 6, 0, 4, 0); // color 0 at 6-9, color 1 at 10-13
+        put_sprite(&mut p, 1, 8, 0, 3, 0); // color 3 at 8-15
+        draw_line(&mut p, 0);
+        assert_eq!(shades(&p, 0, 6..16), [0, 0, 3, 3, 1, 1, 1, 1, 3, 3]);
+    }
+
+    #[test]
+    fn bg_over_obj_uses_the_bg_color_index_not_its_shade() {
+        let mut p = sprite_ppu();
+        p.bgp = 0b11_10_00_00; // BG color 1 looks white (shade 0)
+        p.write_vram(0x9800, 1); // screen x 0-7: BG color 1; 8-15: color 0
+        put_sprite(&mut p, 0, 4, 0, 3, 0x80);
+        draw_line(&mut p, 0);
+        assert_eq!(shades(&p, 0, 4..12), [0, 0, 0, 0, 3, 3, 3, 3]);
+    }
+
+    #[test]
+    fn a_winning_sprite_with_bg_priority_hides_the_sprite_below_it() {
+        let mut p = sprite_ppu();
+        for col in 0..32 {
+            p.write_vram(0x9800 + col, 1); // BG color 1 everywhere
+        }
+        put_sprite(&mut p, 0, 0, 0, 3, 0x80); // wins (smaller X), BG over OBJ
+        put_sprite(&mut p, 1, 1, 0, 2, 0); // would be visible on its own
+        draw_line(&mut p, 0);
+        assert_eq!(shade_at(&p, 1, 0), 1, "BG, not the lower sprite");
+        assert_eq!(
+            shade_at(&p, 8, 0),
+            2,
+            "past the first sprite: lower one shows"
+        );
+    }
+
+    #[test]
+    fn sprites_still_show_when_lcdc_bit_0_blanks_the_background() {
+        let mut p = sprite_ppu();
+        for col in 0..32 {
+            p.write_vram(0x9800 + col, 1);
+        }
+        p.lcdc &= !0x01;
+        put_sprite(&mut p, 0, 0, 0, 3, 0x80);
+        draw_line(&mut p, 0);
+        assert_eq!(shade_at(&p, 0, 0), 3, "blank BG counts as color 0");
     }
 }
