@@ -49,6 +49,9 @@ Battery saves are kept in the browser (localStorage, per ROM) and stored a momen
 game saves and when the page closes. Export .sav / Import .sav move them to and from other
 emulators (BGB/VBA-M format, including the MBC3 clock, which catches up on time that passed).
 
+Sound starts with your first click, tap or key press (browsers require one). The Sound button
+or M mutes it. Fast-forward is silent.
+
 ## Working with Claude Code
 
 `CLAUDE.md` describes the project for Claude Code. Some good ways to start:

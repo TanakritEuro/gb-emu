@@ -85,7 +85,7 @@ needs MBC1 multicart wiring, which isn't planned.)
 
 - [x] Four channels: two square waves (one with sweep), wave, noise (plus mixer, high-pass filter, `gb-cli --wav`)
 - [x] Frame sequencer: length, envelope, sweep (blargg `dmg_sound`: 9/12; 09, 10 and 12 need CH3 wave-RAM access while playing)
-- [ ] Output through a Web Audio `AudioWorklet`; let audio drive timing to avoid crackle
+- [x] Output through a Web Audio `AudioWorklet`; let audio drive timing to avoid crackle
 
 **Done when:** music sounds right and doesn't pop.
 

@@ -20,6 +20,24 @@ export function framesDue(backlog, elapsedMs, speed) {
   return { frames, backlog: total - frames * FRAME_MS };
 }
 
+/** At most this many frames per refresh when audio sets the pace, so a
+ * drained queue (after a pause or a hidden tab) refills over a few
+ * refreshes instead of one long stall. */
+export const MAX_AUDIO_CATCH_UP = 6;
+
+/**
+ * Audio-driven pacing: how many frames to run now so the audio queue gets
+ * back up to `target` frames, given each Game Boy frame adds
+ * `framesPerVideoFrame` audio frames (sampleRate / 59.7275). The sound
+ * card's clock then sets the game's speed, so the queue neither runs dry
+ * (crackle) nor grows (lag).
+ */
+export function audioFramesDue(buffered, target, framesPerVideoFrame, max = MAX_AUDIO_CATCH_UP) {
+  const missing = target - buffered;
+  if (missing <= 0) return 0;
+  return Math.min(max, Math.ceil(missing / framesPerVideoFrame));
+}
+
 /** The speed after `speed` in SPEEDS, wrapping around. */
 export function nextSpeed(speed) {
   return SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length];

@@ -54,6 +54,19 @@ impl Emulator {
         }
     }
 
+    /// Sets the audio output rate: the AudioContext's `sampleRate`.
+    pub fn set_sample_rate(&mut self, hz: f64) {
+        if hz.is_finite() && hz >= 1.0 {
+            self.gb.set_sample_rate(hz as u32);
+        }
+    }
+
+    /// Sound made since the last call: interleaved left/right samples, about
+    /// -1..1 (a Float32Array of 2 x ~800 per frame at 48 kHz).
+    pub fn take_audio(&mut self) -> Vec<f32> {
+        self.gb.take_audio()
+    }
+
     /// Whether the game has a battery save to keep.
     pub fn has_battery(&self) -> bool {
         self.gb.has_battery()
