@@ -150,6 +150,9 @@ impl Bus {
         }
         self.if_reg |= self.ppu.tick(cycles);
         self.cart.tick(cycles);
+        for _ in 0..self.timer.take_div_apu_ticks() {
+            self.apu.frame_sequencer_tick();
+        }
         self.apu.tick(cycles);
     }
 

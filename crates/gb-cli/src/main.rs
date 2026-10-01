@@ -1,7 +1,8 @@
 //! Headless runner for test ROMs.
 //!
 //! Blargg's test ROMs print their results over the serial port and end with
-//! "Passed" or "Failed"; Mooneye's send a fixed byte sequence (see `verdict`).
+//! "Passed" or "Failed"; Mooneye's send a fixed byte sequence (see `verdict`);
+//! Blargg's later ones (dmg_sound, ...) leave a result in cartridge RAM (see `ram_verdict`).
 //! This runs frames until one of those shows up.
 //!
 //! Exit codes: 0 passed (or ran to the frame limit with no verdict expected),
@@ -128,7 +129,11 @@ fn main() -> ExitCode {
                 eprintln!("\n✘ stopped in frame {frame}: {e}");
                 break 'run 2;
             }
-            match verdict(&serial) {
+            let from_ram = ram_verdict(&gb);
+            if let Some((_, text)) = &from_ram {
+                print!("{text}");
+            }
+            match verdict(&serial).or(from_ram.map(|(pass, _)| pass)) {
                 Some(true) => {
                     eprintln!("\n✔ passed after {frame} frames");
                     break 'run 0;
@@ -211,6 +216,25 @@ fn verdict(serial: &str) -> Option<bool> {
     } else {
         None
     }
+}
+
+/// Blargg's later test ROMs (dmg_sound, mem_timing-2, oam_bug) report in
+/// cartridge RAM instead of over serial: $DE $B0 $61 at $A001, a status at
+/// $A000 ($80 while running, 0 for pass, else a failure code), and the result
+/// text from $A004. Returns (passed, text) once the test has finished.
+fn ram_verdict(gb: &GameBoy) -> Option<(bool, String)> {
+    let bus = gb.bus();
+    let signature = [bus.read(0xA001), bus.read(0xA002), bus.read(0xA003)];
+    let status = bus.read(0xA000);
+    if signature != [0xDE, 0xB0, 0x61] || status == 0x80 {
+        return None;
+    }
+    let text: String = (0xA004..0xC000)
+        .map(|addr| bus.read(addr))
+        .take_while(|&b| b != 0)
+        .map(char::from)
+        .collect();
+    Some((status == 0, text))
 }
 
 fn run_frame_traced(gb: &mut GameBoy, out: &mut impl Write) -> Result<(), gb_core::cpu::CpuError> {

@@ -28,6 +28,9 @@ pub struct Timer {
     tma: u8,
     tac: u8,
     reload: Reload,
+    /// Falling edges of DIV bit 4 (counter bit 12) not yet passed to the
+    /// APU: they clock its frame sequencer ("DIV-APU", 512 Hz).
+    div_apu: u32,
 }
 
 impl Timer {
@@ -49,12 +52,23 @@ impl Timer {
     }
 
     /// Runs `change` and increments TIMA if it made the signal fall.
+    /// Also counts falling edges of counter bit 12 for the APU, including the
+    /// one a DIV write causes when the bit was set (Pan Docs: Audio_details).
     fn update(&mut self, change: impl FnOnce(&mut Self)) {
         let before = self.signal();
+        let apu_bit_before = self.counter & 0x1000 != 0;
         change(self);
         if before && !self.signal() {
             self.increment_tima();
         }
+        if apu_bit_before && self.counter & 0x1000 == 0 {
+            self.div_apu += 1;
+        }
+    }
+
+    /// DIV-APU events since the last call; the bus forwards them to the APU.
+    pub fn take_div_apu_ticks(&mut self) -> u32 {
+        std::mem::take(&mut self.div_apu)
     }
 
     /// On overflow TIMA reads $00 for one M-cycle; the reload comes after.
@@ -136,6 +150,28 @@ mod tests {
         assert_eq!(t.read(0xFF04), 1);
         t.write(0xFF04, 0x77);
         assert_eq!(t.read(0xFF04), 0, "any write resets DIV");
+    }
+
+    #[test]
+    fn div_bit_4_falling_clocks_the_apu_at_512_hz() {
+        let mut t = Timer::new();
+        t.tick(8192 - 1);
+        assert_eq!(t.take_div_apu_ticks(), 0);
+        t.tick(1);
+        assert_eq!(t.take_div_apu_ticks(), 1, "one per 8192 T-cycles");
+        t.tick(crate::CPU_HZ);
+        assert_eq!(t.take_div_apu_ticks(), 512);
+    }
+
+    #[test]
+    fn writing_div_can_clock_the_apu_early() {
+        let mut t = Timer::new();
+        t.tick(4096); // counter bit 12 (DIV bit 4) is now 1
+        t.write(0xFF04, 0);
+        assert_eq!(t.take_div_apu_ticks(), 1, "the reset is a falling edge");
+        t.tick(4095);
+        t.write(0xFF04, 0); // bit 12 was 0: no edge
+        assert_eq!(t.take_div_apu_ticks(), 0);
     }
 
     #[test]

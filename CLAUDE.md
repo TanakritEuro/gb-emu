@@ -10,7 +10,7 @@ A Game Boy (DMG) emulator in Rust that runs in the browser via WebAssembly.
   - `cartridge.rs` header parsing + MBCs (ROM-only, MBC1, MBC2, MBC3 with its real-time clock, MBC5)
   - `ppu.rs` scanline timing, STAT/LY, framebuffer (scanline renderer: background, window, sprites)
   - `timer.rs` DIV/TIMA/TMA/TAC
-  - `apu.rs` sound: four channels, mixer, high-pass filter, stereo samples
+  - `apu.rs` sound: four channels, frame sequencer (length, envelope, sweep), mixer, high-pass filter
   - `joypad.rs` $FF00
   - `tests/smoke.rs` end-to-end tests through the public `GameBoy` API
 - `crates/gb-cli/` — headless runner for test ROMs; `--doctor` writes Gameboy Doctor traces, `--wav` records audio
@@ -34,7 +34,8 @@ cargo run --release -p gb-cli -- <rom.gb> --wav out.wav        # record the soun
 node scripts/serve.js                                   # serve it at http://localhost:8765
 ```
 
-gb-cli exit codes: 0 passed, 1 failed (Blargg "Failed" or Mooneye fail bytes), 2 emulator/usage error
+gb-cli exit codes: 0 passed, 1 failed (Blargg "Failed" over serial or a failure code at $A000, or Mooneye
+fail bytes), 2 emulator/usage error
 (e.g. illegal opcode), 3 frame limit reached without a verdict.
 
 ## Conventions
