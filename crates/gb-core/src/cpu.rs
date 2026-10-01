@@ -235,6 +235,62 @@ impl Cpu {
         }
     }
 
+    /// Register pair `rp[p]`: BC DE HL SP. Used by 16-bit loads and arithmetic.
+    fn read_rp(&self, p: u8) -> u16 {
+        match p {
+            0 => self.regs.bc(),
+            1 => self.regs.de(),
+            2 => self.regs.hl(),
+            _ => self.regs.sp,
+        }
+    }
+
+    fn write_rp(&mut self, p: u8, val: u16) {
+        match p {
+            0 => self.regs.set_bc(val),
+            1 => self.regs.set_de(val),
+            2 => self.regs.set_hl(val),
+            _ => self.regs.sp = val,
+        }
+    }
+
+    /// Register pair `rp2[p]`: BC DE HL AF. PUSH and POP use AF where other
+    /// instructions use SP.
+    fn read_rp2(&self, p: u8) -> u16 {
+        match p {
+            3 => self.regs.af(),
+            _ => self.read_rp(p),
+        }
+    }
+
+    /// Writing AF goes through [`Registers::set_af`], which zeroes F's low
+    /// nibble: those four flag bits don't exist in hardware.
+    fn write_rp2(&mut self, p: u8, val: u16) {
+        match p {
+            3 => self.regs.set_af(val),
+            _ => self.write_rp(p, val),
+        }
+    }
+
+    /// Pushes a word: high byte to SP-1, then low byte to SP-2, in that order,
+    /// as the hardware does. The stack grows downward.
+    fn push16(&mut self, bus: &mut Bus, val: u16) {
+        let [lo, hi] = val.to_le_bytes();
+        self.regs.sp = self.regs.sp.wrapping_sub(1);
+        bus.write(self.regs.sp, hi);
+        self.regs.sp = self.regs.sp.wrapping_sub(1);
+        bus.write(self.regs.sp, lo);
+    }
+
+    /// Pops a word: low byte from SP, then high byte from SP+1.
+    fn pop16(&mut self, bus: &Bus) -> u16 {
+        let lo = bus.read(self.regs.sp);
+        self.regs.sp = self.regs.sp.wrapping_add(1);
+        let hi = bus.read(self.regs.sp);
+        self.regs.sp = self.regs.sp.wrapping_add(1);
+        u16::from_le_bytes([lo, hi])
+    }
+
     /// The address for block 0's `z=2` loads, picked by `p`: (BC) (DE) (HL+)
     /// (HL-). HL+ and HL- step HL after the access, for fast copy loops.
     fn indirect_addr(&mut self, p: u8) -> u16 {
@@ -306,20 +362,25 @@ impl Cpu {
             // Block 0: misc, 16-bit loads and arithmetic, INC/DEC, LD r,d8.
             0 => match op.z {
                 0 => match op.y {
-                    0 => Ok(4),   // NOP
-                    1 => MISSING, // LD (a16), SP
+                    0 => Ok(4), // NOP
+                    // LD (a16), SP: low byte to a16, high byte to a16+1
+                    1 => {
+                        let addr = self.fetch16(bus);
+                        bus.write16(addr, self.regs.sp);
+                        Ok(20)
+                    }
                     2 => MISSING, // STOP
                     3 => MISSING, // JR e8
                     _ => MISSING, // JR cc[y-4], e8
                 },
-                1 => match (op.q, op.p) {
-                    // LD SP, d16
-                    (0, 3) => {
-                        self.regs.sp = self.fetch16(bus);
+                1 => match op.q {
+                    // LD rp[p], d16
+                    0 => {
+                        let val = self.fetch16(bus);
+                        self.write_rp(op.p, val);
                         Ok(12)
                     }
-                    (0, _) => MISSING, // LD rp[p], d16
-                    _ => MISSING,      // ADD HL, rp[p]
+                    _ => MISSING, // ADD HL, rp[p]
                 },
                 // q=0: LD (BC)/(DE)/(HL+)/(HL-), A
                 // q=1: LD A, (BC)/(DE)/(HL+)/(HL-)
@@ -384,11 +445,20 @@ impl Cpu {
                     _ => MISSING, // LD HL, SP+e8
                 },
                 1 => match (op.q, op.p) {
-                    (0, _) => MISSING, // POP rp2[p]
+                    // POP rp2[p]
+                    (0, _) => {
+                        let val = self.pop16(bus);
+                        self.write_rp2(op.p, val);
+                        Ok(12)
+                    }
                     (_, 0) => MISSING, // RET
                     (_, 1) => MISSING, // RETI
                     (_, 2) => MISSING, // JP HL
-                    _ => MISSING,      // LD SP, HL
+                    // LD SP, HL
+                    _ => {
+                        self.regs.sp = self.regs.hl();
+                        Ok(8)
+                    }
                 },
                 2 => match op.y {
                     0..=3 => MISSING, // JP cc[y], a16
@@ -439,7 +509,12 @@ impl Cpu {
                     _ => ILLEGAL,     // $E4 $EC $F4 $FC
                 },
                 5 => match (op.q, op.p) {
-                    (0, _) => MISSING, // PUSH rp2[p]
+                    // PUSH rp2[p]: 4 more cycles than POP, for the SP decrement
+                    (0, _) => {
+                        let val = self.read_rp2(op.p);
+                        self.push16(bus, val);
+                        Ok(16)
+                    }
                     (_, 0) => MISSING, // CALL a16
                     _ => ILLEGAL,      // $DD $ED $FD
                 },
@@ -798,5 +873,85 @@ mod tests {
         assert_eq!(cpu.step(&mut bus), Ok(16));
         assert_eq!(cpu.regs.a, 0x3C);
         assert_eq!(cpu.regs.pc, 0x0103);
+    }
+
+    #[test]
+    fn ld_rp_d16_for_bc_de_hl_sp() {
+        for p in 0..4u8 {
+            let opcode = 0x01 | p << 4;
+            let (mut cpu, mut bus) = setup(&[opcode, 0x34, 0x12]);
+            assert_eq!(cpu.step(&mut bus), Ok(12), "opcode {opcode:02X}");
+            assert_eq!(cpu.read_rp(p), 0x1234, "opcode {opcode:02X}");
+            assert_eq!(cpu.regs.pc, 0x0103);
+        }
+    }
+
+    #[test]
+    fn ld_a16_sp_stores_little_endian() {
+        let (mut cpu, mut bus) = setup(&[0x08, 0x00, 0xC2]);
+        cpu.regs.sp = 0xBEEF;
+        assert_eq!(cpu.step(&mut bus), Ok(20));
+        assert_eq!(bus.read(0xC200), 0xEF);
+        assert_eq!(bus.read(0xC201), 0xBE);
+    }
+
+    #[test]
+    fn ld_sp_hl() {
+        let (mut cpu, mut bus) = setup(&[0xF9]);
+        cpu.regs.set_hl(0xD00D);
+        assert_eq!(cpu.step(&mut bus), Ok(8));
+        assert_eq!(cpu.regs.sp, 0xD00D);
+    }
+
+    #[test]
+    fn push_writes_high_byte_above_low_byte() {
+        let (mut cpu, mut bus) = setup(&[0xC5]); // PUSH BC
+        cpu.regs.sp = 0xD000;
+        cpu.regs.set_bc(0xABCD);
+        assert_eq!(cpu.step(&mut bus), Ok(16));
+        assert_eq!(cpu.regs.sp, 0xCFFE);
+        assert_eq!(bus.read(0xCFFF), 0xAB);
+        assert_eq!(bus.read(0xCFFE), 0xCD);
+    }
+
+    #[test]
+    fn push_then_pop_round_trips_every_pair() {
+        for p in 0..4u8 {
+            let (push, pop) = (0xC5 | p << 4, 0xC1 | p << 4);
+            let (mut cpu, mut bus) = setup(&[push, pop]);
+            cpu.regs.sp = 0xD000;
+            let val = cpu.read_rp2(p);
+            cpu.step(&mut bus).unwrap();
+            cpu.write_rp2(p, 0x0000);
+            assert_eq!(cpu.step(&mut bus), Ok(12), "opcode {pop:02X}");
+            assert_eq!(cpu.read_rp2(p), val, "opcode {pop:02X}");
+            assert_eq!(cpu.regs.sp, 0xD000);
+        }
+    }
+
+    #[test]
+    fn pop_af_zeroes_the_low_nibble_of_f() {
+        // PUSH BC ; POP AF with BC = $12FF: F can't hold the low $F.
+        let (mut cpu, mut bus) = setup(&[0xC5, 0xF1]);
+        cpu.regs.sp = 0xD000;
+        cpu.regs.set_bc(0x12FF);
+        cpu.step(&mut bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.regs.a, 0x12);
+        assert_eq!(cpu.regs.f, 0xF0);
+    }
+
+    #[test]
+    fn stack_wraps_around_address_zero() {
+        // With SP = 0, PUSH writes to $FFFF (IE) and $FFFE (HRAM).
+        let (mut cpu, mut bus) = setup(&[0xD5, 0xE1]); // PUSH DE ; POP HL
+        cpu.regs.sp = 0x0000;
+        cpu.regs.set_de(0x1F42);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.regs.sp, 0xFFFE);
+        assert_eq!(bus.read(0xFFFF), 0x1F);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.regs.hl(), 0x1F42);
+        assert_eq!(cpu.regs.sp, 0x0000);
     }
 }
