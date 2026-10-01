@@ -87,3 +87,7 @@ it in the memory view.
 
 - "Read docs/ROADMAP.md and start milestone 1: set up the opcode decoder."
 - `/test-rom roms/blargg/cpu_instrs/individual/06-ld r,r.gb` runs a test ROM and investigates whatever it reports.
+
+## License
+
+MIT; see [LICENSE](LICENSE). Game ROMs are not included and are not covered by it.
