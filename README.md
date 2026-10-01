@@ -50,6 +50,11 @@ Battery saves are kept in the browser (localStorage, per ROM) and stored a momen
 game saves and when the page closes. Export .sav / Import .sav move them to and from other
 emulators (BGB/VBA-M format, including the MBC3 clock, which catches up on time that passed).
 
+Save states: four slots per game under the screen, each with a picture and when it was saved,
+kept in the browser (IndexedDB) between visits. Keys: 1-4 pick a slot, S saves, L loads. A state
+is the whole machine, so loading one also puts the battery save (and the MBC3 clock) back to how
+they were then.
+
 Sound starts with your first click, tap or key press (browsers require one). The Sound button
 or M mutes it. Fast-forward is silent.
 

@@ -349,3 +349,50 @@ main > * { min-width: 0; }
 .vram-key i.screen { border-color: rgb(255, 64, 96); }
 .vram-key i.window { border-color: rgb(64, 128, 255); margin-left: 8px; }
 .vram-info { margin-top: 8px; font-size: 13px; font-variant-numeric: tabular-nums; min-height: 1.5em; }
+
+/* Save state slots */
+.states-panel summary .muted { margin-left: 8px; font-size: 13px; }
+.error-text { color: var(--error) !important; }
+.slots {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-top: 10px;
+}
+@media (max-width: 480px) { .slots { grid-template-columns: repeat(2, 1fr); } }
+.slot {
+  margin: 0;
+  padding: 8px;
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  border: 1px solid #2c343c;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.slot.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.slot img {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 160 / 144;
+  image-rendering: pixelated;
+  background: var(--bg);
+  border-radius: 2px;
+}
+.slot:not(.empty) img { background: var(--lcd); }
+.slot figcaption { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.slot div { display: flex; gap: 6px; }
+.slot button {
+  flex: 1;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 0;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid #3a444e;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.slot button:hover:not(:disabled) { border-color: var(--accent); }
+.slot button:disabled { opacity: 0.4; cursor: default; }

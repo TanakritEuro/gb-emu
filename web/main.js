@@ -12,6 +12,14 @@ import { MemoryView } from "./memview.js";
 import { VramView } from "./vramview.js";
 import { BreakpointList } from "./breakpoints.js";
 import { hex } from "./format.js";
+import {
+  StateStore,
+  SlotsPanel,
+  indexedDbBackend,
+  memoryBackend,
+  savedAgo,
+  slotForKey,
+} from "./states.js";
 
 const audio = new AudioOut();
 
@@ -106,6 +114,8 @@ async function loadRom(file) {
   $("hint").hidden = true;
   restoreStoredSave();
   breakpoints.clear(emu); // a different game: the old addresses mean nothing
+  slots.status("");
+  refreshSlots();
   setPaused(false);
   showStatus();
 }
@@ -413,6 +423,9 @@ addEventListener("keydown", (e) => {
   else if (e.code === "KeyF") cycleSpeed();
   else if (e.code === "KeyM") toggleSound();
   else if (e.code === "KeyN") stepInstruction();
+  else if (e.code === "KeyS") saveState(slot);
+  else if (e.code === "KeyL") loadState(slot);
+  else if (slotForKey(e.code)) selectSlot(slotForKey(e.code));
 });
 addEventListener("keyup", (e) => {
   if (e.code === "Space") setTurbo(false);
@@ -445,6 +458,75 @@ addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") persistSave();
 });
 addEventListener("pagehide", persistSave);
+
+// Save states: four slots per game in IndexedDB, each with a picture of
+// the screen. Loading one also puts the battery save back to how it was
+// then (it's part of the state); that gets stored like any other change.
+const stateStore = new StateStore(indexedDbBackend());
+const slots = new SlotsPanel(
+  { slots: $("slots"), status: $("state-status") },
+  { save: saveState, load: loadState, select: selectSlot },
+);
+let slot = 1; // picked with 1-4; S and L use it
+stateStore.backend.ready.catch(() => {
+  stateStore.backend = memoryBackend();
+  slots.status("this browser won't keep save states after the page closes");
+});
+selectSlot(1);
+refreshSlots();
+
+function selectSlot(n) {
+  slot = n;
+  slots.select(n);
+}
+
+/** Redraws the slots for the game that's loaded (none: all disabled). */
+async function refreshSlots() {
+  const key = romSaveKey;
+  let records = [];
+  if (key) {
+    try {
+      records = await stateStore.list(key);
+    } catch (e) {
+      slots.status(`couldn't read save states: ${e.message ?? e}`, true);
+    }
+  }
+  if (key === romSaveKey) slots.show(records, Boolean(emu));
+}
+
+async function saveState(n) {
+  if (!emu) return;
+  selectSlot(n);
+  const key = romSaveKey;
+  const state = emu.save_state();
+  // The screen as it is now: toBlob snapshots the canvas when it's called.
+  const thumb = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+  try {
+    await stateStore.save(key, n, { state, thumb, savedAt: Date.now() });
+    slots.status(`saved to slot ${n}`);
+  } catch (e) {
+    slots.status(`couldn't save: ${e.message ?? e}`, true);
+  }
+  refreshSlots();
+}
+
+async function loadState(n) {
+  if (!emu) return;
+  selectSlot(n);
+  const key = romSaveKey;
+  const record = await stateStore.load(key, n).catch(() => null);
+  if (key !== romSaveKey || !emu) return; // the game changed meanwhile
+  if (!record) return slots.status(`slot ${n} is empty`);
+  try {
+    emu.load_state(record.state);
+  } catch (e) {
+    slots.status(`couldn't load slot ${n}: ${e.message ?? e}`, true);
+    return;
+  }
+  draw(); // the state's own picture, even while paused
+  debug.update(emu);
+  slots.status(`loaded slot ${n}, saved ${savedAgo(record.savedAt)}`);
+}
 
 // Debugger. Stepping pauses the game first, and opens the panel to show
 // where it stopped.

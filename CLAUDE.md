@@ -19,7 +19,7 @@ A Game Boy (DMG) emulator in Rust that runs in the browser via WebAssembly.
   - `tests/smoke.rs` end-to-end tests through the public `GameBoy` API
 - `crates/gb-cli/` — headless runner for test ROMs; `--doctor` writes Gameboy Doctor traces, `--wav` records audio
 - `crates/gb-wasm/` — wasm-bindgen wrapper (`Emulator` class) used by `web/`
-- `web/` — static frontend (`index.html`, `main.js`, `style.css`; `input.js` maps keyboard/gamepad/touch to buttons, `timing.js` paces frames, `saves.js` keeps battery saves in localStorage, `audio.js` + `audio-worklet.js` + `audio-queue.js` play sound, `debugger.js` + `memview.js` + `vramview.js` + `breakpoints.js` are the debugger panel); `web/pkg/` is generated
+- `web/` — static frontend (`index.html`, `main.js`, `style.css`; `input.js` maps keyboard/gamepad/touch to buttons, `timing.js` paces frames, `saves.js` keeps battery saves in localStorage, `states.js` save state slots in IndexedDB, `audio.js` + `audio-worklet.js` + `audio-queue.js` play sound, `debugger.js` + `memview.js` + `vramview.js` + `breakpoints.js` are the debugger panel); `web/pkg/` is generated
 - `scripts/build-web.ps1` / `build-web.sh` — build `web/pkg`
 - `scripts/serve.js` — zero-dependency Node dev server for `web/` (port 8765)
 - `roms/` — test ROMs, git-ignored. Never commit ROM files.
@@ -30,7 +30,7 @@ A Game Boy (DMG) emulator in Rust that runs in the browser via WebAssembly.
 ```sh
 cargo test --workspace                                  # all tests; must pass before any commit
 cargo clippy --workspace --all-targets -- -D warnings  # lint; keep it clean
-node --test "web/*.test.js"                             # frontend tests (input, timing, saves, audio, debugger)
+node --test "web/*.test.js"                             # frontend tests (input, timing, saves, states, audio, debugger)
 cargo run --release -p gb-cli -- <rom.gb>              # run a test ROM headlessly
 cargo run --release -p gb-cli -- <rom.gb> --doctor trace.log   # CPU trace for Gameboy Doctor
 cargo run --release -p gb-cli -- <rom.gb> --wav out.wav        # record the sound (48 kHz WAV)

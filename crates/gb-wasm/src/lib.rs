@@ -94,6 +94,19 @@ impl Emulator {
         self.gb.take_save_dirty()
     }
 
+    /// A save state: the whole machine as bytes (about 24 KB plus cartridge RAM).
+    pub fn save_state(&self) -> Vec<u8> {
+        self.gb.save_state()
+    }
+
+    /// Restores a save state. Throws, changing nothing, if it is for another
+    /// game, from another version of the emulator, or damaged.
+    pub fn load_state(&mut self, state: &[u8]) -> Result<(), JsError> {
+        self.gb
+            .load_state(state)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
     pub fn title(&self) -> String {
         self.gb.title().to_string()
     }
