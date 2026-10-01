@@ -46,6 +46,23 @@ export function gamepadsMask(pads) {
   return mask;
 }
 
+// On-screen d-pad: eight 45° sectors around the center, starting from Right
+// and going clockwise (screen Y grows downward), so diagonals press two
+// directions. A small dead zone in the middle presses nothing.
+const DPAD_SECTORS = [
+  [RIGHT], [DOWN, RIGHT], [DOWN], [DOWN, LEFT], [LEFT], [UP, LEFT], [UP], [UP, RIGHT],
+].map((buttons) => buttons.reduce((mask, b) => mask | bit(b), 0));
+const DPAD_DEADZONE = 0.2;
+
+/** D-pad buttons for a touch at (dx, dy) from the pad's center; `radius` is
+ * half the pad's width. Touches past the edge still count, so a thumb that
+ * slides off keeps steering. */
+export function dpadMask(dx, dy, radius) {
+  if (Math.hypot(dx, dy) < radius * DPAD_DEADZONE) return 0;
+  const sector = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) & 7;
+  return DPAD_SECTORS[sector];
+}
+
 /** `mask` with `button` set or cleared. */
 export function withButton(mask, button, pressed) {
   return pressed ? mask | bit(button) : mask & ~bit(button);

@@ -87,6 +87,89 @@ kbd {
   color: var(--text);
 }
 
+/* On-screen controls. Hidden unless the main pointer is a finger, or the
+   page was opened with ?touch (main.js adds .force-touch). */
+.touch {
+  display: none;
+  grid-template-columns: 1fr 1fr;
+  grid-template-areas: "dpad ab" "pills pills";
+  align-items: center;
+  gap: 24px 8px;
+  padding: 4px 8px 0;
+  /* No scrolling, pinch/double-tap zoom, text selection or long-press menus. */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+@media (pointer: coarse) {
+  .touch { display: grid; }
+  .controls { display: none; }
+}
+.force-touch .touch { display: grid; }
+
+.dpad {
+  grid-area: dpad;
+  position: relative;
+  width: 144px;
+  aspect-ratio: 1;
+}
+.dpad .arm {
+  position: absolute;
+  background: #2c343c;
+  box-shadow: inset 0 0 0 1px #3a444e;
+}
+.dpad .up, .dpad .down { left: 34%; width: 32%; height: 36%; }
+.dpad .left, .dpad .right { top: 34%; height: 32%; width: 36%; }
+.dpad .up { top: 0; border-radius: 6px 6px 0 0; }
+.dpad .down { bottom: 0; border-radius: 0 0 6px 6px; }
+.dpad .left { left: 0; border-radius: 6px 0 0 6px; }
+.dpad .right { right: 0; border-radius: 0 6px 6px 0; }
+.dpad::after { /* the middle of the cross */
+  content: "";
+  position: absolute;
+  inset: 34%;
+  background: #2c343c;
+}
+
+/* Like the real thing: B lower-left, A upper-right. */
+.ab { grid-area: ab; justify-self: end; display: flex; align-items: flex-start; gap: 16px; }
+.ab [data-button="5"] { margin-top: 40px; }
+.round, .pill {
+  display: grid;
+  place-items: center;
+  background: #2c343c;
+  box-shadow: inset 0 0 0 1px #3a444e;
+  color: var(--muted);
+  font-weight: 700;
+}
+.round { width: 64px; aspect-ratio: 1; border-radius: 50%; font-size: 18px; }
+.pills { grid-area: pills; justify-self: center; display: flex; gap: 24px; }
+.pill {
+  padding: 6px 16px;
+  border-radius: 999px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.touch .pressed { background: var(--accent); color: var(--bg); }
+
+@media (max-width: 480px) {
+  main { padding: 12px 10px; }
+  .screen-wrap { padding: 14px; border-radius: 10px 10px 28px 10px; }
+  .hint { inset: 14px; }
+  .error { left: 14px; right: 14px; bottom: 14px; }
+}
+
 details { background: var(--panel); border-radius: 8px; padding: 8px 12px; }
 summary { cursor: pointer; color: var(--muted); }
-#serial { margin: 8px 0 0; max-height: 200px; overflow: auto; font: 13px/1.4 ui-monospace, monospace; }
+/* Wrap long serial output: one unbroken line must not widen the whole page. */
+#serial {
+  margin: 8px 0 0;
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 13px/1.4 ui-monospace, monospace;
+}
+main > * { min-width: 0; }

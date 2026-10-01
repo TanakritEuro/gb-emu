@@ -39,6 +39,8 @@ avoid port 8080 on Windows, which is often reserved.)
 Controls: arrows = d-pad, X = A, Z = B, Enter = Start, Shift = Select.
 Gamepads work too (standard layout): d-pad or left stick, right face button = A,
 bottom face button = B, Start, Select (Back). Press a button once so the browser exposes it.
+On phones and tablets, on-screen controls appear under the screen (multi-touch, slide between
+buttons). Add `?touch` to the URL to show them on a desktop.
 
 ## Working with Claude Code
 
