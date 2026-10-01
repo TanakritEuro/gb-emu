@@ -72,7 +72,7 @@ page reachable from a phone: `serve.js` on the LAN, or the GitHub Pages deploy i
 
 ## Milestone 5 — More cartridges and saves
 
-- [ ] MBC3 with the real-time clock (Pokémon-style games use it)
+- [x] MBC3 with the real-time clock (Pokémon-style games use it) (rtc3test: all 3 suites match)
 - [ ] MBC5
 - [ ] Battery saves: export/import `.sav`, keep them in the browser between visits
 

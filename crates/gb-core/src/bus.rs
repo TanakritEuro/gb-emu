@@ -138,12 +138,14 @@ impl Bus {
         }
     }
 
-    /// Advances timer and PPU, collecting any interrupts they raise.
+    /// Advances timer, PPU and cartridge clock, collecting any interrupts
+    /// they raise.
     pub fn tick(&mut self, cycles: u32) {
         if self.timer.tick(cycles) {
             self.if_reg |= interrupt::TIMER;
         }
         self.if_reg |= self.ppu.tick(cycles);
+        self.cart.tick(cycles);
     }
 
     /// Interrupts that are both requested (IF) and enabled (IE).
@@ -197,6 +199,19 @@ mod tests {
         b.write(0xFF46, 0xC1);
         assert_eq!(b.read(0xFE00), 0x00);
         assert_eq!(b.read(0xFE9F), 0x9F);
+    }
+
+    #[test]
+    fn bus_ticks_drive_the_cartridge_clock() {
+        // MBC3+TIMER+RAM+BATTERY: one second of bus time ticks the RTC.
+        let rom = crate::cartridge::tests::make_rom(0x10, 4, 0x03);
+        let mut b = Bus::new(Cartridge::from_rom(rom).unwrap());
+        b.write(0x0000, 0x0A); // enable RAM and clock
+        b.tick(crate::CPU_HZ);
+        b.write(0x6000, 0x00); // latch
+        b.write(0x6000, 0x01);
+        b.write(0x4000, 0x08); // seconds register
+        assert_eq!(b.read(0xA000), 1);
     }
 
     #[test]
