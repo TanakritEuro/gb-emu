@@ -59,7 +59,7 @@ First homebrew title screen shows up in the browser. 🎉
 
 ## Milestone 4 — Playable in the browser
 
-- [ ] Gamepad API support alongside the keyboard
+- [x] Gamepad API support alongside the keyboard
 - [ ] Touch controls for phones
 - [ ] Pause, reset, speed toggle (fast-forward is very satisfying)
 - [ ] Zero-copy framebuffer (a `Uint8ClampedArray` view on wasm memory)

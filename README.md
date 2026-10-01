@@ -37,6 +37,8 @@ Open http://localhost:8765 and drop a `.gb` file onto the screen.
 avoid port 8080 on Windows, which is often reserved.)
 
 Controls: arrows = d-pad, X = A, Z = B, Enter = Start, Shift = Select.
+Gamepads work too (standard layout): d-pad or left stick, right face button = A,
+bottom face button = B, Start, Select (Back). Press a button once so the browser exposes it.
 
 ## Working with Claude Code
 
