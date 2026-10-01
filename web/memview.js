@@ -94,7 +94,8 @@ const JUMPS = [
 ];
 
 export class MemoryView {
-  /** `els`: { view, addr, follow, prev, next, jumps, info }; `refresh` is
+  /** `els`: { section (a <details>), view, addr, follow, prev, next, jumps,
+   * info }; `refresh` is
    * called after the controls change what to show. */
   constructor(els, refresh) {
     this.els = els;
@@ -171,6 +172,12 @@ export class MemoryView {
     });
   }
 
+  /** Picks `addr` and scrolls to it, e.g. a tile clicked in the VRAM view. */
+  select(addr) {
+    this.selected = addr;
+    this.goTo(startAround(addr));
+  }
+
   /** Shows the view from `start` and stops following a register. */
   goTo(start) {
     this.els.follow.value = "";
@@ -180,6 +187,7 @@ export class MemoryView {
 
   /** Redraws from `emu`; `state` is its cpu_state(). */
   update(emu, state) {
+    if (!this.els.section.open) return;
     this.regs = {
       PC: state.pc,
       SP: state.sp,

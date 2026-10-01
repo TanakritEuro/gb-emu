@@ -9,29 +9,46 @@ import { nowSeconds, saveKey, readSave, writeSave, saveFileName } from "./saves.
 import { AudioOut } from "./audio.js";
 import { DebugPanel } from "./debugger.js";
 import { MemoryView } from "./memview.js";
+import { VramView } from "./vramview.js";
 
 const audio = new AudioOut();
 
 const $ = (id) => document.getElementById(id);
 const canvas = $("screen");
 const ctx = canvas.getContext("2d");
+const memory = new MemoryView(
+  {
+    section: $("mem-section"),
+    view: $("mem-view"),
+    addr: $("mem-addr"),
+    follow: $("mem-follow"),
+    prev: $("mem-prev"),
+    next: $("mem-next"),
+    jumps: $("mem-jumps"),
+    info: $("mem-info"),
+  },
+  () => debug.update(emu),
+);
 const debug = new DebugPanel({
   panel: $("debug-panel"),
   regs: $("regs"),
   flags: $("flags"),
   disasm: $("disasm"),
   note: $("debug-note"),
-  memory: new MemoryView(
+  memory,
+  // Clicking a tile or map entry shows its bytes in the memory view.
+  vram: new VramView(
     {
-      view: $("mem-view"),
-      addr: $("mem-addr"),
-      follow: $("mem-follow"),
-      prev: $("mem-prev"),
-      next: $("mem-next"),
-      jumps: $("mem-jumps"),
-      info: $("mem-info"),
+      section: $("vram-section"),
+      tiles: $("vram-tiles"),
+      map: $("vram-map-canvas"),
+      mapChoice: $("vram-map"),
+      info: $("vram-info"),
     },
-    () => debug.update(emu),
+    (addr) => {
+      $("mem-section").open = true;
+      memory.select(addr);
+    },
   ),
 });
 // An ImageData whose pixels *are* the emulator's framebuffer in wasm memory
@@ -440,6 +457,11 @@ $("debug-panel").addEventListener("toggle", () => {
   showPaused();
   debug.update(emu);
 });
+// Closed sections skip their work; show them up to date when opened.
+for (const id of ["mem-section", "vram-section"]) {
+  $(id).addEventListener("toggle", () => debug.update(emu));
+}
+$("vram-map").addEventListener("change", () => debug.update(emu));
 
 // Sound. Browsers only let audio start from a user gesture, so the first
 // click, tap or key press anywhere switches it on (the Sound button handles

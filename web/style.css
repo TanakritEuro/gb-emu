@@ -242,7 +242,7 @@ main > * { min-width: 0; }
 .disasm div:not(:first-child)::before { content: "  "; }
 
 /* Memory hex view */
-.memory { margin-top: 16px; display: grid; gap: 8px; }
+.memory > :not(summary) { margin-top: 8px; }
 .memory .toolbar { align-items: center; font-size: 13px; }
 .memory input, .memory select {
   font: 13px ui-monospace, monospace;
@@ -286,3 +286,35 @@ main > * { min-width: 0; }
   border-radius: 2px;
   vertical-align: -1px;
 }
+
+/* Collapsible sections inside the debugger */
+.debug-section { margin-top: 16px; padding: 0; background: none; }
+.debug-section > summary { margin-bottom: 8px; }
+
+/* VRAM viewer: tiles (2:3) beside the map (1:1), equal heights */
+.vram { display: grid; grid-template-columns: 2fr 3fr; gap: 16px; align-items: end; }
+@media (max-width: 480px) { .vram { grid-template-columns: 1fr; } }
+.vram figure { margin: 0; display: grid; gap: 6px; min-width: 0; }
+.vram figcaption { font-size: 13px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.vram canvas { width: 100%; height: auto; background: var(--lcd); cursor: crosshair; }
+#vram-tiles { aspect-ratio: 128 / 192; }
+#vram-map-canvas { aspect-ratio: 1; }
+.vram select {
+  font: inherit;
+  padding: 3px 6px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid #3a444e;
+  border-radius: 6px;
+}
+.vram-key i {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 4px;
+  border: 2px solid;
+  vertical-align: -1px;
+}
+.vram-key i.screen { border-color: rgb(255, 64, 96); }
+.vram-key i.window { border-color: rgb(64, 128, 255); margin-left: 8px; }
+.vram-info { margin-top: 8px; font-size: 13px; font-variant-numeric: tabular-nums; min-height: 1.5em; }

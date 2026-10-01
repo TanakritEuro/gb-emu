@@ -17,6 +17,10 @@ pub const DMG_PALETTE: [[u8; 4]; 4] = [
     [0x08, 0x18, 0x20, 0xFF],
 ];
 
+/// Size of [`Ppu::tile_sheet`]: 16 × 24 tiles of 8×8 pixels.
+pub const TILE_SHEET_WIDTH: usize = 128;
+pub const TILE_SHEET_HEIGHT: usize = 192;
+
 const DOTS_PER_LINE: u32 = 456;
 const LINES_PER_FRAME: u8 = 154;
 const VBLANK_LINE: u8 = 144;
@@ -340,6 +344,41 @@ impl Ppu {
         (((hi >> bit) & 1) << 1) | ((lo >> bit) & 1)
     }
 
+    // Debugger views: pictures of VRAM, read without changing anything.
+
+    /// All 384 tiles at $8000-$97FF as RGBA, [`TILE_SHEET_WIDTH`] ×
+    /// [`TILE_SHEET_HEIGHT`]: 16 tiles per row in address order, so tile n
+    /// of the $8000 block is at column n % 16, row n / 16. Colors go through
+    /// BGP, as the background would show them (sprites use OBP0/OBP1).
+    /// https://gbdev.io/pandocs/Tile_Data.html
+    pub fn tile_sheet(&self) -> Vec<u8> {
+        let mut out = vec![0; TILE_SHEET_WIDTH * TILE_SHEET_HEIGHT * 4];
+        for (i, px) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let (x, y) = (i % TILE_SHEET_WIDTH, i / TILE_SHEET_WIDTH);
+            let tile = (y / 8) * 16 + x / 8;
+            let index = self.tile_data_pixel(tile * 16, (x % 8) as u8, (y % 8) as u8);
+            *px = self.bg_rgba(index);
+        }
+        out
+    }
+
+    /// A whole 256×256 tile map as RGBA: $9C00 if `high_map`, else $9800.
+    /// Tile numbers are read with the addressing LCDC bit 4 selects, and
+    /// colors go through BGP. https://gbdev.io/pandocs/Tile_Maps.html
+    pub fn tile_map_image(&self, high_map: bool) -> Vec<u8> {
+        let mut out = vec![0; 256 * 256 * 4];
+        for (i, px) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let index = self.map_pixel(high_map, (i % 256) as u8, (i / 256) as u8);
+            *px = self.bg_rgba(index);
+        }
+        out
+    }
+
+    /// RGBA for background color index `index` (0-3) through BGP.
+    fn bg_rgba(&self, index: u8) -> [u8; 4] {
+        DMG_PALETTE[usize::from((self.bgp >> (index * 2)) & 0x03)]
+    }
+
     /// Sprite height from LCDC bit 2: 8 or 16 pixels.
     fn sprite_height(&self) -> i16 {
         if self.lcdc & 0x04 != 0 {
@@ -563,6 +602,64 @@ mod tests {
             .iter()
             .position(|c| c == px)
             .expect("a palette color")
+    }
+
+    /// The shade (0-3) at (x, y) of a `width`-pixel-wide RGBA debug image.
+    fn image_shade(image: &[u8], width: usize, x: usize, y: usize) -> usize {
+        let i = (y * width + x) * 4;
+        DMG_PALETTE
+            .iter()
+            .position(|c| c[..] == image[i..i + 4])
+            .expect("a palette color")
+    }
+
+    #[test]
+    fn tile_sheet_lays_out_all_384_tiles_16_per_row() {
+        let mut p = bg_ppu();
+        put_tile(&mut p, 0x8010, striped(0xFF, 0xFF)); // tile 1: color 3
+        put_tile(&mut p, 0x9000, striped(0xFF, 0x00)); // tile 256: color 1
+        put_tile(&mut p, 0x97F0, striped(0x00, 0xFF)); // tile 383: color 2
+        let sheet = p.tile_sheet();
+        assert_eq!(sheet.len(), TILE_SHEET_WIDTH * TILE_SHEET_HEIGHT * 4);
+        let at = |x, y| image_shade(&sheet, TILE_SHEET_WIDTH, x, y);
+        assert_eq!(at(0, 0), 0, "tile 0 is blank");
+        assert_eq!((at(8, 0), at(15, 7)), (3, 3), "tile 1, next to it");
+        assert_eq!(at(16, 0), 0, "tile 2");
+        assert_eq!(at(0, 128), 1, "tile 256 starts row 16");
+        assert_eq!(at(127, 191), 2, "tile 383 is last");
+    }
+
+    #[test]
+    fn debug_views_show_colors_through_bgp() {
+        let mut p = bg_ppu();
+        put_tile(&mut p, 0x8010, striped(0xFF, 0xFF));
+        p.bgp = 0b00_11_11_11; // color 3 shows lightest, 0-2 darkest
+        let sheet = p.tile_sheet();
+        assert_eq!(image_shade(&sheet, TILE_SHEET_WIDTH, 8, 0), 0);
+        assert_eq!(image_shade(&sheet, TILE_SHEET_WIDTH, 0, 0), 3);
+    }
+
+    #[test]
+    fn tile_map_image_draws_a_whole_map() {
+        let mut p = bg_ppu();
+        put_tile(&mut p, 0x8010, striped(0xFF, 0xFF)); // tile 1 ($8000 mode)
+        put_tile(&mut p, 0x9010, striped(0xFF, 0x00)); // tile 1 ($8800 mode)
+        p.write_vram(0x9800 + 32 + 2, 1); // map 0, column 2, row 1
+        p.write_vram(0x9C00 + 31 * 32 + 31, 1); // map 1, bottom-right corner
+        let map0 = p.tile_map_image(false);
+        assert_eq!(map0.len(), 256 * 256 * 4);
+        assert_eq!(image_shade(&map0, 256, 16, 8), 3);
+        assert_eq!(image_shade(&map0, 256, 15, 8), 0);
+        let map1 = p.tile_map_image(true);
+        assert_eq!(image_shade(&map1, 256, 255, 255), 3, "$9C00 map");
+        assert_eq!(image_shade(&map1, 256, 16, 8), 0);
+        p.lcdc &= !0x10;
+        let signed = p.tile_map_image(false);
+        assert_eq!(
+            image_shade(&signed, 256, 16, 8),
+            1,
+            "LCDC bit 4: tile 1 at $9010"
+        );
     }
 
     /// LCD on, BG on, $8000 addressing, $9800 map, identity palette.

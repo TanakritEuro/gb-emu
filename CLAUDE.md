@@ -8,7 +8,8 @@ A Game Boy (DMG) emulator in Rust that runs in the browser via WebAssembly.
   - `cpu.rs` SM83 CPU (registers, fetch/decode/execute)
   - `bus.rs` memory map; routes every read/write; IF/IE; serial; OAM DMA
   - `cartridge.rs` header parsing + MBCs (ROM-only, MBC1, MBC2, MBC3 with its real-time clock, MBC5)
-  - `ppu.rs` scanline timing, STAT/LY, framebuffer (scanline renderer: background, window, sprites)
+  - `ppu.rs` scanline timing, STAT/LY, framebuffer (scanline renderer: background, window, sprites);
+    debugger pictures of VRAM (tile sheet, tile maps)
   - `timer.rs` DIV/TIMA/TMA/TAC
   - `apu.rs` sound: four channels, frame sequencer (length, envelope, sweep), mixer, high-pass filter
   - `joypad.rs` $FF00
@@ -16,7 +17,7 @@ A Game Boy (DMG) emulator in Rust that runs in the browser via WebAssembly.
   - `tests/smoke.rs` end-to-end tests through the public `GameBoy` API
 - `crates/gb-cli/` — headless runner for test ROMs; `--doctor` writes Gameboy Doctor traces, `--wav` records audio
 - `crates/gb-wasm/` — wasm-bindgen wrapper (`Emulator` class) used by `web/`
-- `web/` — static frontend (`index.html`, `main.js`, `style.css`; `input.js` maps keyboard/gamepad/touch to buttons, `timing.js` paces frames, `saves.js` keeps battery saves in localStorage, `audio.js` + `audio-worklet.js` + `audio-queue.js` play sound, `debugger.js` + `memview.js` are the debugger panel); `web/pkg/` is generated
+- `web/` — static frontend (`index.html`, `main.js`, `style.css`; `input.js` maps keyboard/gamepad/touch to buttons, `timing.js` paces frames, `saves.js` keeps battery saves in localStorage, `audio.js` + `audio-worklet.js` + `audio-queue.js` play sound, `debugger.js` + `memview.js` + `vramview.js` are the debugger panel); `web/pkg/` is generated
 - `scripts/build-web.ps1` / `build-web.sh` — build `web/pkg`
 - `scripts/serve.js` — zero-dependency Node dev server for `web/` (port 8765)
 - `roms/` — test ROMs, git-ignored. Never commit ROM files.

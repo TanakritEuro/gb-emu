@@ -143,6 +143,17 @@ impl Emulator {
         self.gb.rom_bank(addr)
     }
 
+    /// All 384 tiles in VRAM as RGBA, 128 × 192 pixels (16 tiles per row),
+    /// colored through BGP.
+    pub fn tile_sheet(&self) -> Vec<u8> {
+        self.gb.tile_sheet()
+    }
+
+    /// A tile map as RGBA, 256 × 256: $9C00 if `high_map`, else $9800.
+    pub fn tile_map(&self, high_map: bool) -> Vec<u8> {
+        self.gb.tile_map(high_map)
+    }
+
     /// `count` instructions from `addr`, one line each, like
     /// `"0150  3E 01     LD A,$01"`.
     pub fn disassemble(&self, addr: u16, count: usize) -> Vec<String> {

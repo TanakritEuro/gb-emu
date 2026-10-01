@@ -59,6 +59,9 @@ an interrupt wakes it. Step frame runs one frame.
 Under that, a memory view shows 256 bytes at a time, live: type an address (`C000`, `PC`, `LY`)
 and press Enter, jump to a region, or follow PC, SP or HL. Bytes the game just wrote light up;
 click one to see its value and what it is.
+The VRAM view shows all 384 tiles and a whole 256×256 tile map, with the part on screen outlined
+(and the window's part, when it's on). Hover to see a tile's number and address; click to open
+it in the memory view.
 
 ## Working with Claude Code
 

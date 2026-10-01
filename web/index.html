@@ -77,7 +77,8 @@
         </div>
         <pre id="disasm" class="disasm" aria-label="Next instructions"></pre>
       </div>
-      <div class="memory">
+      <details id="mem-section" class="debug-section memory" open>
+        <summary>Memory</summary>
         <div class="toolbar">
           <input id="mem-addr" type="text" size="12" spellcheck="false" autocomplete="off"
                  placeholder="C000, PC, LY…" aria-label="Go to address (Enter)">
@@ -98,7 +99,29 @@
           <span id="mem-info"></span>
           <span><i class="pc"></i>PC <i class="sp"></i>SP <i class="hl"></i>HL <i class="changed"></i>changed</span>
         </div>
-      </div>
+      </details>
+      <details id="vram-section" class="debug-section" open>
+        <summary>VRAM</summary>
+        <div class="vram">
+          <figure>
+            <figcaption class="muted">Tiles $8000–$97FF</figcaption>
+            <canvas id="vram-tiles" width="128" height="192" aria-label="All 384 tiles"></canvas>
+          </figure>
+          <figure>
+            <figcaption class="muted">
+              <select id="vram-map" aria-label="Which tile map">
+                <option value="bg">Background map</option>
+                <option value="window">Window map</option>
+                <option value="9800">Map $9800</option>
+                <option value="9C00">Map $9C00</option>
+              </select>
+              <span class="vram-key"><i class="screen"></i>on screen <i class="window"></i>window</span>
+            </figcaption>
+            <canvas id="vram-map-canvas" width="256" height="256" aria-label="Tile map"></canvas>
+          </figure>
+        </div>
+        <div id="vram-info" class="muted vram-info"></div>
+      </details>
     </details>
 
     <details id="serial-panel">
