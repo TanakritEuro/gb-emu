@@ -118,7 +118,12 @@
         <summary>VRAM</summary>
         <div class="vram">
           <figure>
-            <figcaption class="muted">Tiles $8000–$97FF</figcaption>
+            <figcaption class="muted">Tiles $8000–$97FF
+              <select id="vram-bank" aria-label="VRAM bank" hidden>
+                <option value="0">bank 0</option>
+                <option value="1">bank 1</option>
+              </select>
+            </figcaption>
             <canvas id="vram-tiles" width="128" height="192" aria-label="All 384 tiles"></canvas>
           </figure>
           <figure>

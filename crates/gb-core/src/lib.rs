@@ -317,10 +317,16 @@ impl GameBoy {
         self.bus.cart.rom_bank(addr)
     }
 
-    /// All 384 VRAM tiles as an RGBA image, 16 per row (see
+    /// All 384 tiles of a VRAM bank as an RGBA image, 16 per row (see
     /// [`ppu::Ppu::tile_sheet`]), for a debugger.
-    pub fn tile_sheet(&self) -> Vec<u8> {
-        self.bus.ppu.tile_sheet()
+    pub fn tile_sheet(&self, bank: u8) -> Vec<u8> {
+        self.bus.ppu.tile_sheet(bank)
+    }
+
+    /// All of VRAM (both banks on the Color: bank 1 from offset $2000),
+    /// whichever bank the CPU has selected, for a debugger.
+    pub fn vram(&self) -> &[u8] {
+        self.bus.ppu.vram()
     }
 
     /// The 256×256 tile map at $9C00 (`high_map`) or $9800 as an RGBA image,

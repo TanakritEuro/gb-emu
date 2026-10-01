@@ -58,6 +58,7 @@ const debug = new DebugPanel({
       tiles: $("vram-tiles"),
       map: $("vram-map-canvas"),
       mapChoice: $("vram-map"),
+      tileBank: $("vram-bank"),
       info: $("vram-info"),
     },
     (addr) => {
@@ -652,6 +653,7 @@ for (const id of ["mem-section", "vram-section"]) {
   $(id).addEventListener("toggle", () => debug.update(emu));
 }
 $("vram-map").addEventListener("change", () => debug.update(emu));
+$("vram-bank").addEventListener("change", () => debug.update(emu));
 
 // Sound. Browsers only let audio start from a user gesture, so the first
 // click, tap or key press anywhere switches it on (the Sound button handles

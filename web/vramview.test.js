@@ -11,6 +11,7 @@ import {
   viewportOutline,
   windowRect,
   chosenMap,
+  describeAttrs,
 } from "./vramview.js";
 
 test("the tile sheet is 16 tiles per row in address order", () => {
@@ -94,4 +95,12 @@ test("the map choice follows LCDC unless a map is picked", () => {
   assert.equal(chosenMap("window", 0x91), false);
   assert.equal(chosenMap("9C00", 0x91), true);
   assert.equal(chosenMap("9800", 0x99), false);
+});
+
+test("Color tile attributes read as words", () => {
+  assert.equal(describeAttrs(0x00), "palette 0, bank 0");
+  assert.equal(describeAttrs(0x0d), "palette 5, bank 1");
+  assert.equal(describeAttrs(0x20), "palette 0, bank 0, X flip");
+  assert.equal(describeAttrs(0x60), "palette 0, bank 0, X+Y flip");
+  assert.equal(describeAttrs(0xc7), "palette 7, bank 0, Y flip, over sprites");
 });

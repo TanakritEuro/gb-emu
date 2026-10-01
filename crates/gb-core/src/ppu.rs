@@ -22,6 +22,29 @@ pub const DMG_PALETTE: [[u8; 4]; 4] = [
 pub const TILE_SHEET_WIDTH: usize = 128;
 pub const TILE_SHEET_HEIGHT: usize = 192;
 
+/// RGBA for color `index` (0-3) of `palette` (0-7) in Color palette memory.
+fn palette_color(palettes: &[u8; 64], palette: u8, index: u8) -> [u8; 4] {
+    let i = usize::from(palette & 7) * 8 + usize::from(index & 3) * 2;
+    rgba(u16::from_le_bytes([palettes[i], palettes[i + 1]]))
+}
+
+/// RGBA for an RGB555 color (red in bits 0-4, green 5-9, blue 10-14). Each
+/// 5-bit level becomes 8 bits as (v << 3) | (v >> 2), so 31 is 255, the
+/// conversion cgb-acid2's reference image uses. Real Color screens look
+/// paler; TODO(accuracy): an optional color correction.
+fn rgba(color: u16) -> [u8; 4] {
+    let level = |shift: u16| {
+        let v = ((color >> shift) & 0x1F) as u8;
+        (v << 3) | (v >> 2)
+    };
+    [level(0), level(5), level(10), 0xFF]
+}
+
+/// The RGB555 color `rgba` made a pixel (the top 5 bits of each channel).
+fn rgb555(px: &[u8; 4]) -> u16 {
+    u16::from(px[0] >> 3) | (u16::from(px[1] >> 3) << 5) | (u16::from(px[2] >> 3) << 10)
+}
+
 const DOTS_PER_LINE: u32 = 456;
 const LINES_PER_FRAME: u8 = 154;
 const VBLANK_LINE: u8 = 144;
@@ -30,10 +53,21 @@ const VBLANK_LINE: u8 = 144;
 pub struct Ppu {
     model: Model,
     /// 8 KiB on the original; two 8 KiB banks on the Color, bank 1 at
-    /// `0x2000..`. Rendering reads bank 0 for now.
+    /// `0x2000..`. Bank 1 holds more tiles and, behind each tile map entry,
+    /// that tile's attributes.
     vram: Box<[u8; 0x4000]>,
     /// The bank the CPU sees at $8000-$9FFF (VBK, $FF4F). Color only.
     vram_bank: u8,
+    /// Color palette memory: 8 palettes x 4 colors x 2 bytes (RGB555, low
+    /// byte first), for the background and for sprites. Color only.
+    /// https://gbdev.io/pandocs/Palettes.html#lcd-color-palettes-cgb-only
+    bg_palettes: [u8; 64],
+    obj_palettes: [u8; 64],
+    /// BCPS / OCPS ($FF68 / $FF6A): bits 0-5 pick the palette byte that
+    /// BCPD / OCPD ($FF69 / $FF6B) reach; with bit 7 set, each write to the
+    /// data register moves on to the next byte.
+    bcps: u8,
+    ocps: u8,
     oam: [u8; 0xA0],
     pub lcdc: u8,
     pub stat: u8,
@@ -79,6 +113,12 @@ impl Ppu {
             model,
             vram: Box::new([0; 0x4000]),
             vram_bank: 0,
+            // The boot ROM makes every background color white ($7FFF) and
+            // leaves the sprite colors unset.
+            bg_palettes: [0xFF, 0x7F].repeat(32).try_into().unwrap_or([0xFF; 64]),
+            obj_palettes: [0; 64],
+            bcps: 0,
+            ocps: 0,
             oam: [0; 0xA0],
             lcdc: 0x91,
             stat: 0x85,
@@ -121,14 +161,26 @@ impl Ppu {
         w.u8(self.window_line);
         w.bool(self.stat_line);
         w.u8(self.pending_irq);
-        // The picture, so a loaded state shows its own frame straight away:
-        // every pixel is one of four shades, so 2 bits each, 4 per byte.
-        let mut packed = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT / 4];
-        for (i, px) in self.framebuffer.as_chunks::<4>().0.iter().enumerate() {
-            let shade = DMG_PALETTE.iter().position(|c| c == px).unwrap_or(0) as u8;
-            packed[i / 4] |= shade << ((i % 4) * 2);
+        w.bytes(&self.bg_palettes);
+        w.bytes(&self.obj_palettes);
+        w.bytes(&[self.bcps, self.ocps]);
+        // The picture, so a loaded state shows its own frame straight away.
+        // On the original every pixel is one of four shades: 2 bits each, 4
+        // per byte. On the Color it's any RGB555 color: 2 bytes each.
+        if self.cgb() {
+            let mut colors = Vec::with_capacity(SCREEN_WIDTH * SCREEN_HEIGHT * 2);
+            for px in self.framebuffer.as_chunks::<4>().0 {
+                colors.extend_from_slice(&rgb555(px).to_le_bytes());
+            }
+            w.bytes(&colors);
+        } else {
+            let mut packed = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT / 4];
+            for (i, px) in self.framebuffer.as_chunks::<4>().0.iter().enumerate() {
+                let shade = DMG_PALETTE.iter().position(|c| c == px).unwrap_or(0) as u8;
+                packed[i / 4] |= shade << ((i % 4) * 2);
+            }
+            w.bytes(&packed);
         }
-        w.bytes(&packed);
     }
 
     pub(crate) fn load_state(&mut self, r: &mut StateReader) -> Result<(), StateError> {
@@ -151,16 +203,23 @@ impl Ppu {
         self.window_line = r.u8()?;
         self.stat_line = r.bool()?;
         self.pending_irq = r.u8()?;
-        let mut packed = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT / 4];
-        r.bytes(&mut packed)?;
-        for (i, px) in self
-            .framebuffer
-            .as_chunks_mut::<4>()
-            .0
-            .iter_mut()
-            .enumerate()
-        {
-            *px = DMG_PALETTE[usize::from((packed[i / 4] >> ((i % 4) * 2)) & 3)];
+        r.bytes(&mut self.bg_palettes)?;
+        r.bytes(&mut self.obj_palettes)?;
+        self.bcps = r.u8()?;
+        self.ocps = r.u8()?;
+        let pixels = self.framebuffer.as_chunks_mut::<4>().0;
+        if self.model == Model::Cgb {
+            let mut colors = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 2];
+            r.bytes(&mut colors)?;
+            for (px, c) in pixels.iter_mut().zip(colors.as_chunks::<2>().0) {
+                *px = rgba(u16::from_le_bytes(*c));
+            }
+        } else {
+            let mut packed = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT / 4];
+            r.bytes(&mut packed)?;
+            for (i, px) in pixels.iter_mut().enumerate() {
+                *px = DMG_PALETTE[usize::from((packed[i / 4] >> ((i % 4) * 2)) & 3)];
+            }
         }
         Ok(())
     }
@@ -171,6 +230,39 @@ impl Ppu {
     pub(crate) fn keep_framebuffer_of(&mut self, old: &mut Ppu) {
         old.framebuffer.copy_from_slice(&self.framebuffer);
         std::mem::swap(&mut self.framebuffer, &mut old.framebuffer);
+    }
+
+    fn cgb(&self) -> bool {
+        self.model == Model::Cgb
+    }
+
+    /// The Color's palette registers, $FF68-$FF6B. Unused bit 6 of the
+    /// index registers reads 1. Reading the data never moves the index.
+    /// TODO(accuracy): during mode 3 palette memory is busy: reads give $FF
+    /// and writes are ignored (the index still moves on).
+    pub fn read_color_reg(&self, addr: u16) -> u8 {
+        match addr {
+            0xFF68 => self.bcps | 0x40,
+            0xFF69 => self.bg_palettes[usize::from(self.bcps & 0x3F)],
+            0xFF6A => self.ocps | 0x40,
+            _ => self.obj_palettes[usize::from(self.ocps & 0x3F)],
+        }
+    }
+
+    pub fn write_color_reg(&mut self, addr: u16, val: u8) {
+        /// Writes the byte `index` picks, then moves it on if it auto-increments.
+        fn write(palettes: &mut [u8; 64], index: &mut u8, val: u8) {
+            palettes[usize::from(*index & 0x3F)] = val;
+            if *index & 0x80 != 0 {
+                *index = 0x80 | ((*index + 1) & 0x3F);
+            }
+        }
+        match addr {
+            0xFF68 => self.bcps = val & 0xBF,
+            0xFF69 => write(&mut self.bg_palettes, &mut self.bcps, val),
+            0xFF6A => self.ocps = val & 0xBF,
+            _ => write(&mut self.obj_palettes, &mut self.ocps, val),
+        }
     }
 
     /// The VRAM bank the CPU sees, 0 or 1 (always 0 on the original).
@@ -359,8 +451,9 @@ impl Ppu {
             self.wy_triggered = true;
         }
         // LCDC bit 0 off blanks the background and the window on DMG: they
-        // count as color 0 (for sprite priority too), shown through BGP.
-        let bg_on = self.lcdc & 0x01 != 0;
+        // count as color 0 (for sprite priority too), shown through BGP. On
+        // the Color it hides nothing; it's a sprite priority switch there.
+        let bg_on = self.cgb() || self.lcdc & 0x01 != 0;
         let window_on = bg_on && self.lcdc & 0x20 != 0 && self.wy_triggered && self.wx <= 166;
         // Screen column where the window starts. TODO(accuracy): WX 0 also
         // shifts it left by SCX % 8, and WX 166 has a DMG-only glitch.
@@ -368,9 +461,10 @@ impl Ppu {
 
         let row = usize::from(self.ly) * SCREEN_WIDTH;
         for x in 0..SCREEN_WIDTH as u8 {
-            // Background/window color index; a blanked background counts as 0.
-            let bg_index = if !bg_on {
-                0
+            // Background/window color index and (on the Color) the tile's
+            // attributes; a blanked background counts as color 0.
+            let (bg_index, bg_attrs) = if !bg_on {
+                (0, 0)
             } else if window_on && i16::from(x) >= window_x {
                 // The window doesn't scroll: its own map, from its (0,0).
                 let wx = (i16::from(x) - window_x) as u8;
@@ -381,23 +475,25 @@ impl Ppu {
                 self.map_pixel(self.lcdc & 0x08 != 0, map_x, map_y)
             };
             // A blanked background shows BGP's color 0 (usually white).
-            let mut shade = (self.bgp >> (bg_index * 2)) & 0x03;
+            let mut color = self.bg_color(bg_attrs & 0x07, bg_index);
 
             // The winning sprite pixel is picked first; only then does its
             // "BG over OBJ" bit decide whether BG colors 1-3 cover it.
-            if let Some((color, attrs)) = self.sprite_pixel(sprites, x) {
+            // TODO(milestone 7): on the Color, sprites use the OBJ palettes,
+            // their VRAM bank bit and the Color's priority rules.
+            if let Some((sprite_index, attrs)) = self.sprite_pixel(sprites, x) {
                 if attrs & 0x80 == 0 || bg_index == 0 {
                     let palette = if attrs & 0x10 != 0 {
                         self.obp1
                     } else {
                         self.obp0
                     };
-                    shade = (palette >> (color * 2)) & 0x03;
+                    color = DMG_PALETTE[usize::from((palette >> (sprite_index * 2)) & 0x03)];
                 }
             }
 
             let i = (row + usize::from(x)) * 4;
-            self.framebuffer[i..i + 4].copy_from_slice(&DMG_PALETTE[usize::from(shade)]);
+            self.framebuffer[i..i + 4].copy_from_slice(&color);
         }
 
         // The window's own line counter only advances on lines it was drawn,
@@ -407,29 +503,55 @@ impl Ppu {
         }
     }
 
-    /// Color index (0-3, before BGP) at pixel (`x`, `y`) of a 256x256 tile map:
-    /// $9C00 if `high_map`, else $9800. The background picks its map with LCDC
-    /// bit 3 and scrolls over it with SCX/SCY (wrapping); the window uses LCDC
-    /// bit 6. https://gbdev.io/pandocs/Scrolling.html
-    fn map_pixel(&self, high_map: bool, x: u8, y: u8) -> u8 {
+    /// Color index (0-3, before the palette) at pixel (`x`, `y`) of a 256x256
+    /// tile map, and that tile's attributes (always 0 on the original).
+    /// $9C00 if `high_map`, else $9800. The background picks its map with
+    /// LCDC bit 3 and scrolls over it with SCX/SCY (wrapping); the window
+    /// uses LCDC bit 6. https://gbdev.io/pandocs/Scrolling.html
+    ///
+    /// On the Color each map entry has an attribute byte at the same place in
+    /// VRAM bank 1: bits 0-2 the palette, bit 3 the VRAM bank of the tile's
+    /// pixels, bit 5 X flip, bit 6 Y flip, bit 7 priority over sprites.
+    /// https://gbdev.io/pandocs/Tile_Maps.html#bg-map-attributes-cgb-mode-only
+    fn map_pixel(&self, high_map: bool, x: u8, y: u8) -> (u8, u8) {
         let map = if high_map { 0x1C00 } else { 0x1800 };
-        let tile = self.vram[map + usize::from(y / 8) * 32 + usize::from(x / 8)];
-        self.tile_pixel(tile, x % 8, y % 8)
+        let entry = map + usize::from(y / 8) * 32 + usize::from(x / 8);
+        let tile = self.vram[entry];
+        let attrs = if self.cgb() {
+            self.vram[0x2000 + entry]
+        } else {
+            0
+        };
+        let col = if attrs & 0x20 != 0 { 7 - x % 8 } else { x % 8 };
+        let row = if attrs & 0x40 != 0 { 7 - y % 8 } else { y % 8 };
+        let bank = (attrs >> 3) & 1;
+        (self.tile_pixel(tile, bank, col, row), attrs)
     }
 
-    /// Color index of pixel (`col`, `row`) in background/window tile `tile`.
+    /// Color index of pixel (`col`, `row`) in background/window tile `tile`
+    /// of VRAM bank `bank`.
     ///
     /// Each tile row is two bytes: the low bit of every pixel's color, then
     /// the high bit, leftmost pixel in bit 7. LCDC bit 4 picks the addressing:
     /// set, tiles 0-255 start at $8000; clear, tiles are signed (-128..127)
     /// around $9000. https://gbdev.io/pandocs/Tile_Data.html
-    fn tile_pixel(&self, tile: u8, col: u8, row: u8) -> u8 {
+    fn tile_pixel(&self, tile: u8, bank: u8, col: u8, row: u8) -> u8 {
         let base = if self.lcdc & 0x10 != 0 {
             u16::from(tile) * 16
         } else {
             0x1000u16.wrapping_add_signed(i16::from(tile as i8) * 16)
         };
-        self.tile_data_pixel(usize::from(base), col, row)
+        self.tile_data_pixel(usize::from(bank) * 0x2000 + usize::from(base), col, row)
+    }
+
+    /// RGBA for background color `index` (0-3): through BGP on the original,
+    /// from background palette `palette` (0-7) on the Color.
+    fn bg_color(&self, palette: u8, index: u8) -> [u8; 4] {
+        if self.cgb() {
+            palette_color(&self.bg_palettes, palette, index)
+        } else {
+            DMG_PALETTE[usize::from((self.bgp >> (index * 2)) & 0x03)]
+        }
     }
 
     /// Color index of pixel (`col`, `row`) in the tile at VRAM offset `base`.
@@ -442,37 +564,44 @@ impl Ppu {
 
     // Debugger views: pictures of VRAM, read without changing anything.
 
-    /// All 384 tiles at $8000-$97FF as RGBA, [`TILE_SHEET_WIDTH`] ×
-    /// [`TILE_SHEET_HEIGHT`]: 16 tiles per row in address order, so tile n
-    /// of the $8000 block is at column n % 16, row n / 16. Colors go through
-    /// BGP, as the background would show them (sprites use OBP0/OBP1).
+    /// All 384 tiles at $8000-$97FF of VRAM `bank` (0, or 1 on the Color)
+    /// as RGBA, [`TILE_SHEET_WIDTH`] × [`TILE_SHEET_HEIGHT`]: 16 tiles per
+    /// row in address order, so tile n of the $8000 block is at column n % 16,
+    /// row n / 16. Colors go through BGP, as the background would show them
+    /// (sprites use OBP0/OBP1), or on the Color background palette 0.
     /// https://gbdev.io/pandocs/Tile_Data.html
-    pub fn tile_sheet(&self) -> Vec<u8> {
+    pub fn tile_sheet(&self, bank: u8) -> Vec<u8> {
+        let base = if self.cgb() {
+            usize::from(bank & 1) * 0x2000
+        } else {
+            0
+        };
         let mut out = vec![0; TILE_SHEET_WIDTH * TILE_SHEET_HEIGHT * 4];
         for (i, px) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let (x, y) = (i % TILE_SHEET_WIDTH, i / TILE_SHEET_WIDTH);
             let tile = (y / 8) * 16 + x / 8;
-            let index = self.tile_data_pixel(tile * 16, (x % 8) as u8, (y % 8) as u8);
-            *px = self.bg_rgba(index);
+            let index = self.tile_data_pixel(base + tile * 16, (x % 8) as u8, (y % 8) as u8);
+            *px = self.bg_color(0, index);
         }
         out
     }
 
     /// A whole 256×256 tile map as RGBA: $9C00 if `high_map`, else $9800.
-    /// Tile numbers are read with the addressing LCDC bit 4 selects, and
-    /// colors go through BGP. https://gbdev.io/pandocs/Tile_Maps.html
+    /// Drawn as the background would be: tile numbers read with the
+    /// addressing LCDC bit 4 selects, and on the Color each tile's
+    /// attributes (bank, flips, palette). https://gbdev.io/pandocs/Tile_Maps.html
     pub fn tile_map_image(&self, high_map: bool) -> Vec<u8> {
         let mut out = vec![0; 256 * 256 * 4];
         for (i, px) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-            let index = self.map_pixel(high_map, (i % 256) as u8, (i / 256) as u8);
-            *px = self.bg_rgba(index);
+            let (index, attrs) = self.map_pixel(high_map, (i % 256) as u8, (i / 256) as u8);
+            *px = self.bg_color(attrs & 0x07, index);
         }
         out
     }
 
-    /// RGBA for background color index `index` (0-3) through BGP.
-    fn bg_rgba(&self, index: u8) -> [u8; 4] {
-        DMG_PALETTE[usize::from((self.bgp >> (index * 2)) & 0x03)]
+    /// All of VRAM, both banks on the Color, for a debugger.
+    pub fn vram(&self) -> &[u8] {
+        &self.vram[..self.vram_size()]
     }
 
     /// Sprite height from LCDC bit 2: 8 or 16 pixels.
@@ -715,7 +844,7 @@ mod tests {
         put_tile(&mut p, 0x8010, striped(0xFF, 0xFF)); // tile 1: color 3
         put_tile(&mut p, 0x9000, striped(0xFF, 0x00)); // tile 256: color 1
         put_tile(&mut p, 0x97F0, striped(0x00, 0xFF)); // tile 383: color 2
-        let sheet = p.tile_sheet();
+        let sheet = p.tile_sheet(0);
         assert_eq!(sheet.len(), TILE_SHEET_WIDTH * TILE_SHEET_HEIGHT * 4);
         let at = |x, y| image_shade(&sheet, TILE_SHEET_WIDTH, x, y);
         assert_eq!(at(0, 0), 0, "tile 0 is blank");
@@ -730,7 +859,7 @@ mod tests {
         let mut p = bg_ppu();
         put_tile(&mut p, 0x8010, striped(0xFF, 0xFF));
         p.bgp = 0b00_11_11_11; // color 3 shows lightest, 0-2 darkest
-        let sheet = p.tile_sheet();
+        let sheet = p.tile_sheet(0);
         assert_eq!(image_shade(&sheet, TILE_SHEET_WIDTH, 8, 0), 0);
         assert_eq!(image_shade(&sheet, TILE_SHEET_WIDTH, 0, 0), 3);
     }
@@ -758,6 +887,167 @@ mod tests {
         );
     }
 
+    /// A Color PPU, LCD and BG on, $8000 addressing, $9800 map.
+    fn cgb_ppu() -> Ppu {
+        let mut p = Ppu::with_model(Model::Cgb);
+        p.lcdc = 0x91;
+        p
+    }
+
+    /// Sets color `index` of background palette `palette` to `rgb555`.
+    fn set_bg_color(p: &mut Ppu, palette: u8, index: u8, rgb555: u16) {
+        p.write_color_reg(0xFF68, 0x80 | (palette * 8 + index * 2));
+        let [lo, hi] = rgb555.to_le_bytes();
+        p.write_color_reg(0xFF69, lo);
+        p.write_color_reg(0xFF69, hi);
+    }
+
+    fn rgba_at(p: &Ppu, x: usize, y: usize) -> [u8; 4] {
+        let i = (y * SCREEN_WIDTH + x) * 4;
+        p.framebuffer()[i..i + 4].try_into().unwrap()
+    }
+
+    const RED: u16 = 0x001F;
+    const GREEN: u16 = 0x03E0;
+    const BLUE: u16 = 0x7C00;
+
+    #[test]
+    fn rgb555_becomes_rgba_the_way_cgb_acid2_expects() {
+        assert_eq!(rgba(0x7FFF), [255, 255, 255, 255]);
+        assert_eq!(rgba(0x0000), [0, 0, 0, 255]);
+        assert_eq!(rgba(RED), [255, 0, 0, 255]);
+        assert_eq!(rgba(GREEN), [0, 255, 0, 255]);
+        assert_eq!(rgba(BLUE), [0, 0, 255, 255]);
+        assert_eq!(rgba(0x0001), [8, 0, 0, 255], "(1 << 3) | (1 >> 2)");
+        assert_eq!(rgba(0x0010), [132, 0, 0, 255], "(16 << 3) | (16 >> 2)");
+        for c in [0x0000, 0x1234, 0x7FFF, 0x5555, 0x2AAA] {
+            assert_eq!(rgb555(&rgba(c)), c, "round trip {c:04X}");
+        }
+    }
+
+    #[test]
+    fn palette_data_auto_increments_on_writes_but_not_reads() {
+        let mut p = cgb_ppu();
+        p.write_color_reg(0xFF68, 0x80 | 0x3E);
+        assert_eq!(p.read_color_reg(0xFF68), 0xFE, "bit 6 reads 1");
+        p.write_color_reg(0xFF69, 0x11);
+        p.write_color_reg(0xFF69, 0x22);
+        assert_eq!(p.read_color_reg(0xFF68), 0xC0, "wrapped from 63 to 0");
+        p.write_color_reg(0xFF69, 0x33);
+        p.write_color_reg(0xFF68, 0x3E); // no auto-increment
+        assert_eq!(p.read_color_reg(0xFF69), 0x11);
+        assert_eq!(p.read_color_reg(0xFF69), 0x11, "reading doesn't move on");
+        p.write_color_reg(0xFF69, 0x44);
+        assert_eq!(p.read_color_reg(0xFF68), 0x7E, "without bit 7 it stays");
+        assert_eq!(p.read_color_reg(0xFF69), 0x44);
+        p.write_color_reg(0xFF68, 0x00);
+        assert_eq!(p.read_color_reg(0xFF69), 0x33);
+        // Sprite palettes are separate.
+        p.write_color_reg(0xFF6A, 0x80);
+        p.write_color_reg(0xFF6B, 0x55);
+        assert_eq!(p.read_color_reg(0xFF6A), 0xC1);
+        assert_eq!(p.read_color_reg(0xFF69), 0x33, "background untouched");
+    }
+
+    #[test]
+    fn the_boot_rom_leaves_the_background_white() {
+        let mut p = cgb_ppu();
+        p.render_scanline();
+        assert_eq!(rgba_at(&p, 0, 0), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn color_tiles_pick_their_palette_and_bank_from_vram_bank_1() {
+        let mut p = cgb_ppu();
+        set_bg_color(&mut p, 0, 1, RED);
+        set_bg_color(&mut p, 5, 1, GREEN);
+        set_bg_color(&mut p, 5, 2, BLUE);
+        put_tile(&mut p, 0x8010, striped(0xFF, 0x00)); // tile 1, bank 0: color 1
+        p.set_vram_bank(1);
+        put_tile(&mut p, 0x8010, striped(0x00, 0xFF)); // tile 1, bank 1: color 2
+        p.write_vram(0x9801, 0x05); // map entry 1: palette 5
+        p.write_vram(0x9802, 0x0D); // map entry 2: palette 5, tile from bank 1
+        p.set_vram_bank(0);
+        for entry in 0..3 {
+            p.write_vram(0x9800 + entry, 1);
+        }
+        p.render_scanline();
+        assert_eq!(rgba_at(&p, 0, 0), rgba(RED), "palette 0, color 1");
+        assert_eq!(rgba_at(&p, 8, 0), rgba(GREEN), "palette 5, color 1");
+        assert_eq!(
+            rgba_at(&p, 16, 0),
+            rgba(BLUE),
+            "palette 5, color 2 from bank 1"
+        );
+    }
+
+    #[test]
+    fn color_tiles_can_be_flipped() {
+        let mut p = cgb_ppu();
+        set_bg_color(&mut p, 0, 1, RED);
+        // Tile 1: only the top-left pixel set.
+        let mut tile = [0u8; 16];
+        tile[0] = 0x80;
+        put_tile(&mut p, 0x8010, tile);
+        for entry in 0..4 {
+            p.write_vram(0x9800 + entry, 1);
+        }
+        p.set_vram_bank(1);
+        p.write_vram(0x9801, 0x20); // X flip
+        p.write_vram(0x9802, 0x40); // Y flip
+        p.write_vram(0x9803, 0x60); // both
+        p.set_vram_bank(0);
+        let lit = |p: &Ppu, x, y| rgba_at(p, x, y) == rgba(RED);
+        for ly in [0, 7] {
+            p.ly = ly;
+            p.render_scanline();
+        }
+        assert!(lit(&p, 0, 0) && !lit(&p, 7, 0), "unflipped: top left");
+        assert!(lit(&p, 15, 0) && !lit(&p, 8, 0), "X flip: top right");
+        assert!(lit(&p, 16, 7) && !lit(&p, 16, 0), "Y flip: bottom left");
+        assert!(lit(&p, 31, 7), "both: bottom right");
+    }
+
+    #[test]
+    fn lcdc_bit_0_does_not_hide_the_color_background() {
+        let mut p = cgb_ppu();
+        set_bg_color(&mut p, 0, 3, BLUE);
+        put_tile(&mut p, 0x8000, striped(0xFF, 0xFF));
+        p.lcdc &= !0x01;
+        p.render_scanline();
+        assert_eq!(rgba_at(&p, 0, 0), rgba(BLUE));
+    }
+
+    #[test]
+    fn the_original_ignores_vram_bank_1_attributes() {
+        let mut p = bg_ppu(); // DMG
+        put_tile(&mut p, 0x8000, striped(0xFF, 0x00)); // tile 0, color 1
+        p.vram[0x2000] = 0x20; // where a Color would look for attributes
+        p.render_scanline();
+        assert_eq!(shade_at(&p, 0, 0), 1, "drawn plainly through BGP");
+    }
+
+    #[test]
+    fn a_color_picture_survives_a_save_state() {
+        let mut p = cgb_ppu();
+        set_bg_color(&mut p, 0, 0, 0x1234);
+        p.render_scanline();
+        let mut w = StateWriter::new();
+        p.save_state(&mut w);
+        let state = w.finish(0);
+        let mut q = cgb_ppu();
+        let mut r = StateReader::open(&state, 0).unwrap();
+        q.load_state(&mut r).unwrap();
+        r.finish().unwrap();
+        assert_eq!(rgba_at(&q, 0, 0), rgba(0x1234));
+        assert_eq!(
+            q.read_color_reg(0xFF68),
+            0xC2,
+            "the index moved on past the color"
+        );
+        assert_eq!(q.bg_palettes, p.bg_palettes);
+    }
+
     /// LCD on, BG on, $8000 addressing, $9800 map, identity palette.
     fn bg_ppu() -> Ppu {
         let mut p = Ppu::new();
@@ -771,7 +1061,7 @@ mod tests {
         // Pan Docs' example row: $3C $7E is 0 2 3 3 3 3 2 0.
         let mut p = bg_ppu();
         put_tile(&mut p, 0x8000, striped(0x3C, 0x7E));
-        let row: Vec<u8> = (0..8).map(|col| p.tile_pixel(0, col, 0)).collect();
+        let row: Vec<u8> = (0..8).map(|col| p.tile_pixel(0, 0, col, 0)).collect();
         assert_eq!(row, [0, 2, 3, 3, 3, 3, 2, 0]);
     }
 
@@ -781,12 +1071,20 @@ mod tests {
         put_tile(&mut p, 0x8000, striped(0xFF, 0x00)); // tile 0, $8000 mode
         put_tile(&mut p, 0x9000, striped(0x00, 0xFF)); // tile 0, $8800 mode
         put_tile(&mut p, 0x8800, striped(0xFF, 0xFF)); // tile $80 in both
-        assert_eq!(p.tile_pixel(0x00, 0, 0), 1);
-        assert_eq!(p.tile_pixel(0x80, 0, 0), 3);
+        assert_eq!(p.tile_pixel(0x00, 0, 0, 0), 1);
+        assert_eq!(p.tile_pixel(0x80, 0, 0, 0), 3);
         p.lcdc &= !0x10;
-        assert_eq!(p.tile_pixel(0x00, 0, 0), 2, "signed: tile 0 is at $9000");
-        assert_eq!(p.tile_pixel(0x80, 0, 0), 3, "signed: tile -128 is at $8800");
-        assert_eq!(p.tile_pixel(0x7F, 0, 0), 0, "tile 127 is at $97F0 (blank)");
+        assert_eq!(p.tile_pixel(0x00, 0, 0, 0), 2, "signed: tile 0 is at $9000");
+        assert_eq!(
+            p.tile_pixel(0x80, 0, 0, 0),
+            3,
+            "signed: tile -128 is at $8800"
+        );
+        assert_eq!(
+            p.tile_pixel(0x7F, 0, 0, 0),
+            0,
+            "tile 127 is at $97F0 (blank)"
+        );
     }
 
     #[test]

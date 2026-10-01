@@ -27,7 +27,8 @@ use std::fmt;
 const MAGIC: &[u8; 4] = b"GBST";
 /// Bump whenever any section's contents change.
 /// 2: Game Boy Color: the model, WRAM and VRAM banks, KEY1.
-pub const VERSION: u16 = 2;
+/// 3: Color palettes, and the Color's picture in RGB555.
+pub const VERSION: u16 = 3;
 /// Bytes before the payload: magic, version, fingerprint, length.
 const HEADER_LEN: usize = 4 + 2 + 8 + 4;
 

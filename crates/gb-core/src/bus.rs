@@ -185,9 +185,10 @@ impl Bus {
             0xFF44 if self.doctor_mode => 0x90,
             0xFF40..=0xFF4B => self.ppu.read_reg(addr),
             // Color registers: unused bits read 1; on the original, all of it.
-            0xFF4D | 0xFF4F | 0xFF70 if !self.cgb() => 0xFF,
+            0xFF4D | 0xFF4F | 0xFF68..=0xFF6B | 0xFF70 if !self.cgb() => 0xFF,
             0xFF4D => 0x7E | (u8::from(self.double_speed) << 7) | u8::from(self.speed_armed),
             0xFF4F => 0xFE | self.ppu.vram_bank(),
+            0xFF68..=0xFF6B => self.ppu.read_color_reg(addr),
             0xFF70 => 0xF8 | self.svbk,
             _ => self.io[(addr - 0xFF00) as usize],
         }
@@ -227,9 +228,10 @@ impl Bus {
             0xFF0F => self.if_reg = val | 0xE0,
             0xFF46 => self.oam_dma(val),
             0xFF40..=0xFF4B => self.ppu.write_reg(addr, val),
-            0xFF4D | 0xFF4F | 0xFF70 if !self.cgb() => {}
+            0xFF4D | 0xFF4F | 0xFF68..=0xFF6B | 0xFF70 if !self.cgb() => {}
             0xFF4D => self.speed_armed = val & 1 != 0,
             0xFF4F => self.ppu.set_vram_bank(val & 1),
+            0xFF68..=0xFF6B => self.ppu.write_color_reg(addr, val),
             0xFF70 => self.svbk = val & 7,
             _ => self.io[(addr - 0xFF00) as usize] = val,
         }
@@ -404,7 +406,7 @@ mod tests {
     fn the_original_has_no_color_registers() {
         let mut b = bus();
         b.write(0xD000, 0x55);
-        for reg in [0xFF4D, 0xFF4F, 0xFF70] {
+        for reg in [0xFF4D, 0xFF4F, 0xFF68, 0xFF69, 0xFF6A, 0xFF6B, 0xFF70] {
             b.write(reg, 0x01);
             assert_eq!(b.read(reg), 0xFF, "${reg:04X}");
         }

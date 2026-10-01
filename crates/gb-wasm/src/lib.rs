@@ -3,7 +3,7 @@
 //! Errors become thrown JS `Error`s, so web/main.js can show messages like
 //! "illegal opcode DD at $0150" right on the page.
 
-use gb_core::{Button, FrameEnd, GameBoy, Rewind, CPU_HZ, CYCLES_PER_FRAME};
+use gb_core::{Button, FrameEnd, GameBoy, Model, Rewind, CPU_HZ, CYCLES_PER_FRAME};
 use wasm_bindgen::prelude::*;
 
 /// Rewind history: a snapshot every 2 frames (so rewinding one snapshot per
@@ -204,10 +204,21 @@ impl Emulator {
         self.gb.rom_bank(addr)
     }
 
-    /// All 384 tiles in VRAM as RGBA, 128 × 192 pixels (16 tiles per row),
-    /// colored through BGP.
-    pub fn tile_sheet(&self) -> Vec<u8> {
-        self.gb.tile_sheet()
+    /// All 384 tiles of VRAM bank `bank` (1 only on the Color) as RGBA,
+    /// 128 × 192 pixels (16 tiles per row), colored through BGP, or on the
+    /// Color background palette 0.
+    pub fn tile_sheet(&self, bank: u8) -> Vec<u8> {
+        self.gb.tile_sheet(bank)
+    }
+
+    /// All of VRAM: 8 KB, or 16 KB on the Color (bank 1 from offset $2000).
+    pub fn vram(&self) -> Vec<u8> {
+        self.gb.vram().to_vec()
+    }
+
+    /// Whether this is running as a Game Boy Color.
+    pub fn is_color(&self) -> bool {
+        self.gb.model() == Model::Cgb
     }
 
     /// A tile map as RGBA, 256 × 256: $9C00 if `high_map`, else $9800.

@@ -34,6 +34,16 @@ export function bgTileAddress(tile, lcdc) {
   return 0x9000 + ((tile << 24) >> 24) * 16; // as a signed byte
 }
 
+/** What a Color tile's attribute byte says, e.g. "palette 5, bank 1, X flip",
+ * https://gbdev.io/pandocs/Tile_Maps.html#bg-map-attributes-cgb-mode-only */
+export function describeAttrs(attrs) {
+  const parts = [`palette ${attrs & 7}`, `bank ${(attrs >> 3) & 1}`];
+  const flips = [attrs & 0x20 && "X", attrs & 0x40 && "Y"].filter(Boolean);
+  if (flips.length) parts.push(`${flips.join("+")} flip`);
+  if (attrs & 0x80) parts.push("over sprites");
+  return parts.join(", ");
+}
+
 /** A run of `len` pixels from `start` on a 256-wide map that wraps: one or
  * two [start, length] pieces. */
 export function wrapSpan(start, len, size = MAP_SIZE) {
@@ -83,13 +93,17 @@ export function chosenMap(choice, lcdc) {
 }
 
 export class VramView {
-  /** `els`: { section (a <details>), tiles, map, mapChoice, info } (tiles and
-   * map are canvases); `pick(addr)` shows an address in the memory view. */
+  /** `els`: { section (a <details>), tiles, map, mapChoice, tileBank, info }
+   * (tiles and map are canvases; tileBank a select shown on the Color);
+   * `pick(addr)` shows an address in the memory view. */
   constructor(els, pick) {
     this.els = els;
     this.pick = pick;
     this.lcdc = 0;
     this.mapEntries = new Uint8Array(0x800); // $9800-$9FFF, for hover info
+    this.mapAttrs = null; // the same in bank 1, on the Color
+    this.color = false;
+    this.bank = 0; // the tile sheet's bank
     this.highMap = false;
     this.els.tiles.addEventListener("mousemove", (e) => this.hoverTile(e));
     this.els.map.addEventListener("mousemove", (e) => this.hoverMap(e));
@@ -112,10 +126,17 @@ export class VramView {
     const [lcdc, , scy, scx] = emu.memory(0xff40, 4);
     const [, , wy, wx] = emu.memory(0xff48, 4); // OBP0 OBP1 WY WX
     this.lcdc = lcdc;
-    this.mapEntries = emu.memory(0x9800, 0x800);
+    // Straight from VRAM, not through the bus, which shows whichever bank
+    // the game has picked.
+    const vram = emu.vram();
+    this.color = emu.is_color();
+    this.mapEntries = vram.subarray(0x1800, 0x2000);
+    this.mapAttrs = this.color ? vram.subarray(0x3800, 0x4000) : null;
     this.highMap = chosenMap(this.els.mapChoice.value, lcdc);
+    this.els.tileBank.hidden = !this.color;
+    this.bank = this.color ? Number(this.els.tileBank.value) : 0;
 
-    draw(this.els.tiles, emu.tile_sheet(), SHEET_W, SHEET_H);
+    draw(this.els.tiles, emu.tile_sheet(this.bank), SHEET_W, SHEET_H);
     const ctx = draw(this.els.map, emu.tile_map(this.highMap), MAP_SIZE, MAP_SIZE);
     // Outline what is on screen, if this map is the one shown there.
     const lcdOn = Boolean(lcdc & 0x80);
@@ -157,8 +178,9 @@ export class VramView {
     this.hovering = true;
     const n = this.tileUnder(e);
     const block = n < 256 ? `$${hex(n & 0xff, 2)}` : `$${hex(n - 256, 2)} (signed ${n - 256})`;
+    const bank = this.color ? ` in bank ${this.bank}` : "";
     this.els.info.textContent =
-      `tile ${block} at $${hex(tileAddress(n), 4)}: ${tileUsers(n)}`;
+      `tile ${block} at ${hex(tileAddress(n), 4)}${bank}: ${tileUsers(n)}`;
   }
 
   hoverMap(e) {
@@ -166,9 +188,11 @@ export class VramView {
     const [x, y] = canvasPoint(e, MAP_SIZE, MAP_SIZE);
     const entry = mapEntryAddress(this.highMap, x, y);
     const tile = this.mapEntries[entry - 0x9800];
+    const attrs = this.mapAttrs?.[entry - 0x9800];
     this.els.info.textContent =
-      `map (${x >> 3}, ${y >> 3}) at $${hex(entry, 4)} → tile $${hex(tile, 2)} ` +
-      `at $${hex(bgTileAddress(tile, this.lcdc), 4)}`;
+      `map (${x >> 3}, ${y >> 3}) at ${hex(entry, 4)} → tile ${hex(tile, 2)} ` +
+      `at ${hex(bgTileAddress(tile, this.lcdc), 4)}` +
+      (attrs === undefined ? "" : ` · ${describeAttrs(attrs)}`);
   }
 }
 
