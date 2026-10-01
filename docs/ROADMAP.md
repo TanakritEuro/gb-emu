@@ -30,7 +30,7 @@ The big one: all 256 base opcodes and 256 `CB`-prefixed opcodes (minus 11 illega
 - [x] 8-bit ALU with correct H and C flags; `DAA` last, it's notoriously fiddly
 - [x] 16-bit arithmetic: `ADD HL,rr`, `ADD SP,e8`, `LD HL,SP+e8` (flags from the low byte!)
 - [x] Jumps, calls, returns, `RST`, conditional cycle counts
-- [ ] `CB` prefix: rotates, shifts, `SWAP`, `BIT`/`RES`/`SET` (plus `RLCA`/`RRCA`/`RLA`/`RRA`, which share the rotate logic)
+- [x] `CB` prefix: rotates, shifts, `SWAP`, `BIT`/`RES`/`SET` (plus `RLCA`/`RRCA`/`RLA`/`RRA`, which share the rotate logic)
 - [ ] Gameboy Doctor clean on `cpu_instrs` individual 01, 03–11
 
 **Done when:** `cpu_instrs/individual/` 01 and 03–11 print "Passed".

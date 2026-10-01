@@ -1,10 +1,9 @@
 //! The Sharp SM83 CPU.
 //!
 //! Opcodes are decoded by bit pattern (see `Opcode`); `Cpu::execute` is the
-//! whole instruction table laid out by group. Groups that aren't written
-//! yet return [`CpuError::Unimplemented`], which tells you exactly which
-//! opcode to write next and where the game hit it.
-//! TODO(milestone 1): every arm in `execute`/`execute_cb` returning `MISSING`.
+//! whole instruction table laid out by group, and `Cpu::execute_cb` the
+//! $CB-prefixed one. Arms that return `MISSING` (now only STOP and RETI)
+//! report [`CpuError::Unimplemented`] with the opcode and where it was hit.
 //!
 //! Opcode reference: https://gbdev.io/gb-opcodes/optables/
 //! Cycle counts here are T-cycles (4 per M-cycle).
@@ -73,12 +72,9 @@ impl Registers {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CpuError {
-    /// `pc` is the address of the opcode byte (or of the $CB prefix).
-    Unimplemented {
-        opcode: u8,
-        cb_prefixed: bool,
-        pc: u16,
-    },
+    /// `pc` is the address of the opcode byte. Every $CB-prefixed opcode is
+    /// implemented, so this is always an unprefixed one.
+    Unimplemented { opcode: u8, pc: u16 },
     /// One of the 11 unused opcodes ($D3 $DB $DD $E3 $E4 $EB $EC $ED $F4
     /// $FC $FD). Real hardware hard-locks until powered off; reaching one
     /// almost always means the CPU jumped somewhere it shouldn't have.
@@ -89,13 +85,8 @@ pub enum CpuError {
 impl fmt::Display for CpuError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CpuError::Unimplemented {
-                opcode,
-                cb_prefixed,
-                pc,
-            } => {
-                let prefix = if *cb_prefixed { "CB " } else { "" };
-                write!(f, "unimplemented opcode {prefix}{opcode:02X} at ${pc:04X}")
+            CpuError::Unimplemented { opcode, pc } => {
+                write!(f, "unimplemented opcode {opcode:02X} at ${pc:04X}")
             }
             CpuError::Illegal { opcode, pc } => write!(
                 f,
@@ -359,6 +350,27 @@ impl Cpu {
         r
     }
 
+    /// `rot[y] val`: RLC RRC RL RR SLA SRA SWAP SRL, the CB block 0 ops.
+    /// The bit shifted out goes to C (SWAP clears C); RL and RR rotate
+    /// through C as a ninth bit. Sets Z from the result, clears N and H.
+    fn rotate(&mut self, y: u8, val: u8) -> u8 {
+        let carry_in = u8::from(self.regs.flag(FLAG_C));
+        let out_left = val & 0x80 != 0;
+        let out_right = val & 0x01 != 0;
+        let (r, c) = match y {
+            0 => (val.rotate_left(1), out_left),            // RLC
+            1 => (val.rotate_right(1), out_right),          // RRC
+            2 => ((val << 1) | carry_in, out_left),         // RL
+            3 => ((val >> 1) | (carry_in << 7), out_right), // RR
+            4 => (val << 1, out_left),                      // SLA
+            5 => ((val >> 1) | (val & 0x80), out_right),    // SRA: keeps the sign bit
+            6 => (val.rotate_left(4), false),               // SWAP
+            _ => (val >> 1, out_right),                     // SRL
+        };
+        self.set_flags(r == 0, false, false, c);
+        r
+    }
+
     /// ADD HL, val. H is the carry out of bit 11 and C out of bit 15 (the
     /// hardware adds the low bytes, then the high bytes with carry). Z is
     /// left alone, even for a zero result.
@@ -478,20 +490,7 @@ impl Cpu {
 
         let cycles = match self.execute(Opcode::new(opcode), bus) {
             Ok(cycles) => cycles,
-            Err(Fault::Unimplemented) => {
-                // For CB-prefixed instructions, report the byte after $CB.
-                let cb_prefixed = opcode == 0xCB;
-                let opcode = if cb_prefixed {
-                    bus.read(pc.wrapping_add(1))
-                } else {
-                    opcode
-                };
-                return Err(CpuError::Unimplemented {
-                    opcode,
-                    cb_prefixed,
-                    pc,
-                });
-            }
+            Err(Fault::Unimplemented) => return Err(CpuError::Unimplemented { opcode, pc }),
             Err(Fault::Illegal) => return Err(CpuError::Illegal { opcode, pc }),
         };
 
@@ -595,9 +594,13 @@ impl Cpu {
                     Ok(if op.y == 6 { 12 } else { 8 })
                 }
                 _ => match op.y {
-                    // RLCA RRCA RLA RRA: same logic as the CB rotates, but Z
-                    // is always cleared. Written alongside them.
-                    0..=3 => MISSING,
+                    // RLCA RRCA RLA RRA: the CB rotates on A, but in 4 cycles
+                    // and with Z always cleared, even for a zero result.
+                    0..=3 => {
+                        self.regs.a = self.rotate(op.y, self.regs.a);
+                        self.regs.set_flag(FLAG_Z, false);
+                        Ok(4)
+                    }
                     // DAA
                     4 => {
                         self.daa();
@@ -749,7 +752,7 @@ impl Cpu {
                         self.regs.pc = self.fetch16(bus);
                         Ok(16)
                     }
-                    1 => self.execute_cb(bus),
+                    1 => Ok(self.execute_cb(bus)),
                     // DI
                     6 => {
                         self.ime = false;
@@ -806,14 +809,32 @@ impl Cpu {
     }
 
     /// Fetches and runs the opcode after a $CB prefix. The T-cycles returned
-    /// include the prefix: 8 with a register, 16 with (HL), 12 for BIT n,(HL).
-    fn execute_cb(&mut self, bus: &mut Bus) -> Result<u32, Fault> {
+    /// include the prefix: 8 with a register, 16 with (HL) (read, then write
+    /// back), 12 for BIT n,(HL), which only reads.
+    fn execute_cb(&mut self, bus: &mut Bus) -> u32 {
         let op = Opcode::new(self.fetch8(bus));
-        match op.x {
-            0 => MISSING, // y: RLC RRC RL RR SLA SRA SWAP SRL, on r[z]
-            1 => MISSING, // BIT y, r[z]
-            2 => MISSING, // RES y, r[z]
-            _ => MISSING, // SET y, r[z]
+        let val = self.read_r8(bus, op.z);
+        let bit = 1u8 << op.y;
+        let r = match op.x {
+            // rot[y] r[z]
+            0 => self.rotate(op.y, val),
+            // BIT y, r[z]: Z = the bit is 0. Sets H, leaves C.
+            1 => {
+                self.regs.set_flag(FLAG_Z, val & bit == 0);
+                self.regs.set_flag(FLAG_N, false);
+                self.regs.set_flag(FLAG_H, true);
+                return if op.z == 6 { 12 } else { 8 };
+            }
+            // RES y, r[z]
+            2 => val & !bit,
+            // SET y, r[z]
+            _ => val | bit,
+        };
+        self.write_r8(bus, op.z, r);
+        if op.z == 6 {
+            16
+        } else {
+            8
         }
     }
 }
@@ -986,21 +1007,6 @@ mod tests {
     }
 
     #[test]
-    fn unimplemented_cb_opcode_reports_the_second_byte() {
-        let (mut cpu, mut bus) = setup(&[0xCB, 0x37]);
-        let err = cpu.step(&mut bus).unwrap_err();
-        assert_eq!(
-            err,
-            CpuError::Unimplemented {
-                opcode: 0x37,
-                cb_prefixed: true,
-                pc: 0x0100
-            }
-        );
-        assert_eq!(err.to_string(), "unimplemented opcode CB 37 at $0100");
-    }
-
-    #[test]
     fn ld_sp_d16_loads_sp() {
         let (mut cpu, mut bus) = setup(&[0x31, 0x34, 0x12]);
         assert_eq!(cpu.step(&mut bus), Ok(12));
@@ -1026,14 +1032,14 @@ mod tests {
 
     #[test]
     fn unimplemented_opcode_reports_where() {
-        // RLCA is written with the CB rotates. Swap in another opcode then.
-        let (mut cpu, mut bus) = setup(&[0x00, 0x07]);
+        // STOP isn't on the roadmap yet. If it gets written, use RETI ($D9)
+        // until milestone 2, then delete this test.
+        let (mut cpu, mut bus) = setup(&[0x00, 0x10, 0x00]);
         cpu.step(&mut bus).unwrap();
         assert_eq!(
             cpu.step(&mut bus),
             Err(CpuError::Unimplemented {
-                opcode: 0x07,
-                cb_prefixed: false,
+                opcode: 0x10,
                 pc: 0x0101
             })
         );
@@ -1767,6 +1773,165 @@ mod tests {
             assert_eq!(cpu.step(&mut bus), Ok(16), "opcode {opcode:02X}");
             assert_eq!(cpu.regs.pc, u16::from(y) * 8, "opcode {opcode:02X}");
             assert_eq!(bus.read16(cpu.regs.sp), 0xC001, "opcode {opcode:02X}");
+        }
+    }
+
+    /// Runs `rot[y]` on a fresh CPU and returns (result, F).
+    fn run_rotate(y: u8, val: u8, carry: bool) -> (u8, u8) {
+        let mut cpu = Cpu::new();
+        cpu.regs.set_flag(FLAG_C, carry);
+        let r = cpu.rotate(y, val);
+        (r, cpu.regs.f)
+    }
+
+    #[test]
+    fn rotate_and_shift_examples() {
+        let (z, c, no) = (true, true, false);
+        let cases = [
+            // (op, value, carry in, result, Z, C out)
+            (0, 0x85, no, 0x0B, no, c),  // RLC: bit 7 wraps to bit 0 and C
+            (1, 0x01, no, 0x80, no, c),  // RRC: bit 0 wraps to bit 7 and C
+            (2, 0x80, no, 0x00, z, c),   // RL: old C (0) enters bit 0
+            (2, 0x11, c, 0x23, no, no),  // RL: old C (1) enters bit 0
+            (3, 0x01, no, 0x00, z, c),   // RR: old C (0) enters bit 7
+            (3, 0x8A, c, 0xC5, no, no),  // RR: old C (1) enters bit 7
+            (4, 0xFF, no, 0xFE, no, c),  // SLA: 0 enters bit 0
+            (5, 0x8A, no, 0xC5, no, no), // SRA: bit 7 is kept
+            (5, 0x01, no, 0x00, z, c),   // SRA
+            (6, 0xF1, c, 0x1F, no, no),  // SWAP clears C even if it was set
+            (6, 0x00, no, 0x00, z, no),  // SWAP
+            (7, 0xFF, no, 0x7F, no, c),  // SRL: 0 enters bit 7
+            (7, 0x01, no, 0x00, z, c),   // SRL
+        ];
+        for (y, val, carry, want, wz, wc) in cases {
+            assert_eq!(
+                run_rotate(y, val, carry),
+                (want, flags(wz, false, false, wc)),
+                "rot[{y}] {val:02X} carry={carry}"
+            );
+        }
+    }
+
+    #[test]
+    fn rl_and_rr_rotate_nine_bits_through_carry() {
+        // Nine RLs (or RRs) bring a 9-bit value (8 bits + C) back to start;
+        // eight RLCs (or RRCs) do the same for 8 bits.
+        for (y, times) in [(0, 8), (1, 8), (2, 9), (3, 9)] {
+            for val in 0..=255u8 {
+                for carry in [false, true] {
+                    let mut cpu = Cpu::new();
+                    cpu.regs.set_flag(FLAG_C, carry);
+                    let mut v = val;
+                    for _ in 0..times {
+                        v = cpu.rotate(y, v);
+                    }
+                    let msg = format!("rot[{y}] x{times} on {val:02X} carry={carry}");
+                    assert_eq!(v, val, "{msg}");
+                    if times == 9 {
+                        assert_eq!(cpu.regs.flag(FLAG_C), carry, "{msg}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sla_matches_add_a_a() {
+        for val in 0..=255u8 {
+            let (r, f) = run_rotate(4, val, false);
+            let (sum, add_f) = run_alu(0, val, val, false);
+            assert_eq!(r, sum, "{val:02X}");
+            assert_eq!(
+                f & (FLAG_Z | FLAG_C),
+                add_f & (FLAG_Z | FLAG_C),
+                "{val:02X}"
+            );
+        }
+    }
+
+    #[test]
+    fn bit_tests_one_bit_sets_h_and_keeps_c() {
+        for carry in [false, true] {
+            for b in 0..8u8 {
+                // BIT b, B
+                let opcode = 0x40 | b << 3;
+                let (mut cpu, mut bus) = setup_wram(&[0xCB, opcode, 0xCB, opcode]);
+                cpu.regs.f = flags(false, true, false, carry);
+                cpu.regs.b = 1 << b;
+                assert_eq!(cpu.step(&mut bus), Ok(8));
+                assert_eq!(cpu.regs.f, flags(false, false, true, carry), "bit {b} set");
+                cpu.regs.b = !(1 << b);
+                cpu.step(&mut bus).unwrap();
+                assert_eq!(cpu.regs.f, flags(true, false, true, carry), "bit {b} clear");
+            }
+        }
+    }
+
+    #[test]
+    fn every_cb_opcode_hits_its_operand_with_the_right_cycles() {
+        for cb in 0..=255u8 {
+            let op = Opcode::new(cb);
+            let (mut cpu, mut bus) = setup_loaded(&[]);
+            for (i, b) in [0xCB, cb].into_iter().enumerate() {
+                bus.write(0xC000 + i as u16, b);
+            }
+            cpu.regs.pc = 0xC000;
+            cpu.regs.f = FLAG_C;
+            let val = cpu.read_r8(&bus, op.z);
+            let mut model = cpu.clone();
+            let bit = 1u8 << op.y;
+            let want_val = match op.x {
+                0 => model.rotate(op.y, val),
+                1 => val,
+                2 => val & !bit,
+                _ => val | bit,
+            };
+            let want_cycles = match (op.x, op.z) {
+                (1, 6) => 12, // BIT n,(HL) only reads
+                (_, 6) => 16, // read, modify, write back
+                _ => 8,
+            };
+            let msg = format!("CB {cb:02X}");
+            assert_eq!(cpu.step(&mut bus), Ok(want_cycles), "{msg}");
+            assert_eq!(cpu.read_r8(&bus, op.z), want_val, "{msg}");
+            assert_eq!(cpu.regs.pc, 0xC002, "{msg}");
+            match op.x {
+                0 => assert_eq!(cpu.regs.f, model.regs.f, "{msg}"),
+                1 => assert_eq!(
+                    cpu.regs.f,
+                    flags(val & bit == 0, false, true, true),
+                    "{msg}"
+                ),
+                _ => assert_eq!(cpu.regs.f, FLAG_C, "RES/SET keep flags: {msg}"),
+            }
+        }
+    }
+
+    #[test]
+    fn accumulator_rotates_match_cb_but_always_clear_z() {
+        let (base, mut bus) = setup_wram(&[]);
+        for y in 0..4u8 {
+            // RLCA/RRCA/RLA/RRA at $C000; CB RLC/RRC/RL/RR A at $C010.
+            // The short form's opcode is also the CB form's second byte.
+            let short = y << 3 | 0x07;
+            bus.write(0xC000, short);
+            bus.write(0xC010, 0xCB);
+            bus.write(0xC011, short);
+            for val in 0..=255u8 {
+                for carry in [false, true] {
+                    let mut cpu = base.clone();
+                    cpu.regs.a = val;
+                    cpu.regs.set_flag(FLAG_C, carry);
+                    let mut cb_cpu = cpu.clone();
+                    cb_cpu.regs.pc = 0xC010;
+
+                    let msg = format!("{short:02X} on {val:02X} carry={carry}");
+                    assert_eq!(cpu.step(&mut bus), Ok(4), "{msg}");
+                    assert_eq!(cb_cpu.step(&mut bus), Ok(8), "{msg}");
+                    assert_eq!(cpu.regs.a, cb_cpu.regs.a, "{msg}");
+                    assert_eq!(cpu.regs.f, cb_cpu.regs.f & !FLAG_Z, "{msg}");
+                }
+            }
         }
     }
 }
