@@ -5,6 +5,7 @@
 import init, { Emulator } from "./pkg/gb_wasm.js";
 import { KEYMAP, gamepadsMask, dpadMask, withButton, changes } from "./input.js";
 import { TURBO, framesDue, nextSpeed } from "./timing.js";
+import { nowSeconds, saveKey, readSave, writeSave, saveFileName } from "./saves.js";
 
 const $ = (id) => document.getElementById(id);
 const canvas = $("screen");
@@ -16,6 +17,16 @@ let screenView = null;
 let emu = null;
 // The loaded ROM, kept so Reset can power-cycle with it.
 let rom = null;
+// Where the loaded ROM's battery save lives in localStorage.
+let romSaveKey = null;
+// localStorage, or null where the browser refuses it (some private modes).
+const storage = (() => {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+})();
 let rafId = 0;
 let lastTime = 0;
 let backlog = 0;
@@ -35,39 +46,102 @@ const wasm = await init(); // the wasm exports, including its memory
 
 async function loadRom(file) {
   const bytes = new Uint8Array(await file.arrayBuffer());
+  const key = await saveKey(bytes);
+  persistSave(); // keep the previous game's progress before switching
   if (!boot(bytes, file.name)) {
     showStatus();
     return;
   }
   rom = bytes;
+  romSaveKey = key;
   $("title").textContent = emu.title() || file.name;
   $("hint").hidden = true;
+  restoreStoredSave();
   setPaused(false);
   showStatus();
 }
 
-/** Starts a fresh emulator on `bytes` (a power cycle). False if it won't load. */
-function boot(bytes, name) {
-  stop();
-  $("error").hidden = true;
-  $("serial").textContent = "";
+/**
+ * Swaps in a fresh emulator on `bytes` (a power cycle), with battery save
+ * `save` plugged in first if given. If either won't load, shows why and
+ * leaves the current game as it was.
+ */
+function boot(bytes, what, save = null) {
+  let next = null;
   try {
-    emu?.free();
-    emu = new Emulator(bytes);
+    next = new Emulator(bytes);
+    if (save) next.load_save(save, nowSeconds());
   } catch (e) {
-    emu = null;
-    showError(`Couldn't load ${name}: ${e.message ?? e}`);
+    next?.free();
+    showError(`Couldn't load ${what}: ${e.message ?? e}`);
     return false;
   }
+  stop();
+  emu?.free();
+  emu = next;
+  $("error").hidden = true;
+  $("serial").textContent = "";
   sentMask = 0; // a fresh emulator has nothing held; resend what is
   syncButtons();
   return true;
 }
 
-// Reset: the DMG has no reset button, so power-cycle with the same ROM.
-// TODO(milestone 5): keep battery-backed cartridge RAM across this.
+// Reset: the DMG has no reset button, so power-cycle with the same ROM. The
+// cartridge's battery keeps its save (and clock) through that.
 function reset() {
-  if (!rom || !boot(rom, $("title").textContent)) return;
+  if (!rom) return;
+  const save = emu?.save_data(nowSeconds()) ?? null;
+  if (!boot(rom, $("title").textContent, save)) return;
+  draw();
+  if (!paused) start();
+}
+
+// Battery saves: stored per ROM in localStorage shortly after the game
+// writes one, and whenever the page is hidden or closed.
+function restoreStoredSave() {
+  if (!emu.has_battery()) return setSaveStatus("");
+  const stored = readSave(storage, romSaveKey);
+  if (!stored) return setSaveStatus("💾 no save yet");
+  try {
+    emu.load_save(stored, nowSeconds());
+    setSaveStatus("💾 save loaded");
+  } catch (e) {
+    showError(`Couldn't load the stored save: ${e.message ?? e}`);
+  }
+}
+
+function persistSave() {
+  if (!emu?.has_battery() || !romSaveKey) return;
+  if (writeSave(storage, romSaveKey, emu.save_data(nowSeconds()))) {
+    setSaveStatus(`💾 saved ${new Date().toLocaleTimeString()}`);
+  } else {
+    setSaveStatus("💾 this browser won't store saves: use Export .sav");
+  }
+}
+
+function setSaveStatus(text) {
+  $("save").textContent = text;
+}
+
+function exportSave() {
+  const data = emu?.save_data(nowSeconds());
+  if (!data) return;
+  const url = URL.createObjectURL(new Blob([data], { type: "application/octet-stream" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = saveFileName(emu.title());
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// Importing restarts the game with the imported save plugged in, like
+// swapping in a cartridge that has it.
+async function importSave(file) {
+  if (!rom) return;
+  const data = new Uint8Array(await file.arrayBuffer());
+  if (!boot(rom, file.name, data)) return;
+  persistSave();
+  setSaveStatus(`💾 imported ${file.name}`);
   draw();
   if (!paused) start();
 }
@@ -152,6 +226,8 @@ function countFps(now, ran) {
     $("fps").textContent = `${framesThisSecond} fps`;
     framesThisSecond = 0;
     fpsTimer = now;
+    // Once a second, store the save if the game changed it.
+    if (emu.take_save_dirty()) persistSave();
   }
 }
 
@@ -159,6 +235,8 @@ function countFps(now, ran) {
 function showStatus() {
   const loaded = Boolean(emu);
   for (const id of ["pause", "reset", "speed"]) $(id).disabled = !loaded;
+  const battery = Boolean(emu?.has_battery());
+  for (const id of ["export-save", "import-save"]) $(id).disabled = !battery;
   $("pause").textContent = paused ? "Resume" : "Pause";
   $("pause").setAttribute("aria-pressed", String(paused));
   const shown = turbo ? TURBO : speed;
@@ -225,12 +303,29 @@ addEventListener("keyup", (e) => {
 });
 // Drop focus after a click: a focused button would also be "clicked" by
 // Enter (Start) or Space (fast-forward) during play.
-for (const [id, action] of [["pause", () => setPaused(!paused)], ["reset", reset], ["speed", cycleSpeed]]) {
+const toolbar = [
+  ["pause", () => setPaused(!paused)],
+  ["reset", reset],
+  ["speed", cycleSpeed],
+  ["export-save", exportSave],
+  ["import-save", () => $("save-file").click()],
+];
+for (const [id, action] of toolbar) {
   $(id).addEventListener("click", (e) => {
     action();
     e.currentTarget.blur();
   });
 }
+$("save-file").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  e.target.value = ""; // so picking the same file again still fires
+  if (file) importSave(file);
+});
+// Store the save when the page is hidden (tab switch, phone lock) or closed.
+addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") persistSave();
+});
+addEventListener("pagehide", persistSave);
 showStatus();
 
 // Browsers only reveal a gamepad after one of its buttons is pressed.

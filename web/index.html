@@ -11,6 +11,7 @@
     <header>
       <h1>gb-emu</h1>
       <span id="title" class="muted">no cartridge</span>
+      <span id="save" class="muted"></span>
       <span id="fps" class="muted"></span>
     </header>
 
@@ -25,6 +26,9 @@
       <button id="pause" type="button" aria-pressed="false" disabled>Pause</button>
       <button id="reset" type="button" disabled>Reset</button>
       <button id="speed" type="button" title="Speed (hold Space to fast-forward)" disabled>1×</button>
+      <button id="export-save" type="button" title="Download the battery save" disabled>Export .sav</button>
+      <button id="import-save" type="button" title="Restart with a .sav file" disabled>Import .sav</button>
+      <input id="save-file" type="file" accept=".sav,.srm" hidden>
     </div>
 
     <!-- On-screen controls: shown on touch screens, or anywhere with ?touch -->

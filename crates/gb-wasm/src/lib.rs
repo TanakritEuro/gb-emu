@@ -54,11 +54,44 @@ impl Emulator {
         }
     }
 
+    /// Whether the game has a battery save to keep.
+    pub fn has_battery(&self) -> bool {
+        self.gb.has_battery()
+    }
+
+    /// The battery save as `.sav` bytes, or undefined without a battery.
+    /// `now` is Unix time in seconds (`Date.now() / 1000`).
+    pub fn save_data(&self, now: f64) -> Option<Vec<u8>> {
+        self.gb.save_data(unix_seconds(now))
+    }
+
+    /// Loads a battery save; best right after construction, before the first
+    /// frame. Throws if it doesn't fit this cartridge.
+    pub fn load_save(&mut self, data: &[u8], now: f64) -> Result<(), JsError> {
+        self.gb
+            .load_save(data, unix_seconds(now))
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// True (once) if the game changed its save since the last call.
+    pub fn take_save_dirty(&mut self) -> bool {
+        self.gb.take_save_dirty()
+    }
+
     pub fn title(&self) -> String {
         self.gb.title().to_string()
     }
 
     pub fn take_serial(&mut self) -> String {
         self.gb.take_serial_output()
+    }
+}
+
+/// JS time (a float of seconds) as whole Unix seconds; nonsense becomes 0.
+fn unix_seconds(now: f64) -> u64 {
+    if now.is_finite() && now > 0.0 {
+        now as u64
+    } else {
+        0
     }
 }

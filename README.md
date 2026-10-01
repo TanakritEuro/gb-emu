@@ -45,6 +45,10 @@ buttons). Add `?touch` to the URL to show them on a desktop.
 Pause, Reset and a speed button (1×/2×/4×) sit under the screen. Keys: P pause, R reset,
 F speed, hold Space to fast-forward at 8×.
 
+Battery saves are kept in the browser (localStorage, per ROM) and stored a moment after the
+game saves and when the page closes. Export .sav / Import .sav move them to and from other
+emulators (BGB/VBA-M format, including the MBC3 clock, which catches up on time that passed).
+
 ## Working with Claude Code
 
 `CLAUDE.md` describes the project for Claude Code. Some good ways to start:
