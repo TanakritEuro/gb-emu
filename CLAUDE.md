@@ -32,7 +32,7 @@ node scripts/serve.js                                   # serve it at http://loc
 ```
 
 gb-cli exit codes: 0 passed, 1 "Failed" printed, 2 emulator/usage error
-(e.g. unimplemented opcode), 3 frame limit reached without a verdict.
+(e.g. illegal opcode), 3 frame limit reached without a verdict.
 
 ## Conventions
 
@@ -42,8 +42,8 @@ gb-cli exit codes: 0 passed, 1 "Failed" printed, 2 emulator/usage error
   comment when implementing a non-obvious behavior.
 - Every new instruction group or hardware behavior gets a unit test next to the code.
   Flag behavior (especially H and C on 8-bit vs 16-bit ops) gets explicit tests.
-- Unimplemented instructions return `CpuError::Unimplemented`; never `panic!`/`todo!()`
-  in emulation paths, so the CLI and browser can report what's missing.
+- Never `panic!`/`todo!()` in emulation paths; return a `CpuError` instead, so the CLI
+  and browser can report what went wrong (e.g. `CpuError::Illegal` for the 11 illegal opcodes).
 - Accuracy shortcuts are fine but must be marked `TODO(accuracy): ...` with what real hardware does.
 - Unfinished roadmap work is marked `TODO(milestone N)`. Search for these to find next steps.
 - `gb-core` stays platform-free: anything touching files, time, audio devices or the DOM

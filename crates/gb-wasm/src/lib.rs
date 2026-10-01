@@ -1,7 +1,7 @@
 //! JavaScript-facing wrapper around [`gb_core::GameBoy`].
 //!
 //! Errors become thrown JS `Error`s, so web/main.js can show messages like
-//! "unimplemented opcode 3E at $0150" right on the page.
+//! "illegal opcode DD at $0150" right on the page.
 
 use gb_core::{Button, GameBoy};
 use wasm_bindgen::prelude::*;

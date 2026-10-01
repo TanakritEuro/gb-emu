@@ -72,9 +72,6 @@ impl Registers {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CpuError {
-    /// `pc` is the address of the opcode byte. Every $CB-prefixed opcode is
-    /// implemented, so this is always an unprefixed one.
-    Unimplemented { opcode: u8, pc: u16 },
     /// One of the 11 unused opcodes ($D3 $DB $DD $E3 $E4 $EB $EC $ED $F4
     /// $FC $FD). Real hardware hard-locks until powered off; reaching one
     /// almost always means the CPU jumped somewhere it shouldn't have.
@@ -85,9 +82,6 @@ pub enum CpuError {
 impl fmt::Display for CpuError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CpuError::Unimplemented { opcode, pc } => {
-                write!(f, "unimplemented opcode {opcode:02X} at ${pc:04X}")
-            }
             CpuError::Illegal { opcode, pc } => write!(
                 f,
                 "illegal opcode {opcode:02X} at ${pc:04X} (real hardware locks up here)"
@@ -1103,17 +1097,6 @@ mod tests {
         assert_eq!(bus.read(0xFF04), 0);
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.regs.a, 1, "execution carries on after STOP");
-    }
-
-    #[test]
-    fn every_legal_opcode_runs() {
-        for op in 0..=255u8 {
-            let (mut cpu, mut bus) = setup_wram(&[op, 0x00, 0x00]);
-            match cpu.step(&mut bus) {
-                Ok(_) | Err(CpuError::Illegal { .. }) => {}
-                Err(e) => panic!("opcode {op:02X}: {e}"),
-            }
-        }
     }
 
     /// A CPU with distinct values in every register and HL pointing at

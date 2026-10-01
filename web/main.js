@@ -102,9 +102,7 @@ function countFps(now, ran) {
 
 function showError(message) {
   const el = $("error");
-  el.textContent = message.startsWith("unimplemented opcode")
-    ? `${message}\n→ that's the next instruction to implement (see docs/ROADMAP.md, milestone 1)`
-    : message;
+  el.textContent = message;
   el.hidden = false;
 }
 
