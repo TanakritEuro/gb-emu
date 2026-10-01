@@ -39,6 +39,7 @@ cargo run --release -p gb-cli -- <rom.gb>              # run a test ROM headless
 cargo run --release -p gb-cli -- <rom.gb> --doctor trace.log   # CPU trace for Gameboy Doctor
 cargo run --release -p gb-cli -- <rom.gb> --wav out.wav        # record the sound (48 kHz WAV)
 cargo run --release -p gb-cli -- <rom.gb> --model dmg           # force a model (dmg or cgb)
+cargo run --release -p gb-cli -- <rom.gb> --screenshot out.ppm  # save the last frame (PPM)
 ./scripts/build-web.ps1                                 # build the browser version (Windows)
 node scripts/serve.js                                   # serve it at http://localhost:8765
 ```

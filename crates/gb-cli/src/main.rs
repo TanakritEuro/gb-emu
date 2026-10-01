@@ -8,19 +8,22 @@
 //! Exit codes: 0 passed (or ran to the frame limit with no verdict expected),
 //! 1 failed, 2 emulator or usage error, 3 frame limit hit with output but no verdict.
 
-use gb_core::{GameBoy, Model, CYCLES_PER_FRAME};
+use gb_core::{GameBoy, Model, CYCLES_PER_FRAME, SCREEN_HEIGHT, SCREEN_WIDTH};
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::process::ExitCode;
 
 const USAGE: &str = "\
 usage: gb-cli <rom.gb> [--frames N] [--model dmg|cgb] [--doctor TRACE_FILE] [--wav AUDIO_FILE]
+              [--screenshot IMAGE_FILE]
 
   --frames N            stop after N frames (default 3600, about a minute of Game Boy time)
   --model dmg|cgb       run on the original or the Color (default: the Color for games whose
                         header says they support it, the original for the rest)
   --doctor TRACE_FILE   write a Gameboy Doctor trace line before every instruction
   --wav AUDIO_FILE      record the sound to a 48 kHz stereo WAV file
+  --screenshot IMAGE_FILE  save the last frame as a PPM image (e.g. to compare with
+                        dmg-acid2's or cgb-acid2's reference picture)
 
 examples:
   cargo run --release -p gb-cli -- \"roms/blargg/cpu_instrs/individual/06-ld r,r.gb\"
@@ -32,6 +35,7 @@ struct Args {
     model: Option<Model>,
     doctor: Option<String>,
     wav: Option<String>,
+    screenshot: Option<String>,
 }
 
 /// Sample rate for --wav.
@@ -43,12 +47,16 @@ fn parse_args() -> Result<Option<Args>, String> {
     let mut model = None;
     let mut doctor = None;
     let mut wav = None;
+    let mut screenshot = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => return Ok(None),
             "--doctor" => doctor = Some(args.next().ok_or("--doctor needs a file path")?),
             "--wav" => wav = Some(args.next().ok_or("--wav needs a file path")?),
+            "--screenshot" => {
+                screenshot = Some(args.next().ok_or("--screenshot needs a file path")?)
+            }
             "--model" => {
                 model = match args.next().as_deref() {
                     Some("dmg") => Some(Model::Dmg),
@@ -71,6 +79,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         model,
         doctor,
         wav,
+        screenshot,
     }))
 }
 
@@ -191,7 +200,31 @@ fn main() -> ExitCode {
             audio.len() as f64 / 2.0 / f64::from(WAV_RATE)
         );
     }
+    if let Some(path) = &args.screenshot {
+        if let Err(e) =
+            File::create(path).and_then(|f| write_ppm(BufWriter::new(f), gb.framebuffer()))
+        {
+            eprintln!("error: writing {path}: {e}");
+            return ExitCode::from(2);
+        }
+        eprintln!("screenshot written to {path}");
+    }
     ExitCode::from(verdict)
+}
+
+/// Writes the RGBA screen as a binary PPM (P6): a tiny header, then RGB.
+fn write_ppm(mut out: impl Write, rgba: &[u8]) -> io::Result<()> {
+    write!(
+        out,
+        "P6
+{SCREEN_WIDTH} {SCREEN_HEIGHT}
+255
+"
+    )?;
+    for px in rgba.as_chunks::<4>().0 {
+        out.write_all(&px[..3])?;
+    }
+    out.flush()
 }
 
 /// Writes interleaved stereo f32 samples as a 16-bit PCM WAV file.
@@ -275,6 +308,21 @@ mod tests {
         assert_eq!(verdict("BBBBBB"), Some(false));
         assert_eq!(verdict("\x03\x05\x08"), None, "pass bytes still arriving");
         assert_eq!(verdict("running..."), None);
+    }
+
+    #[test]
+    fn screenshots_are_ppm_with_the_alpha_dropped() {
+        let mut rgba = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
+        rgba[..8].copy_from_slice(&[1, 2, 3, 255, 4, 5, 6, 255]);
+        let mut out = Vec::new();
+        write_ppm(&mut out, &rgba).unwrap();
+        let header = b"P6
+160 144
+255
+";
+        assert_eq!(&out[..header.len()], header);
+        assert_eq!(&out[header.len()..header.len() + 6], [1, 2, 3, 4, 5, 6]);
+        assert_eq!(out.len(), header.len() + 160 * 144 * 3);
     }
 
     #[test]

@@ -111,7 +111,7 @@ Pick whichever sound most fun:
         `cgb_sound` 8/12. Mooneye's Color tests need DMG compatibility mode, which isn't planned)
   - [x] Color palettes and per-tile background attributes (palette, VRAM bank, flips, priority)
         (cgb-acid2: every pixel not drawn by a sprite matches)
-  - [ ] Color sprites: palette and bank bits, OAM-order priority, LCDC bit 0 as master priority
+  - [x] Color sprites: palette and bank bits, OAM-order priority, LCDC bit 0 as master priority
         (`cgb-acid2` matches pixel for pixel)
   - [ ] HDMA: copying to VRAM all at once, or a block per HBlank
   - [ ] A Game Boy Color homebrew game plays in the browser

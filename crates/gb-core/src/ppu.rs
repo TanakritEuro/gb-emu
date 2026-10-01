@@ -68,6 +68,11 @@ pub struct Ppu {
     /// data register moves on to the next byte.
     bcps: u8,
     ocps: u8,
+    /// OPRI ($FF6C) bit 0: 0 = overlapping sprites go by OAM order (the
+    /// Color's way, what the boot ROM picks for Color games), 1 = by X
+    /// first, like the original. Color only.
+    /// https://gbdev.io/pandocs/CGB_Registers.html#ff6c--opri-cgb-mode-only-object-priority-mode
+    opri: u8,
     oam: [u8; 0xA0],
     pub lcdc: u8,
     pub stat: u8,
@@ -119,6 +124,7 @@ impl Ppu {
             obj_palettes: [0; 64],
             bcps: 0,
             ocps: 0,
+            opri: 0,
             oam: [0; 0xA0],
             lcdc: 0x91,
             stat: 0x85,
@@ -163,7 +169,7 @@ impl Ppu {
         w.u8(self.pending_irq);
         w.bytes(&self.bg_palettes);
         w.bytes(&self.obj_palettes);
-        w.bytes(&[self.bcps, self.ocps]);
+        w.bytes(&[self.bcps, self.ocps, self.opri]);
         // The picture, so a loaded state shows its own frame straight away.
         // On the original every pixel is one of four shades: 2 bits each, 4
         // per byte. On the Color it's any RGB555 color: 2 bytes each.
@@ -207,6 +213,7 @@ impl Ppu {
         r.bytes(&mut self.obj_palettes)?;
         self.bcps = r.u8()?;
         self.ocps = r.u8()?;
+        self.opri = r.u8()? & 1;
         let pixels = self.framebuffer.as_chunks_mut::<4>().0;
         if self.model == Model::Cgb {
             let mut colors = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 2];
@@ -236,12 +243,13 @@ impl Ppu {
         self.model == Model::Cgb
     }
 
-    /// The Color's palette registers, $FF68-$FF6B. Unused bit 6 of the
-    /// index registers reads 1. Reading the data never moves the index.
+    /// The Color's palette registers, $FF68-$FF6B, and OPRI, $FF6C. Unused
+    /// bit 6 of the index registers reads 1, as do OPRI's bits 1-7. Reading the data never moves the index.
     /// TODO(accuracy): during mode 3 palette memory is busy: reads give $FF
     /// and writes are ignored (the index still moves on).
     pub fn read_color_reg(&self, addr: u16) -> u8 {
         match addr {
+            0xFF6C => 0xFE | self.opri,
             0xFF68 => self.bcps | 0x40,
             0xFF69 => self.bg_palettes[usize::from(self.bcps & 0x3F)],
             0xFF6A => self.ocps | 0x40,
@@ -258,6 +266,7 @@ impl Ppu {
             }
         }
         match addr {
+            0xFF6C => self.opri = val & 1,
             0xFF68 => self.bcps = val & 0xBF,
             0xFF69 => write(&mut self.bg_palettes, &mut self.bcps, val),
             0xFF6A => self.ocps = val & 0xBF,
@@ -477,18 +486,21 @@ impl Ppu {
             // A blanked background shows BGP's color 0 (usually white).
             let mut color = self.bg_color(bg_attrs & 0x07, bg_index);
 
-            // The winning sprite pixel is picked first; only then does its
-            // "BG over OBJ" bit decide whether BG colors 1-3 cover it.
-            // TODO(milestone 7): on the Color, sprites use the OBJ palettes,
-            // their VRAM bank bit and the Color's priority rules.
+            // The winning sprite pixel is picked first; only then is it
+            // decided whether the background covers it.
             if let Some((sprite_index, attrs)) = self.sprite_pixel(sprites, x) {
-                if attrs & 0x80 == 0 || bg_index == 0 {
-                    let palette = if attrs & 0x10 != 0 {
-                        self.obp1
-                    } else {
-                        self.obp0
-                    };
-                    color = DMG_PALETTE[usize::from((palette >> (sprite_index * 2)) & 0x03)];
+                let sprite_on_top = if self.cgb() {
+                    // BG color 0 never covers a sprite; with LCDC bit 0 off
+                    // nothing does; otherwise bit 7 of the tile's attributes
+                    // or of the sprite's lets BG colors 1-3 cover it.
+                    // https://gbdev.io/pandocs/Tile_Maps.html#bg-to-obj-priority-in-cgb-mode
+                    bg_index == 0 || self.lcdc & 0x01 == 0 || (bg_attrs | attrs) & 0x80 == 0
+                } else {
+                    // The sprite's "BG over OBJ" bit lets BG colors 1-3 cover it.
+                    attrs & 0x80 == 0 || bg_index == 0
+                };
+                if sprite_on_top {
+                    color = self.obj_color(attrs, sprite_index);
                 }
             }
 
@@ -542,6 +554,22 @@ impl Ppu {
             0x1000u16.wrapping_add_signed(i16::from(tile as i8) * 16)
         };
         self.tile_data_pixel(usize::from(bank) * 0x2000 + usize::from(base), col, row)
+    }
+
+    /// RGBA for sprite color `index` (1-3) of a sprite with attributes
+    /// `attrs`: through OBP0/OBP1 (bit 4) on the original, from sprite
+    /// palette bits 0-2 on the Color.
+    fn obj_color(&self, attrs: u8, index: u8) -> [u8; 4] {
+        if self.cgb() {
+            palette_color(&self.obj_palettes, attrs & 0x07, index)
+        } else {
+            let palette = if attrs & 0x10 != 0 {
+                self.obp1
+            } else {
+                self.obp0
+            };
+            DMG_PALETTE[usize::from((palette >> (index * 2)) & 0x03)]
+        }
     }
 
     /// RGBA for background color `index` (0-3): through BGP on the original,
@@ -616,7 +644,8 @@ impl Ppu {
     /// The sprites on line LY, in drawing-priority order (first wins), and how
     /// many there are. Like the hardware: walk OAM in order, keep the first 10
     /// whose rows cover LY (X doesn't matter, so off-screen ones still use up
-    /// slots), then on DMG the smaller X wins, and OAM order breaks ties.
+    /// slots), then on DMG the smaller X wins, and OAM order breaks ties. On
+    /// the Color, OAM order alone decides (unless OPRI asks for the DMG way).
     /// Empty when LCDC bit 1 turns sprites off. https://gbdev.io/pandocs/OAM.html
     fn sprites_on_line(&self) -> ([Sprite; 10], usize) {
         let mut found = [Sprite::default(); 10];
@@ -635,7 +664,9 @@ impl Ppu {
             }
         }
         // A stable sort, so equal X keeps OAM order.
-        found[..count].sort_by_key(|s| s.x);
+        if !self.cgb() || self.opri & 1 != 0 {
+            found[..count].sort_by_key(|s| s.x);
+        }
         (found, count)
     }
 
@@ -661,14 +692,22 @@ impl Ppu {
             } else {
                 s.tile
             };
-            let color = self.tile_data_pixel(usize::from(tile) * 16, col as u8, (row % 8) as u8);
+            // On the Color, attribute bit 3 picks the VRAM bank.
+            let bank = if self.cgb() && s.attrs & 0x08 != 0 {
+                0x2000
+            } else {
+                0
+            };
+            let color =
+                self.tile_data_pixel(bank + usize::from(tile) * 16, col as u8, (row % 8) as u8);
             (color != 0).then_some((color, s.attrs))
         })
     }
 }
 
 /// One OAM entry: Y+16, X+8, tile number, attributes (bit 7 BG over OBJ,
-/// 6 Y flip, 5 X flip, 4 OBP1). https://gbdev.io/pandocs/OAM.html
+/// 6 Y flip, 5 X flip, 4 OBP1 on the original; on the Color 3 VRAM bank,
+/// 0-2 palette). https://gbdev.io/pandocs/OAM.html
 #[derive(Debug, Clone, Copy, Default)]
 struct Sprite {
     y: u8,
@@ -1445,5 +1484,113 @@ mod tests {
         put_sprite(&mut p, 0, 0, 0, 3, 0x80);
         draw_line(&mut p, 0);
         assert_eq!(shade_at(&p, 0, 0), 3, "blank BG counts as color 0");
+    }
+
+    // Color sprites.
+
+    /// Sets color `index` of sprite palette `palette` to `rgb555`.
+    fn set_obj_color(p: &mut Ppu, palette: u8, index: u8, rgb555: u16) {
+        p.write_color_reg(0xFF6A, 0x80 | (palette * 8 + index * 2));
+        let [lo, hi] = rgb555.to_le_bytes();
+        p.write_color_reg(0xFF6B, lo);
+        p.write_color_reg(0xFF6B, hi);
+    }
+
+    /// A Color PPU with sprites on; tile 1 is all color 1 in bank 0 and all
+    /// color 2 in bank 1. Sprite palettes 0 and 6 are set up; the background
+    /// is white (the boot palettes) with blank tile 0.
+    fn cgb_sprite_ppu() -> Ppu {
+        let mut p = cgb_ppu();
+        p.lcdc |= 0x02;
+        put_tile(&mut p, 0x8010, striped(0xFF, 0x00));
+        p.set_vram_bank(1);
+        put_tile(&mut p, 0x8010, striped(0x00, 0xFF));
+        p.set_vram_bank(0);
+        set_obj_color(&mut p, 0, 1, RED);
+        set_obj_color(&mut p, 0, 2, BLUE);
+        set_obj_color(&mut p, 6, 1, GREEN);
+        p
+    }
+
+    #[test]
+    fn color_sprites_take_their_palette_from_bits_0_to_2() {
+        let mut p = cgb_sprite_ppu();
+        put_sprite(&mut p, 0, 0, 0, 1, 0x00);
+        put_sprite(&mut p, 1, 8, 0, 1, 0x06);
+        put_sprite(&mut p, 2, 16, 0, 1, 0x10); // bit 4 is the original's OBP1
+        draw_line(&mut p, 0);
+        assert_eq!(rgba_at(&p, 0, 0), rgba(RED), "palette 0");
+        assert_eq!(rgba_at(&p, 8, 0), rgba(GREEN), "palette 6");
+        assert_eq!(rgba_at(&p, 16, 0), rgba(RED), "bit 4 means nothing here");
+    }
+
+    #[test]
+    fn color_sprites_can_take_their_tile_from_bank_1() {
+        let mut p = cgb_sprite_ppu();
+        put_sprite(&mut p, 0, 0, 0, 1, 0x08);
+        draw_line(&mut p, 0);
+        assert_eq!(rgba_at(&p, 0, 0), rgba(BLUE), "color 2, from bank 1");
+    }
+
+    #[test]
+    fn overlapping_color_sprites_go_by_oam_order_alone() {
+        let mut p = cgb_sprite_ppu();
+        put_sprite(&mut p, 0, 4, 0, 1, 0x00); // red, further right
+        put_sprite(&mut p, 1, 0, 0, 1, 0x06); // green, smaller X
+        draw_line(&mut p, 0);
+        assert_eq!(rgba_at(&p, 4, 0), rgba(RED), "OAM 0 wins despite its X");
+        assert_eq!(rgba_at(&p, 0, 0), rgba(GREEN), "where they don't overlap");
+        // OPRI = 1: the original's way, smaller X first.
+        p.write_color_reg(0xFF6C, 0x01);
+        assert_eq!(p.read_color_reg(0xFF6C), 0xFF);
+        draw_line(&mut p, 0);
+        assert_eq!(rgba_at(&p, 4, 0), rgba(GREEN));
+    }
+
+    #[test]
+    fn color_background_priority_has_three_switches() {
+        let mut p = cgb_sprite_ppu();
+        // BG tile 1 (color 1, white through the boot palette) under the
+        // first four columns of tiles; columns 2 and 3 have attribute bit 7.
+        for col in 0..4 {
+            p.write_vram(0x9800 + col, 1);
+        }
+        p.set_vram_bank(1);
+        p.write_vram(0x9802, 0x80);
+        p.write_vram(0x9803, 0x80);
+        p.set_vram_bank(0);
+        put_sprite(&mut p, 0, 0, 0, 1, 0x00); // over a plain tile
+        put_sprite(&mut p, 1, 8, 0, 1, 0x80); // sprite bit 7
+        put_sprite(&mut p, 2, 16, 0, 1, 0x00); // tile bit 7
+        put_sprite(&mut p, 3, 32, 0, 1, 0x80); // both, but over BG color 0
+        draw_line(&mut p, 0);
+        let white = [255, 255, 255, 255];
+        assert_eq!(rgba_at(&p, 0, 0), rgba(RED), "neither bit: sprite on top");
+        assert_eq!(
+            rgba_at(&p, 8, 0),
+            white,
+            "sprite bit 7: BG colors 1-3 cover it"
+        );
+        assert_eq!(rgba_at(&p, 16, 0), white, "tile bit 7: same");
+        assert_eq!(rgba_at(&p, 32, 0), rgba(RED), "BG color 0 never covers");
+        // LCDC bit 0 off: sprites go on top regardless.
+        p.lcdc &= !0x01;
+        draw_line(&mut p, 0);
+        assert_eq!(rgba_at(&p, 8, 0), rgba(RED));
+        assert_eq!(rgba_at(&p, 16, 0), rgba(RED));
+    }
+
+    #[test]
+    fn the_original_ignores_the_color_sprite_bits() {
+        let mut p = sprite_ppu(); // DMG, obp0 identity
+        put_sprite(&mut p, 0, 0, 0, 1, 0x0F); // bank and palette bits set
+        put_sprite(&mut p, 1, 0, 1, 1, 0x00); // same place a line lower
+        draw_line(&mut p, 0);
+        assert_eq!(shade_at(&p, 0, 0), 1, "tile 1 from bank 0 through OBP0");
+        // And X still wins over OAM order (below the first two sprites).
+        put_sprite(&mut p, 2, 4, 10, 1, 0x00);
+        put_sprite(&mut p, 3, 0, 10, 2, 0x00);
+        draw_line(&mut p, 10);
+        assert_eq!(shade_at(&p, 4, 10), 2, "smaller X first on the original");
     }
 }
