@@ -47,7 +47,7 @@ The big one: all 256 base opcodes and 256 `CB`-prefixed opcodes (minus 11 illega
 
 **Done when:** `cpu_instrs.gb` (all 11 in one ROM) passes, and `instr_timing.gb` passes.
 
-## Milestone 3 — Pixels
+## Milestone 3 — Pixels ✅
 
 - [x] Background: tile data, tile maps, SCX/SCY scrolling, BGP palette
 - [x] Window layer (WX/WY, its own line counter)
@@ -56,6 +56,7 @@ The big one: all 256 base opcodes and 256 `CB`-prefixed opcodes (minus 11 illega
 
 **Done when:** `dmg-acid2.gb` matches its reference image pixel for pixel.
 First homebrew title screen shows up in the browser. 🎉
+(Both done: dmg-acid2 matches exactly; Tobu Tobu Girl from Homebrew Hub reaches its title screen.)
 
 ## Milestone 4 — Playable in the browser
 
