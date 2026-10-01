@@ -204,6 +204,45 @@ impl Cpu {
         u16::from_le_bytes([lo, hi])
     }
 
+    /// Reads the 8-bit operand an opcode's 3-bit field names (`r[y]`/`r[z]`):
+    /// B C D E H L (HL) A. Index 6 is the byte in memory at HL, which costs
+    /// an extra 4 T-cycles per access; the caller's cycle count covers that.
+    /// https://gbdev.io/pandocs/CPU_Instruction_Set.html
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "first used by the 8-bit load step")
+    )]
+    fn read_r8(&self, bus: &Bus, r: u8) -> u8 {
+        match r {
+            0 => self.regs.b,
+            1 => self.regs.c,
+            2 => self.regs.d,
+            3 => self.regs.e,
+            4 => self.regs.h,
+            5 => self.regs.l,
+            6 => bus.read(self.regs.hl()),
+            _ => self.regs.a,
+        }
+    }
+
+    /// Writes the 8-bit operand named by a 3-bit field. See [`Cpu::read_r8`].
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "first used by the 8-bit load step")
+    )]
+    fn write_r8(&mut self, bus: &mut Bus, r: u8, val: u8) {
+        match r {
+            0 => self.regs.b = val,
+            1 => self.regs.c = val,
+            2 => self.regs.d = val,
+            3 => self.regs.e = val,
+            4 => self.regs.h = val,
+            5 => self.regs.l = val,
+            6 => bus.write(self.regs.hl(), val),
+            _ => self.regs.a = val,
+        }
+    }
+
     /// Executes one instruction and returns the T-cycles it took.
     pub fn step(&mut self, bus: &mut Bus) -> Result<u32, CpuError> {
         // TODO(milestone 2): if IME is set and (IE & IF) != 0, dispatch the
@@ -428,6 +467,53 @@ mod tests {
         assert!(!cpu.ime);
         cpu.step(&mut bus).unwrap();
         assert!(cpu.ime);
+    }
+
+    #[test]
+    fn r8_indices_follow_b_c_d_e_h_l_hl_a() {
+        let (mut cpu, mut bus) = setup(&[]);
+        cpu.regs.set_hl(0xC000);
+        bus.write(0xC000, 0x66);
+        cpu.regs.b = 0x00;
+        cpu.regs.c = 0x11;
+        cpu.regs.d = 0x22;
+        cpu.regs.e = 0x33;
+        cpu.regs.a = 0x77;
+        // H and L are $C0/$00 here because they hold the pointer.
+        let read: Vec<u8> = (0..8).map(|r| cpu.read_r8(&bus, r)).collect();
+        assert_eq!(read, [0x00, 0x11, 0x22, 0x33, 0xC0, 0x00, 0x66, 0x77]);
+    }
+
+    #[test]
+    fn write_r8_hits_the_named_register_only() {
+        for r in [0, 1, 2, 3, 4, 5, 7] {
+            let (mut cpu, mut bus) = setup(&[]);
+            let before = cpu.regs;
+            cpu.write_r8(&mut bus, r, 0xAB);
+            assert_eq!(cpu.read_r8(&bus, r), 0xAB, "index {r}");
+            let mut expected = before;
+            match r {
+                0 => expected.b = 0xAB,
+                1 => expected.c = 0xAB,
+                2 => expected.d = 0xAB,
+                3 => expected.e = 0xAB,
+                4 => expected.h = 0xAB,
+                5 => expected.l = 0xAB,
+                _ => expected.a = 0xAB,
+            }
+            assert_eq!(cpu.regs, expected, "index {r}");
+        }
+    }
+
+    #[test]
+    fn r8_index_6_is_memory_at_hl() {
+        let (mut cpu, mut bus) = setup(&[]);
+        cpu.regs.set_hl(0xC123);
+        let before = cpu.regs;
+        cpu.write_r8(&mut bus, 6, 0x5A);
+        assert_eq!(bus.read(0xC123), 0x5A);
+        assert_eq!(cpu.read_r8(&bus, 6), 0x5A);
+        assert_eq!(cpu.regs, before, "(HL) writes leave registers alone");
     }
 
     #[test]
