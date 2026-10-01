@@ -1,0 +1,15 @@
+[package]
+name = "gb-wasm"
+description = "WebAssembly bindings so the browser frontend in web/ can drive gb-core."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+gb-core = { path = "../gb-core" }
+# Pinned exactly: wasm-bindgen-cli must be the same version.
+# If you bump this, run: cargo install wasm-bindgen-cli --version <new> --locked
+wasm-bindgen = "=0.2.129"

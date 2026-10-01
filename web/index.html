@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>gb-emu</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>gb-emu</h1>
+      <span id="title" class="muted">no cartridge</span>
+      <span id="fps" class="muted"></span>
+    </header>
+
+    <div id="drop" class="screen-wrap">
+      <canvas id="screen" width="160" height="144"></canvas>
+      <div id="hint" class="hint">Drop a <code>.gb</code> file here<br>or <label class="link">choose one<input id="file" type="file" accept=".gb,.gbc"></label></div>
+      <pre id="error" class="error" hidden></pre>
+    </div>
+
+    <section class="controls muted">
+      <span><kbd>←↑↓→</kbd> d-pad</span>
+      <span><kbd>X</kbd> A</span>
+      <span><kbd>Z</kbd> B</span>
+      <span><kbd>Enter</kbd> Start</span>
+      <span><kbd>Shift</kbd> Select</span>
+    </section>
+
+    <details id="serial-panel">
+      <summary>Serial output</summary>
+      <pre id="serial"></pre>
+    </details>
+  </main>
+  <script type="module" src="main.js"></script>
+</body>
+</html>

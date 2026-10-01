@@ -1,0 +1,103 @@
+# Roadmap
+
+From "unimplemented opcode 3E" to a Game Boy emulator you can send people a link to.
+Each milestone ends with something you can see or a test ROM that passes.
+
+Test ROMs: download the latest release of
+[c-sp/game-boy-test-roms](https://github.com/c-sp/game-boy-test-roms) and unzip it into
+`roms/`. It bundles Blargg's tests, Mooneye, dmg-acid2 and more.
+
+---
+
+## Milestone 0 — Toolchain and first run ✅ (scaffold)
+
+- [x] Cargo workspace: `gb-core`, `gb-cli`, `gb-wasm`
+- [x] Memory bus, cartridge header, MBC1, timer, joypad, PPU timing, serial capture
+- [x] Headless runner with Gameboy Doctor trace output
+- [x] Browser frontend that loads a ROM and reports errors on the page
+- [x] **You:** install the wasm target and `wasm-bindgen-cli` (see README), build the web
+      version, drop a ROM in, and see "unimplemented opcode …" appear
+
+## Milestone 1 — The CPU
+
+The big one: all 256 base opcodes and 256 `CB`-prefixed opcodes (minus 11 illegal ones).
+
+- [x] Decode by bit pattern instead of 500 match arms: split the opcode into
+      `x = op >> 6`, `y = (op >> 3) & 7`, `z = op & 7` and most groups fall out
+      (e.g. `x == 1` is `LD r, r'`, except `0x76` HALT). Search "decoding gbz80 opcodes".
+- [ ] Helpers for reading/writing an 8-bit operand by index (B C D E H L (HL) A)
+- [ ] 8-bit loads, 16-bit loads, `PUSH`/`POP` (remember F's low nibble is always 0)
+- [ ] 8-bit ALU with correct H and C flags; `DAA` last, it's notoriously fiddly
+- [ ] 16-bit arithmetic: `ADD HL,rr`, `ADD SP,e8`, `LD HL,SP+e8` (flags from the low byte!)
+- [ ] Jumps, calls, returns, `RST`, conditional cycle counts
+- [ ] `CB` prefix: rotates, shifts, `SWAP`, `BIT`/`RES`/`SET`
+- [ ] Gameboy Doctor clean on `cpu_instrs` individual 01, 03–11
+
+**Done when:** `cpu_instrs/individual/` 01 and 03–11 print "Passed".
+(02 needs interrupts, which is the next milestone.)
+
+## Milestone 2 — Interrupts and timing
+
+- [ ] Interrupt dispatch in `Cpu::step` (see the TODO there): priority order, push PC,
+      clear IF bit and IME, 20 T-cycles
+- [ ] `RETI`, `HALT` wake-up rules, the HALT bug (IME=0 with a pending interrupt)
+- [ ] Timer edge cases marked `TODO(accuracy)`
+
+**Done when:** `cpu_instrs.gb` (all 11 in one ROM) passes, and `instr_timing.gb` passes.
+
+## Milestone 3 — Pixels
+
+- [ ] Background: tile data, tile maps, SCX/SCY scrolling, BGP palette (`render_scanline` has the recipe)
+- [ ] Window layer (WX/WY, its own line counter)
+- [ ] Sprites: OAM scan (10 per line), 8×8 and 8×16, flips, OBP0/OBP1, priority
+- [ ] STAT interrupts on mode changes; LCD off/on behavior
+
+**Done when:** `dmg-acid2.gb` matches its reference image pixel for pixel.
+First homebrew title screen shows up in the browser. 🎉
+
+## Milestone 4 — Playable in the browser
+
+- [ ] Gamepad API support alongside the keyboard
+- [ ] Touch controls for phones
+- [ ] Pause, reset, speed toggle (fast-forward is very satisfying)
+- [ ] Zero-copy framebuffer (a `Uint8ClampedArray` view on wasm memory)
+
+**Done when:** you can play a homebrew game from [Homebrew Hub](https://hh.gbdev.io/)
+start to finish on your phone.
+
+## Milestone 5 — More cartridges and saves
+
+- [ ] MBC3 with the real-time clock (Pokémon-style games use it)
+- [ ] MBC5
+- [ ] Battery saves: export/import `.sav`, keep them in the browser between visits
+
+**Done when:** Mooneye's MBC tests pass and a save survives a page reload.
+
+## Milestone 6 — Sound
+
+- [ ] Four channels: two square waves (one with sweep), wave, noise
+- [ ] Frame sequencer: length, envelope, sweep
+- [ ] Output through a Web Audio `AudioWorklet`; let audio drive timing to avoid crackle
+
+**Done when:** music sounds right and doesn't pop.
+
+## Milestone 7 — Show-off features
+
+Pick whichever sound most fun:
+
+- [ ] Deploy to GitHub Pages from CI, so the README has a "Play it" link
+- [ ] Debugger panel: registers, memory hex view, VRAM tile viewer, breakpoints, step button
+- [ ] Save states and rewind (hold a key to run time backwards)
+- [ ] Game Boy Color support (double-speed CPU, color palettes, VRAM banks)
+- [ ] Link cable over WebRTC: two browsers, two-player games
+
+---
+
+## References
+
+- [Pan Docs](https://gbdev.io/pandocs/) — the hardware reference
+- [Opcode table](https://gbdev.io/gb-opcodes/optables/) — cycles and flags for every instruction
+- [Gameboy Doctor](https://github.com/robert/gameboy-doctor) — finds the first instruction where your CPU diverges
+- [Test ROM collection](https://github.com/c-sp/game-boy-test-roms)
+- [dmg-acid2](https://github.com/mattcurrie/dmg-acid2) — PPU rendering test
+- [Homebrew Hub](https://hh.gbdev.io/) — free, legal games to play

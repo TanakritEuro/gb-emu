@@ -1,0 +1,13 @@
+[package]
+name = "gb-cli"
+description = "Headless runner: plays a ROM without a screen, prints serial output, writes Gameboy Doctor traces."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "gb-cli"
+path = "src/main.rs"
+
+[dependencies]
+gb-core = { path = "../gb-core" }

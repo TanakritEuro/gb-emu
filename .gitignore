@@ -1,0 +1,8 @@
+/target
+/web/pkg
+/roms/*
+!/roms/README.md
+*.gb
+*.gbc
+*.sav
+trace.log
