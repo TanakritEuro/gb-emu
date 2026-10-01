@@ -31,7 +31,7 @@ cargo run --release -p gb-cli -- <rom.gb> --doctor trace.log   # CPU trace for G
 node scripts/serve.js                                   # serve it at http://localhost:8765
 ```
 
-gb-cli exit codes: 0 passed, 1 "Failed" printed, 2 emulator/usage error
+gb-cli exit codes: 0 passed, 1 failed (Blargg "Failed" or Mooneye fail bytes), 2 emulator/usage error
 (e.g. illegal opcode), 3 frame limit reached without a verdict.
 
 ## Conventions
