@@ -3,6 +3,7 @@
 //!
 //! Reference: https://gbdev.io/pandocs/Memory_Map.html
 
+use crate::state::{StateError, StateReader, StateWriter};
 use crate::{apu::Apu, cartridge::Cartridge, joypad::Joypad, ppu::Ppu, timer::Timer};
 
 /// Bits of IF ($FF0F) and IE ($FFFF), in priority order.
@@ -14,6 +15,7 @@ pub mod interrupt {
     pub const JOYPAD: u8 = 0x10;
 }
 
+#[derive(Clone)]
 pub struct Bus {
     pub cart: Cartridge,
     pub ppu: Ppu,
@@ -50,6 +52,37 @@ impl Bus {
             serial_out: Vec::new(),
             doctor_mode: false,
         }
+    }
+
+    /// RAM, I/O, IF/IE and serial, then each chip's own section. Leaves out
+    /// the serial output not yet taken and Doctor mode: the host's, not the
+    /// Game Boy's.
+    pub(crate) fn save_state(&self, w: &mut StateWriter) {
+        w.tag(b"BUS ");
+        w.bytes(&self.wram);
+        w.bytes(&self.hram);
+        w.bytes(&self.io);
+        w.bytes(&[self.if_reg, self.ie_reg, self.serial_data, self.serial_ctrl]);
+        self.cart.save_state(w);
+        self.ppu.save_state(w);
+        self.timer.save_state(w);
+        self.joypad.save_state(w);
+        self.apu.save_state(w);
+    }
+
+    pub(crate) fn load_state(&mut self, r: &mut StateReader) -> Result<(), StateError> {
+        r.tag(b"BUS ")?;
+        r.bytes(&mut self.wram)?;
+        r.bytes(&mut self.hram)?;
+        r.bytes(&mut self.io)?;
+        let mut b = [0; 4];
+        r.bytes(&mut b)?;
+        [self.if_reg, self.ie_reg, self.serial_data, self.serial_ctrl] = b;
+        self.cart.load_state(r)?;
+        self.ppu.load_state(r)?;
+        self.timer.load_state(r)?;
+        self.joypad.load_state(r)?;
+        self.apu.load_state(r)
     }
 
     pub fn read(&self, addr: u16) -> u8 {

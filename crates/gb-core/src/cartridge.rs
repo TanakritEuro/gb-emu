@@ -4,8 +4,10 @@
 //!            https://gbdev.io/pandocs/MBC1.html
 //!            https://gbdev.io/pandocs/MBC3.html
 
+use crate::state::{fnv1a64, StateError, StateReader, StateWriter};
 use crate::CPU_HZ;
 use std::fmt;
+use std::sync::Arc;
 
 const ROM_BANK: usize = 0x4000;
 const RAM_BANK: usize = 0x2000;
@@ -262,8 +264,12 @@ impl Rtc {
     }
 }
 
+#[derive(Clone)]
 pub struct Cartridge {
-    rom: Vec<u8>,
+    /// Shared, not copied, when the cartridge is cloned (save states do).
+    rom: Arc<[u8]>,
+    /// [`state::fnv1a64`](crate::state::fnv1a64) of the ROM.
+    rom_hash: u64,
     ram: Vec<u8>,
     mbc: Mbc,
     pub header: Header,
@@ -342,12 +348,150 @@ impl Cartridge {
             checksum_ok: header_checksum(&rom) == rom[0x14D],
         };
         Ok(Self {
-            rom,
+            rom_hash: fnv1a64(&rom),
+            rom: rom.into(),
             ram: vec![0; ram_size],
             mbc,
             header,
             save_dirty: false,
         })
+    }
+
+    /// A fingerprint of the ROM, so save states can tell games apart.
+    pub fn rom_hash(&self) -> u64 {
+        self.rom_hash
+    }
+
+    /// The MBC's registers, the RAM and the clock; not the ROM.
+    pub(crate) fn save_state(&self, w: &mut StateWriter) {
+        w.tag(b"CART");
+        match &self.mbc {
+            Mbc::None => w.u8(0),
+            Mbc::Mbc1 {
+                ram_enabled,
+                rom_bank_low,
+                bank2,
+                mode,
+            } => {
+                w.u8(1);
+                w.bool(*ram_enabled);
+                w.bytes(&[*rom_bank_low, *bank2, *mode]);
+            }
+            Mbc::Mbc2 {
+                ram_enabled,
+                rom_bank,
+            } => {
+                w.u8(2);
+                w.bool(*ram_enabled);
+                w.u8(*rom_bank);
+            }
+            Mbc::Mbc3 {
+                ram_enabled,
+                rom_bank,
+                ram_select,
+                latch_prev,
+                rtc,
+            } => {
+                w.u8(3);
+                w.bool(*ram_enabled);
+                w.bytes(&[*rom_bank, *ram_select, *latch_prev]);
+                w.bool(rtc.is_some());
+                if let Some(rtc) = rtc {
+                    for regs in [&rtc.live, &rtc.latched] {
+                        w.bytes(&[
+                            regs.seconds,
+                            regs.minutes,
+                            regs.hours,
+                            regs.days_low,
+                            regs.control,
+                        ]);
+                    }
+                    w.u32(rtc.subsecond);
+                }
+            }
+            Mbc::Mbc5 {
+                ram_enabled,
+                rom_bank,
+                ram_bank,
+                rumble,
+            } => {
+                w.u8(5);
+                w.bool(*ram_enabled);
+                w.u16(*rom_bank);
+                w.u8(*ram_bank);
+                w.bool(*rumble);
+            }
+        }
+        w.sized_bytes(&self.ram);
+    }
+
+    pub(crate) fn load_state(&mut self, r: &mut StateReader) -> Result<(), StateError> {
+        r.tag(b"CART")?;
+        let kind = r.u8()?;
+        let wrong_mbc = Err(StateError::Corrupt("a different kind of cartridge"));
+        match &mut self.mbc {
+            Mbc::None if kind == 0 => {}
+            Mbc::Mbc1 {
+                ram_enabled,
+                rom_bank_low,
+                bank2,
+                mode,
+            } if kind == 1 => {
+                *ram_enabled = r.bool()?;
+                [*rom_bank_low, *bank2, *mode] = [r.u8()?, r.u8()?, r.u8()?];
+            }
+            Mbc::Mbc2 {
+                ram_enabled,
+                rom_bank,
+            } if kind == 2 => {
+                *ram_enabled = r.bool()?;
+                *rom_bank = r.u8()?;
+            }
+            Mbc::Mbc3 {
+                ram_enabled,
+                rom_bank,
+                ram_select,
+                latch_prev,
+                rtc,
+            } if kind == 3 => {
+                *ram_enabled = r.bool()?;
+                [*rom_bank, *ram_select, *latch_prev] = [r.u8()?, r.u8()?, r.u8()?];
+                if r.bool()? != rtc.is_some() {
+                    return wrong_mbc;
+                }
+                if let Some(rtc) = rtc {
+                    for regs in [&mut rtc.live, &mut rtc.latched] {
+                        let mut b = [0; 5];
+                        r.bytes(&mut b)?;
+                        let [seconds, minutes, hours, days_low, control] = b;
+                        *regs = RtcRegs {
+                            seconds,
+                            minutes,
+                            hours,
+                            days_low,
+                            control,
+                        };
+                    }
+                    rtc.subsecond = r.u32()?;
+                }
+            }
+            Mbc::Mbc5 {
+                ram_enabled,
+                rom_bank,
+                ram_bank,
+                rumble,
+            } if kind == 5 => {
+                *ram_enabled = r.bool()?;
+                *rom_bank = r.u16()?;
+                *ram_bank = r.u8()?;
+                *rumble = r.bool()?;
+            }
+            _ => return wrong_mbc,
+        }
+        r.sized_bytes(&mut self.ram)?;
+        // Going back to a state changes the battery save too: store it.
+        self.save_dirty = self.has_battery();
+        Ok(())
     }
 
     /// Whether the cartridge has a battery keeping its RAM (and MBC3's
@@ -898,6 +1042,67 @@ pub(crate) mod tests {
     fn latch(cart: &mut Cartridge) {
         cart.write_rom(0x6000, 0x00);
         cart.write_rom(0x6000, 0x01);
+    }
+
+    fn cart_state(cart: &Cartridge) -> Vec<u8> {
+        let mut w = StateWriter::new();
+        cart.save_state(&mut w);
+        w.finish(cart.rom_hash())
+    }
+
+    fn load_cart_state(cart: &mut Cartridge, state: &[u8]) -> Result<(), StateError> {
+        let mut r = StateReader::open(state, cart.rom_hash())?;
+        cart.load_state(&mut r)?;
+        r.finish()
+    }
+
+    #[test]
+    fn mbc3_banks_ram_and_clock_round_trip_through_a_state() {
+        // MBC3+TIMER+RAM+BATTERY, 32 KiB of RAM.
+        let mut cart = Cartridge::from_rom(make_rom(0x10, 64, 0x03)).unwrap();
+        cart.write_rom(0x0000, 0x0A); // RAM and clock on
+        cart.write_rom(0x2000, 5);
+        cart.write_rom(0x4000, 2);
+        cart.write_ram(0xA123, 0x42);
+        set_time(&mut cart, 300, 13, 37, 42, 0);
+        cart.tick(CPU_HZ / 2); // half a second into the next one
+        latch(&mut cart);
+        cart.write_rom(0x4000, 0x0A); // leave the hours selected
+        cart.take_save_dirty();
+        let state = cart_state(&cart);
+
+        // Change everything the state holds.
+        cart.write_rom(0x2000, 9);
+        cart.write_rom(0x4000, 2);
+        cart.write_ram(0xA123, 0x00);
+        set_time(&mut cart, 1, 2, 3, 4, 0);
+        latch(&mut cart);
+        cart.write_rom(0x0000, 0x00);
+
+        load_cart_state(&mut cart, &state).unwrap();
+        assert!(cart_state(&cart) == state, "everything back");
+        assert_eq!(bank_at(&cart, 0x4000), 5);
+        assert_eq!(cart.read_ram(0xA000), 13, "hours selected, latched 13");
+        cart.write_rom(0x4000, 2);
+        assert_eq!(cart.read_ram(0xA123), 0x42, "RAM bank 2");
+        assert!(cart.take_save_dirty(), "the battery save changed with it");
+        // The sub-second count came back too: half a second more ticks over.
+        cart.tick(CPU_HZ / 2);
+        latch(&mut cart);
+        assert_eq!(read_rtc(&mut cart, 0x08), 43);
+    }
+
+    #[test]
+    fn a_state_from_another_kind_of_cartridge_is_refused() {
+        let mbc5 = Cartridge::from_rom(make_rom(0x19, 4, 0)).unwrap();
+        let mut w = StateWriter::new();
+        mbc5.save_state(&mut w);
+        let mut mbc1 = Cartridge::from_rom(make_rom(0x01, 4, 0)).unwrap();
+        let state = w.finish(mbc1.rom_hash()); // pretend it's for this ROM
+        assert!(matches!(
+            load_cart_state(&mut mbc1, &state),
+            Err(StateError::Corrupt(_))
+        ));
     }
 
     fn read_rtc(cart: &mut Cartridge, reg: u8) -> u8 {

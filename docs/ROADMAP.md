@@ -101,6 +101,9 @@ Pick whichever sound most fun:
   - [x] VRAM tile viewer: all 384 tiles, and the background map with the visible area
   - [x] Breakpoints: stop when PC reaches an address (in whichever ROM bank is mapped there)
 - [ ] Save states and rewind (hold a key to run time backwards)
+  - [x] Save states in the core: the whole machine to bytes and back, refusing other games' states
+  - [ ] Save states in the browser: slots per game, kept between visits
+  - [ ] Rewind: keep recent states, hold a key to run backwards
 - [ ] Game Boy Color support (double-speed CPU, color palettes, VRAM banks)
 - [ ] Link cable over WebRTC: two browsers, two-player games
 

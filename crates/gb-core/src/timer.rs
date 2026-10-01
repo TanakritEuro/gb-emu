@@ -8,6 +8,8 @@
 //! Reference: https://gbdev.io/pandocs/Timer_and_Divider_Registers.html and
 //! https://gbdev.io/pandocs/Timer_Obscure_Behaviour.html
 
+use crate::state::{StateError, StateReader, StateWriter};
+
 /// Where TIMA is in the two M-cycles after it overflows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum Reload {
@@ -36,6 +38,36 @@ pub struct Timer {
 impl Timer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn save_state(&self, w: &mut StateWriter) {
+        w.tag(b"TIMR");
+        w.u16(self.counter);
+        w.bytes(&[self.tima, self.tma, self.tac]);
+        let (stage, left) = match self.reload {
+            Reload::Idle => (0, 0),
+            Reload::Pending(n) => (1, n),
+            Reload::Reloading(n) => (2, n),
+        };
+        w.bytes(&[stage, left]);
+        w.u32(self.div_apu);
+    }
+
+    pub(crate) fn load_state(&mut self, r: &mut StateReader) -> Result<(), StateError> {
+        r.tag(b"TIMR")?;
+        self.counter = r.u16()?;
+        self.tima = r.u8()?;
+        self.tma = r.u8()?;
+        self.tac = r.u8()?;
+        let (stage, left) = (r.u8()?, r.u8()?);
+        self.reload = match stage {
+            0 => Reload::Idle,
+            1 => Reload::Pending(left),
+            2 => Reload::Reloading(left),
+            _ => return Err(StateError::Corrupt("timer reload stage")),
+        };
+        self.div_apu = r.u32()?;
+        Ok(())
     }
 
     /// The signal TIMA's falling-edge detector watches: the timer is enabled

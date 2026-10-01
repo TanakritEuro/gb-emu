@@ -12,15 +12,18 @@ pub mod cpu;
 pub mod disasm;
 pub mod joypad;
 pub mod ppu;
+pub mod state;
 pub mod timer;
 
 use bus::{interrupt, Bus};
 use cpu::{Cpu, CpuError};
+use state::{StateReader, StateWriter};
 use std::collections::BTreeSet;
 
 pub use cartridge::{Cartridge, CartridgeError, SaveError};
 pub use disasm::Instruction;
 pub use joypad::Button;
+pub use state::StateError;
 
 pub const SCREEN_WIDTH: usize = 160;
 pub const SCREEN_HEIGHT: usize = 144;
@@ -30,6 +33,7 @@ pub const CPU_HZ: u32 = 4_194_304;
 pub const CYCLES_PER_FRAME: u32 = 70_224;
 
 /// A whole Game Boy: CPU plus everything on the memory bus.
+#[derive(Clone)]
 pub struct GameBoy {
     cpu: Cpu,
     bus: Bus,
@@ -120,6 +124,34 @@ impl GameBoy {
     /// is, even if a breakpoint was just set right there.
     pub fn resume_past_breakpoint(&mut self) {
         self.resume_here = true;
+    }
+
+    /// A save state: the whole machine as bytes, to hand back to
+    /// [`load_state`](Self::load_state) later (see [`state`] for the
+    /// format). About 23 KiB plus the cartridge's RAM.
+    pub fn save_state(&self) -> Vec<u8> {
+        let mut w = StateWriter::new();
+        self.cpu.save_state(&mut w);
+        self.bus.save_state(&mut w);
+        w.finish(self.bus.cart.rom_hash())
+    }
+
+    /// Puts the machine back the way [`save_state`](Self::save_state) found
+    /// it. All or nothing: a state for another game, from another version,
+    /// or damaged, is refused and leaves everything as it was. Host-side
+    /// settings stay: the audio output rate, held buttons, breakpoints.
+    pub fn load_state(&mut self, state: &[u8]) -> Result<(), StateError> {
+        let mut r = StateReader::open(state, self.bus.cart.rom_hash())?;
+        // Load into a copy (the ROM is shared, not copied) and swap it in
+        // only once every section has loaded.
+        let mut next = self.clone();
+        next.cpu.load_state(&mut r)?;
+        next.bus.load_state(&mut r)?;
+        r.finish()?;
+        next.bus.ppu.keep_framebuffer_of(&mut self.bus.ppu);
+        next.resume_here = false; // a fresh start here: breakpoints apply
+        *self = next;
+        Ok(())
     }
 
     /// Sets (`on`) or clears a breakpoint: [`run_frame`](Self::run_frame)

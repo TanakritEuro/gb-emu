@@ -16,6 +16,7 @@
 //! https://gbdev.io/pandocs/Audio_Registers.html,
 //! https://gbdev.io/pandocs/Audio_details.html
 
+use crate::state::{StateError, StateReader, StateWriter};
 use crate::CPU_HZ;
 
 /// The four duty cycles' 8-step waveforms (Pan Docs' NR11 table).
@@ -335,6 +336,7 @@ fn dac(on: bool, digital: u8) -> f32 {
     }
 }
 
+#[derive(Clone)]
 pub struct Apu {
     /// NR52 bit 7. Off clears every register but wave RAM and ignores writes.
     power: bool,
@@ -369,6 +371,155 @@ pub struct Apu {
 impl Default for Apu {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// Save states: the channels' internal counters, but not the output stage
+// (sample rate, filter, buffered samples), which belongs to the host.
+
+impl Length {
+    fn save(&self, w: &mut StateWriter) {
+        w.u16(self.counter);
+        w.bool(self.enabled);
+    }
+    fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
+        self.counter = r.u16()?;
+        self.enabled = r.bool()?;
+        Ok(())
+    }
+}
+
+impl Envelope {
+    fn save(&self, w: &mut StateWriter) {
+        w.bytes(&[self.nrx2, self.volume, self.pace, self.timer]);
+        w.bool(self.up);
+    }
+    fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
+        let mut b = [0; 4];
+        r.bytes(&mut b)?;
+        [self.nrx2, self.volume, self.pace, self.timer] = b;
+        self.up = r.bool()?;
+        if self.volume > 15 {
+            return Err(StateError::Corrupt("envelope volume"));
+        }
+        Ok(())
+    }
+}
+
+impl Square {
+    fn save(&self, w: &mut StateWriter) {
+        w.bool(self.enabled);
+        w.bool(self.dac);
+        w.bytes(&[self.duty, self.step]);
+        w.u16(self.period);
+        w.u32(self.timer);
+        self.env.save(w);
+        self.length.save(w);
+    }
+    fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
+        self.enabled = r.bool()?;
+        self.dac = r.bool()?;
+        self.duty = r.u8()?;
+        self.step = r.u8()?;
+        if self.duty > 3 || self.step > 7 {
+            return Err(StateError::Corrupt("square duty step"));
+        }
+        self.period = r.u16()?;
+        self.timer = r.u32()?;
+        self.env.load(r)?;
+        self.length.load(r)
+    }
+}
+
+impl Wave {
+    fn save(&self, w: &mut StateWriter) {
+        w.bool(self.enabled);
+        w.bool(self.dac);
+        w.bytes(&[self.level, self.position, self.sample]);
+        w.u16(self.period);
+        w.u32(self.timer);
+        self.length.save(w);
+    }
+    fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
+        self.enabled = r.bool()?;
+        self.dac = r.bool()?;
+        let mut b = [0; 3];
+        r.bytes(&mut b)?;
+        [self.level, self.position, self.sample] = b;
+        if self.level > 3 || self.position > 31 {
+            return Err(StateError::Corrupt("wave position"));
+        }
+        self.period = r.u16()?;
+        self.timer = r.u32()?;
+        self.length.load(r)
+    }
+}
+
+impl Noise {
+    fn save(&self, w: &mut StateWriter) {
+        w.bool(self.enabled);
+        w.bool(self.dac);
+        w.u8(self.nr43);
+        w.u16(self.lfsr);
+        w.u32(self.timer);
+        self.env.save(w);
+        self.length.save(w);
+    }
+    fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
+        self.enabled = r.bool()?;
+        self.dac = r.bool()?;
+        self.nr43 = r.u8()?;
+        self.lfsr = r.u16()?;
+        self.timer = r.u32()?;
+        self.env.load(r)?;
+        self.length.load(r)
+    }
+}
+
+impl Sweep {
+    fn save(&self, w: &mut StateWriter) {
+        w.bool(self.enabled);
+        w.u16(self.shadow);
+        w.u8(self.timer);
+        w.bool(self.subtracted);
+    }
+    fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
+        self.enabled = r.bool()?;
+        self.shadow = r.u16()?;
+        self.timer = r.u8()?;
+        self.subtracted = r.bool()?;
+        Ok(())
+    }
+}
+
+impl Apu {
+    pub(crate) fn save_state(&self, w: &mut StateWriter) {
+        w.tag(b"APU ");
+        w.bool(self.power);
+        self.ch1.save(w);
+        self.ch2.save(w);
+        self.ch3.save(w);
+        self.ch4.save(w);
+        self.sweep.save(w);
+        w.u8(self.frame_step);
+        w.bytes(&self.regs);
+        w.bytes(&self.wave_ram);
+    }
+
+    pub(crate) fn load_state(&mut self, r: &mut StateReader) -> Result<(), StateError> {
+        r.tag(b"APU ")?;
+        self.power = r.bool()?;
+        self.ch1.load(r)?;
+        self.ch2.load(r)?;
+        self.ch3.load(r)?;
+        self.ch4.load(r)?;
+        self.sweep.load(r)?;
+        self.frame_step = r.u8()?;
+        if self.frame_step > 7 {
+            return Err(StateError::Corrupt("frame sequencer step"));
+        }
+        r.bytes(&mut self.regs)?;
+        r.bytes(&mut self.wave_ram)
     }
 }
 

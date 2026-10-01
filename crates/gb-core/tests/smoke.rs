@@ -1,6 +1,6 @@
 //! End-to-end checks through the public API.
 
-use gb_core::{cpu::CpuError, FrameEnd, GameBoy, CYCLES_PER_FRAME};
+use gb_core::{cpu::CpuError, FrameEnd, GameBoy, StateError, CYCLES_PER_FRAME};
 
 /// A 32 KiB ROM-only cartridge with a valid header and `code` at $0150.
 /// The entry point at $0100 is NOP; JP $0150, like real games.
@@ -211,6 +211,125 @@ fn a_breakpoint_after_halt_waits_for_the_cpu_to_wake() {
     gb.set_breakpoint(0x0151, true);
     assert_eq!(gb.run_frame(), Ok(FrameEnd::Done));
     assert!(gb.cpu().halted);
+}
+
+/// A program that keeps most of the hardware busy: it fills tile 0 (so the
+/// screen is dark), starts the timer with its interrupt, plays three sound
+/// channels, then scribbles over work RAM forever.
+fn busy_rom() -> Vec<u8> {
+    #[rustfmt::skip]
+    let code = [
+        0x21, 0x00, 0x80,       // $0150 LD HL,$8000
+        0x3E, 0xFF,             //       LD A,$FF
+        0x06, 0x10,             //       LD B,16
+        0x22,                   // $0157 LD (HL+),A
+        0x05,                   //       DEC B
+        0x20, 0xFC,             //       JR NZ,$0157
+        0x21, 0x00, 0xC0,       //       LD HL,$C000
+        0x3E, 0x05, 0xE0, 0x07, //       TAC: timer on, 262144 Hz
+        0x3E, 0x80, 0xE0, 0x26, //       NR52: sound on
+        0x3E, 0xF0, 0xE0, 0x12, //       NR12: CH1 volume
+        0x3E, 0x87, 0xE0, 0x14, //       NR14: CH1 trigger
+        0x3E, 0x80, 0xE0, 0x1A, //       NR30: CH3 DAC on
+        0x3E, 0x87, 0xE0, 0x1E, //       NR34: CH3 trigger
+        0x3E, 0xF0, 0xE0, 0x21, //       NR42: CH4 volume
+        0x3E, 0x80, 0xE0, 0x23, //       NR44: CH4 trigger
+        0x3E, 0x04, 0xE0, 0xFF, //       IE: timer
+        0xFB,                   //       EI
+        0x22,                   // $0183 LD (HL+),A
+        0x85,                   //       ADD A,L
+        0xCB, 0xAC,             //       RES 5,H (stay in $C000-$DFFF)
+        0x18, 0xFA,             //       JR $0183
+    ];
+    let mut r = rom(&code);
+    r[0x50] = 0xD9; // the timer interrupt handler: RETI
+    r[0x14D] = r[0x134..=0x14C]
+        .iter()
+        .fold(0u8, |x, &b| x.wrapping_sub(b).wrapping_sub(1));
+    r
+}
+
+fn run_frames(gb: &mut GameBoy, n: usize) {
+    for _ in 0..n {
+        gb.run_frame().unwrap();
+        gb.take_audio();
+    }
+}
+
+#[test]
+fn a_loaded_state_carries_on_exactly_like_the_original() {
+    let mut gb = GameBoy::new(busy_rom()).unwrap();
+    run_frames(&mut gb, 10);
+    let saved = gb.save_state();
+    run_frames(&mut gb, 20);
+    let original = gb.save_state();
+
+    // Back into the same machine, which has moved on: anything a state
+    // forgot would keep its later value and make the runs drift apart.
+    gb.load_state(&saved).unwrap();
+    run_frames(&mut gb, 20);
+    assert!(gb.save_state() == original, "reloaded in place");
+
+    // Into one that has only just booted: forgotten fields keep power-on values.
+    let mut fresh = GameBoy::new(busy_rom()).unwrap();
+    fresh.load_state(&saved).unwrap();
+    run_frames(&mut fresh, 20);
+    assert!(
+        fresh.save_state() == original,
+        "loaded into a fresh Game Boy"
+    );
+}
+
+#[test]
+fn a_loaded_state_shows_its_picture_without_moving_the_framebuffer() {
+    let mut gb = GameBoy::new(busy_rom()).unwrap();
+    run_frames(&mut gb, 2); // the dark tile is on screen now
+    let state = gb.save_state();
+    let mut fresh = GameBoy::new(busy_rom()).unwrap(); // still showing white
+    let ptr = fresh.framebuffer().as_ptr();
+    assert!(fresh.framebuffer() != gb.framebuffer());
+    fresh.load_state(&state).unwrap();
+    assert!(fresh.framebuffer() == gb.framebuffer(), "the saved picture");
+    assert_eq!(fresh.framebuffer().as_ptr(), ptr, "at the same address");
+}
+
+#[test]
+fn states_for_other_games_or_damaged_ones_are_refused_and_change_nothing() {
+    let mut gb = GameBoy::new(busy_rom()).unwrap();
+    run_frames(&mut gb, 3);
+    let before = gb.save_state();
+    let other = GameBoy::new(rom(&COUNTER)).unwrap().save_state();
+    assert_eq!(gb.load_state(&other), Err(StateError::WrongGame));
+    let mut damaged = before.clone();
+    let middle = damaged.len() / 2;
+    damaged[middle] ^= 0x40;
+    assert!(matches!(
+        gb.load_state(&damaged),
+        Err(StateError::Corrupt(_))
+    ));
+    assert_eq!(gb.load_state(b"hello"), Err(StateError::NotAState));
+    assert!(gb.save_state() == before, "nothing changed");
+}
+
+#[test]
+fn host_settings_stay_when_a_state_loads() {
+    let mut gb = GameBoy::new(rom(&COUNTER)).unwrap();
+    let state = gb.save_state();
+    gb.set_breakpoint(0x0152, true);
+    gb.load_state(&state).unwrap();
+    assert_eq!(
+        gb.breakpoints().collect::<Vec<_>>(),
+        [0x0152],
+        "breakpoints"
+    );
+    assert_eq!(gb.run_frame(), Ok(FrameEnd::Breakpoint));
+}
+
+#[test]
+fn a_state_is_small() {
+    let state = GameBoy::new(busy_rom()).unwrap().save_state();
+    // 8 KiB work RAM + 8 KiB VRAM + the picture at 2 bits a pixel, and change.
+    assert!(state.len() < 24 * 1024, "{} bytes", state.len());
 }
 
 #[test]

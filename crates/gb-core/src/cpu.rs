@@ -9,6 +9,7 @@
 //! Cycle counts here are T-cycles (4 per M-cycle).
 
 use crate::bus::Bus;
+use crate::state::{StateError, StateReader, StateWriter};
 use std::fmt;
 
 pub const FLAG_Z: u8 = 0x80;
@@ -174,6 +175,42 @@ impl Cpu {
         self.ime_pending = false;
         self.halted = false;
         self.halt_bug = false;
+    }
+
+    pub(crate) fn save_state(&self, w: &mut StateWriter) {
+        let r = &self.regs;
+        w.tag(b"CPU ");
+        w.bytes(&[r.a, r.f, r.b, r.c, r.d, r.e, r.h, r.l]);
+        w.u16(r.sp);
+        w.u16(r.pc);
+        w.bool(self.ime);
+        w.bool(self.ime_pending);
+        w.bool(self.halted);
+        w.bool(self.halt_bug);
+    }
+
+    pub(crate) fn load_state(&mut self, r: &mut StateReader) -> Result<(), StateError> {
+        r.tag(b"CPU ")?;
+        let mut b = [0; 8];
+        r.bytes(&mut b)?;
+        let [a, f, b, c, d, e, h, l] = b;
+        self.regs = Registers {
+            a,
+            f: f & 0xF0, // F's low nibble doesn't exist
+            b,
+            c,
+            d,
+            e,
+            h,
+            l,
+            sp: r.u16()?,
+            pc: r.u16()?,
+        };
+        self.ime = r.bool()?;
+        self.ime_pending = r.bool()?;
+        self.halted = r.bool()?;
+        self.halt_bug = r.bool()?;
+        Ok(())
     }
 
     fn fetch8(&mut self, bus: &Bus) -> u8 {

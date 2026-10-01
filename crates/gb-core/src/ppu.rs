@@ -7,6 +7,7 @@
 //! Reference: https://gbdev.io/pandocs/Rendering.html
 
 use crate::bus::interrupt;
+use crate::state::{StateError, StateReader, StateWriter};
 use crate::{SCREEN_HEIGHT, SCREEN_WIDTH};
 
 /// Shades 0 (lightest) to 3 (darkest) as RGBA, in the classic green.
@@ -25,6 +26,7 @@ const DOTS_PER_LINE: u32 = 456;
 const LINES_PER_FRAME: u8 = 154;
 const VBLANK_LINE: u8 = 144;
 
+#[derive(Clone)]
 pub struct Ppu {
     vram: [u8; 0x2000],
     oam: [u8; 0xA0],
@@ -92,6 +94,69 @@ impl Ppu {
 
     pub fn framebuffer(&self) -> &[u8] {
         &self.framebuffer
+    }
+
+    pub(crate) fn save_state(&self, w: &mut StateWriter) {
+        w.tag(b"PPU ");
+        w.bytes(&self.vram);
+        w.bytes(&self.oam);
+        w.bytes(&[
+            self.lcdc, self.stat, self.scy, self.scx, self.ly, self.lyc, self.dma, self.bgp,
+            self.obp0, self.obp1, self.wy, self.wx,
+        ]);
+        w.u32(self.dot);
+        w.bool(self.wy_triggered);
+        w.u8(self.window_line);
+        w.bool(self.stat_line);
+        w.u8(self.pending_irq);
+        // The picture, so a loaded state shows its own frame straight away:
+        // every pixel is one of four shades, so 2 bits each, 4 per byte.
+        let mut packed = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT / 4];
+        for (i, px) in self.framebuffer.as_chunks::<4>().0.iter().enumerate() {
+            let shade = DMG_PALETTE.iter().position(|c| c == px).unwrap_or(0) as u8;
+            packed[i / 4] |= shade << ((i % 4) * 2);
+        }
+        w.bytes(&packed);
+    }
+
+    pub(crate) fn load_state(&mut self, r: &mut StateReader) -> Result<(), StateError> {
+        r.tag(b"PPU ")?;
+        r.bytes(&mut self.vram)?;
+        r.bytes(&mut self.oam)?;
+        let mut regs = [0; 12];
+        r.bytes(&mut regs)?;
+        [
+            self.lcdc, self.stat, self.scy, self.scx, self.ly, self.lyc, self.dma, self.bgp,
+            self.obp0, self.obp1, self.wy, self.wx,
+        ] = regs;
+        self.dot = r.u32()?;
+        if self.dot >= DOTS_PER_LINE || self.ly >= LINES_PER_FRAME {
+            return Err(StateError::Corrupt("PPU position"));
+        }
+        self.wy_triggered = r.bool()?;
+        self.window_line = r.u8()?;
+        self.stat_line = r.bool()?;
+        self.pending_irq = r.u8()?;
+        let mut packed = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT / 4];
+        r.bytes(&mut packed)?;
+        for (i, px) in self
+            .framebuffer
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .enumerate()
+        {
+            *px = DMG_PALETTE[usize::from((packed[i / 4] >> ((i % 4) * 2)) & 3)];
+        }
+        Ok(())
+    }
+
+    /// Takes over `old`'s framebuffer allocation (copying this one's picture
+    /// into it), so the screen stays at the address frontends point at when
+    /// a loaded state replaces the PPU.
+    pub(crate) fn keep_framebuffer_of(&mut self, old: &mut Ppu) {
+        old.framebuffer.copy_from_slice(&self.framebuffer);
+        std::mem::swap(&mut self.framebuffer, &mut old.framebuffer);
     }
 
     pub fn read_vram(&self, addr: u16) -> u8 {

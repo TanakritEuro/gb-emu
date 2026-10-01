@@ -3,6 +3,8 @@
 //!
 //! Reference: https://gbdev.io/pandocs/Joypad_Input.html
 
+use crate::state::{StateError, StateReader, StateWriter};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Button {
@@ -64,6 +66,19 @@ impl Joypad {
             low &= !(self.held >> 4);
         }
         0xC0 | self.select | low
+    }
+
+    /// Only the row selection: which buttons are held belongs to the player,
+    /// not to the state, so loading one never leaves a button stuck down.
+    pub(crate) fn save_state(&self, w: &mut StateWriter) {
+        w.tag(b"JOYP");
+        w.u8(self.select);
+    }
+
+    pub(crate) fn load_state(&mut self, r: &mut StateReader) -> Result<(), StateError> {
+        r.tag(b"JOYP")?;
+        self.select = r.u8()? & 0x30;
+        Ok(())
     }
 
     pub fn write(&mut self, val: u8) {
