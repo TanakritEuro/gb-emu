@@ -73,7 +73,7 @@ page reachable from a phone: `serve.js` on the LAN, or the GitHub Pages deploy i
 ## Milestone 5 — More cartridges and saves
 
 - [x] MBC3 with the real-time clock (Pokémon-style games use it) (rtc3test: all 3 suites match)
-- [ ] MBC5
+- [x] MBC5 (Mooneye `emulator-only/mbc5`: 8/8)
 - [ ] MBC2: 16 ROM banks, 512 × 4-bit RAM built into the chip (Mooneye `emulator-only/mbc2`)
 - [ ] Battery saves: export/import `.sav`, keep them in the browser between visits
 

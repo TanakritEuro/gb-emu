@@ -63,7 +63,18 @@ enum Mbc {
         /// Only cartridge types $0F and $10 have the clock.
         rtc: Option<Rtc>,
     },
-    // TODO(milestone 5): MBC5.
+    /// https://gbdev.io/pandocs/MBC5.html
+    Mbc5 {
+        ram_enabled: bool,
+        /// 9 bits: low 8 from $2000-$2FFF, bit 8 from $3000-$3FFF. Unlike
+        /// MBC1/MBC3, 0 really selects bank 0.
+        rom_bank: u16,
+        /// $4000-$5FFF, up to 16 banks of 8 KiB.
+        ram_bank: u8,
+        /// Rumble cartridges wire bit 3 of the RAM bank register to the motor,
+        /// so only bits 0-2 pick a bank.
+        rumble: bool,
+    },
 }
 
 /// MBC3's real-time clock registers, in the order $08-$0C selects them.
@@ -233,6 +244,13 @@ impl Cartridge {
                 latch_prev: 0xFF,
                 rtc: matches!(cart_type, 0x0F | 0x10).then(Rtc::default),
             },
+            // $19 MBC5, $1A +RAM, $1B +RAM+BATTERY, $1C-$1E the same with rumble
+            0x19..=0x1E => Mbc::Mbc5 {
+                ram_enabled: false,
+                rom_bank: 1,
+                ram_bank: 0,
+                rumble: cart_type >= 0x1C,
+            },
             t => return Err(CartridgeError::UnsupportedType(t)),
         };
         let header = Header {
@@ -277,6 +295,10 @@ impl Cartridge {
                 let bank = if addr < 0x4000 { 0 } else { rom_bank as usize };
                 (bank % self.rom_banks()) * ROM_BANK + (addr as usize & 0x3FFF)
             }
+            Mbc::Mbc5 { rom_bank, .. } => {
+                let bank = if addr < 0x4000 { 0 } else { rom_bank as usize };
+                (bank % self.rom_banks()) * ROM_BANK + (addr as usize & 0x3FFF)
+            }
         };
         self.rom.get(offset).copied().unwrap_or(0xFF)
     }
@@ -317,6 +339,18 @@ impl Cartridge {
                     *latch_prev = val;
                 }
             },
+            Mbc::Mbc5 {
+                ram_enabled,
+                rom_bank,
+                ram_bank,
+                rumble,
+            } => match addr {
+                0x0000..=0x1FFF => *ram_enabled = val & 0x0F == 0x0A,
+                0x2000..=0x2FFF => *rom_bank = (*rom_bank & 0x100) | u16::from(val),
+                0x3000..=0x3FFF => *rom_bank = (*rom_bank & 0xFF) | (u16::from(val & 1) << 8),
+                0x4000..=0x5FFF => *ram_bank = val & if *rumble { 0x07 } else { 0x0F },
+                _ => {} // $6000-$7FFF does nothing on MBC5
+            },
         }
     }
 
@@ -329,7 +363,11 @@ impl Cartridge {
             }
             | Mbc::Mbc3 {
                 ram_enabled: false, ..
+            }
+            | Mbc::Mbc5 {
+                ram_enabled: false, ..
             } => return RamTarget::None,
+            Mbc::Mbc5 { ram_bank, .. } => *ram_bank as usize,
             Mbc::Mbc1 { bank2, mode, .. } => {
                 if *mode == 1 {
                     *bank2 as usize
@@ -396,12 +434,13 @@ enum RamTarget {
 pub(crate) mod tests {
     use super::*;
 
-    /// Builds a ROM with a valid header. Each bank's first byte (except bank 0)
-    /// holds its bank number so tests can see which bank is mapped.
+    /// Builds a ROM with a valid header. Each bank's first two bytes (except
+    /// bank 0's) hold its bank number, low byte first, so tests can see which
+    /// bank is mapped (see `bank_at`).
     pub(crate) fn make_rom(cart_type: u8, banks: usize, ram_code: u8) -> Vec<u8> {
         let mut rom = vec![0u8; banks * ROM_BANK];
         for b in 1..banks {
-            rom[b * ROM_BANK] = b as u8;
+            rom[b * ROM_BANK..b * ROM_BANK + 2].copy_from_slice(&(b as u16).to_le_bytes());
         }
         rom[0x134..0x134 + 4].copy_from_slice(b"TEST");
         rom[0x147] = cart_type;
@@ -466,6 +505,57 @@ pub(crate) mod tests {
         assert_eq!(cart.read_ram(0xA000), 0xFF, "disabled RAM reads open bus");
         cart.write_rom(0x0000, 0x0A);
         cart.write_ram(0xA000, 0x42);
+        assert_eq!(cart.read_ram(0xA000), 0x42);
+    }
+
+    /// Which ROM bank is mapped at `base` ($0000 or $4000), from make_rom's tags.
+    fn bank_at(cart: &Cartridge, base: u16) -> u16 {
+        u16::from_le_bytes([cart.read_rom(base), cart.read_rom(base + 1)])
+    }
+
+    #[test]
+    fn mbc5_rom_bank_is_9_bits_and_0_means_0() {
+        let mut cart = Cartridge::from_rom(make_rom(0x19, 512, 0)).unwrap();
+        assert_eq!(bank_at(&cart, 0x4000), 1, "bank 1 mapped at power-on");
+        cart.write_rom(0x2000, 0x23);
+        assert_eq!(bank_at(&cart, 0x4000), 0x023);
+        cart.write_rom(0x3000, 0x01);
+        assert_eq!(bank_at(&cart, 0x4000), 0x123, "bit 8 from $3000");
+        cart.write_rom(0x2FFF, 0xFF);
+        assert_eq!(bank_at(&cart, 0x4000), 0x1FF, "low byte keeps bit 8");
+        cart.write_rom(0x3000, 0xFE);
+        assert_eq!(bank_at(&cart, 0x4000), 0x0FF, "only bit 0 of $3000 counts");
+        cart.write_rom(0x2000, 0x00);
+        assert_eq!(bank_at(&cart, 0x4000), 0, "bank 0 really is bank 0");
+        assert_eq!(bank_at(&cart, 0x0000), 0, "$0000-$3FFF is always bank 0");
+    }
+
+    #[test]
+    fn mbc5_ram_has_up_to_16_banks() {
+        let mut cart = Cartridge::from_rom(make_rom(0x1B, 4, 0x04)).unwrap(); // 128 KiB
+        cart.write_ram(0xA000, 1);
+        assert_eq!(cart.read_ram(0xA000), 0xFF, "disabled at power-on");
+        cart.write_rom(0x0000, 0x0A);
+        for bank in 0..16 {
+            cart.write_rom(0x4000, bank);
+            cart.write_ram(0xBFFF, 0x80 | bank);
+        }
+        for bank in 0..16 {
+            cart.write_rom(0x4000, bank);
+            assert_eq!(cart.read_ram(0xBFFF), 0x80 | bank, "bank {bank}");
+        }
+        cart.write_rom(0x0000, 0x00);
+        assert_eq!(cart.read_ram(0xBFFF), 0xFF, "disabled again");
+    }
+
+    #[test]
+    fn mbc5_rumble_bit_is_not_a_ram_bank_bit() {
+        // MBC5+RUMBLE+RAM+BATTERY with 32 KiB: bit 3 drives the motor.
+        let mut cart = Cartridge::from_rom(make_rom(0x1E, 4, 0x03)).unwrap();
+        cart.write_rom(0x0000, 0x0A);
+        cart.write_rom(0x4000, 0x02);
+        cart.write_ram(0xA000, 0x42);
+        cart.write_rom(0x4000, 0x0A); // bank 2 with the motor on
         assert_eq!(cart.read_ram(0xA000), 0x42);
     }
 
