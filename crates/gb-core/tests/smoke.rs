@@ -83,6 +83,33 @@ fn framebuffer_never_moves() {
 }
 
 #[test]
+fn battery_save_survives_a_power_cycle() {
+    // An MBC1+RAM+BATTERY game that writes $42 to cartridge RAM:
+    // LD A,$0A ; LD ($0000),A (enable RAM) ; LD A,$42 ; LD ($A000),A ; JR -2
+    let code = [
+        0x3E, 0x0A, 0xEA, 0x00, 0x00, 0x3E, 0x42, 0xEA, 0x00, 0xA0, 0x18, 0xFE,
+    ];
+    let mut image = rom(&code);
+    image[0x147] = 0x03;
+    image[0x149] = 0x02; // 8 KiB
+    image[0x14D] = image[0x134..=0x14C]
+        .iter()
+        .fold(0u8, |x, &b| x.wrapping_sub(b).wrapping_sub(1));
+
+    let mut gb = GameBoy::new(image.clone()).unwrap();
+    assert!(gb.has_battery());
+    gb.run_frame().unwrap();
+    assert!(gb.take_save_dirty(), "the game wrote its save");
+    let save = gb.save_data(1_700_000_000).unwrap();
+    assert_eq!((save.len(), save[0]), (0x2000, 0x42));
+
+    // Power off, power on with the same cartridge: the save comes back.
+    let mut again = GameBoy::new(image).unwrap();
+    again.load_save(&save, 1_700_000_100).unwrap();
+    assert_eq!(again.save_data(1_700_000_100).unwrap(), save);
+}
+
+#[test]
 fn a_frame_is_70224_cycles() {
     assert_eq!(CYCLES_PER_FRAME, 154 * 456);
 }

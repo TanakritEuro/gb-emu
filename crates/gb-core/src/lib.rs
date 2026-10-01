@@ -15,7 +15,7 @@ pub mod timer;
 use bus::{interrupt, Bus};
 use cpu::{Cpu, CpuError};
 
-pub use cartridge::{Cartridge, CartridgeError};
+pub use cartridge::{Cartridge, CartridgeError, SaveError};
 pub use joypad::Button;
 
 pub const SCREEN_WIDTH: usize = 160;
@@ -78,6 +78,30 @@ impl GameBoy {
     /// Test ROMs (Blargg's) print their results this way.
     pub fn take_serial_output(&mut self) -> String {
         self.bus.take_serial_output()
+    }
+
+    /// Whether this game has a battery save (cartridge RAM, and for MBC3 the
+    /// clock, that survive power-off).
+    pub fn has_battery(&self) -> bool {
+        self.bus.cart.has_battery()
+    }
+
+    /// The battery save as `.sav` bytes (the format BGB and VBA-M use), or
+    /// None if the game has no battery. `now` is the current Unix time in
+    /// seconds; it stamps the clock so loading can catch it up later.
+    pub fn save_data(&self, now: u64) -> Option<Vec<u8>> {
+        self.bus.cart.save_data(now)
+    }
+
+    /// Loads a battery save. Best done right after `new`, before the game
+    /// runs, like plugging in a cartridge. `now` is the current Unix time.
+    pub fn load_save(&mut self, data: &[u8], now: u64) -> Result<(), SaveError> {
+        self.bus.cart.load_save(data, now)
+    }
+
+    /// True (once) if the game has changed its save since the last call.
+    pub fn take_save_dirty(&mut self) -> bool {
+        self.bus.cart.take_save_dirty()
     }
 
     pub fn title(&self) -> &str {

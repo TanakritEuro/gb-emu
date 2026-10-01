@@ -31,6 +31,43 @@ impl fmt::Display for CartridgeError {
 
 impl std::error::Error for CartridgeError {}
 
+/// Why save data couldn't be loaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaveError {
+    /// The cartridge has no battery, so nothing on it survives power-off.
+    NoBattery,
+    /// The data doesn't fit this cartridge: `expected` lists the sizes it takes.
+    WrongSize { got: usize, expected: Vec<usize> },
+}
+
+impl fmt::Display for SaveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SaveError::NoBattery => write!(f, "this cartridge has no battery, so it has no save"),
+            SaveError::WrongSize { got, expected } => {
+                let sizes: Vec<String> = expected.iter().map(|n| format!("{n}")).collect();
+                write!(
+                    f,
+                    "save is {got} bytes; this cartridge's is {} bytes",
+                    sizes.join(" or ")
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for SaveError {}
+
+/// Bytes of clock state that `.sav` files append after the RAM for MBC3
+/// cartridges with a clock, in the format BGB and VBA-M use: the five live
+/// registers and the five latched ones as little-endian u32s, then the Unix
+/// time of the save as a u64 (44 bytes in the old VBA variant, with a u32).
+/// https://bgb.bircd.org/rtcsave.html
+const RTC_SAVE_LEN: usize = 48;
+const RTC_SAVE_LEN_OLD: usize = 44;
+/// The timestamp BGB writes when it doesn't know the time: don't catch up.
+const RTC_NO_TIMESTAMP: u64 = 0x7FFF_FFFF_7FFF_FFFF;
+
 #[derive(Debug, Clone)]
 pub struct Header {
     pub title: String,
@@ -154,14 +191,44 @@ impl RtcRegs {
         self.days_low = days as u8;
         self.control = (self.control & !1) | ((days >> 8) & 1) as u8;
     }
+
+    /// `secs` seconds pass, as if `tick_second` ran that many times, but
+    /// without looping over a long absence (a year is 31 million seconds).
+    /// Does nothing while halted.
+    fn advance(&mut self, mut secs: u64) {
+        if self.control & RTC_HALT != 0 {
+            return;
+        }
+        // Fields outside their usual range count on oddly (see tick_second);
+        // step through that one second at a time until it's back in range.
+        while secs > 0 && (self.seconds > 59 || self.minutes > 59 || self.hours > 23) {
+            self.tick_second();
+            secs -= 1;
+        }
+        if secs == 0 {
+            return; // the arithmetic below would also "fix" an out-of-range time
+        }
+        let time_of_day =
+            u64::from(self.seconds) + 60 * u64::from(self.minutes) + 3600 * u64::from(self.hours);
+        let total = time_of_day + secs;
+        let rem = total % 86_400;
+        self.seconds = (rem % 60) as u8;
+        self.minutes = (rem / 60 % 60) as u8;
+        self.hours = (rem / 3600) as u8;
+        let days = ((u64::from(self.control & 1) << 8) | u64::from(self.days_low)) + total / 86_400;
+        if days > 0x1FF {
+            self.control |= RTC_CARRY;
+        }
+        self.days_low = days as u8;
+        self.control = (self.control & !1) | ((days >> 8) & 1) as u8;
+    }
 }
 
 /// MBC3's clock: live registers that tick, the latched copy games read, and
 /// the time since the last tick. It runs on emulated time (one second per
 /// `CPU_HZ` T-cycles), so it speeds up with fast-forward like real hardware
-/// would at a faster clock.
-/// TODO(milestone 5): with battery saves, let the frontend add the real time
-/// that passed while the game was closed.
+/// would at a faster clock. Real time that passed while the game was closed
+/// is added when a save is loaded (`Cartridge::load_save`).
 #[derive(Debug, Clone, Default)]
 struct Rtc {
     live: RtcRegs,
@@ -200,6 +267,8 @@ pub struct Cartridge {
     ram: Vec<u8>,
     mbc: Mbc,
     pub header: Header,
+    /// Set when the game writes RAM or the clock; see `take_save_dirty`.
+    save_dirty: bool,
 }
 
 /// The checksum the boot ROM verifies over $0134-$014C.
@@ -277,7 +346,101 @@ impl Cartridge {
             ram: vec![0; ram_size],
             mbc,
             header,
+            save_dirty: false,
         })
+    }
+
+    /// Whether the cartridge has a battery keeping its RAM (and MBC3's
+    /// clock) alive with the power off, i.e. whether it has a save.
+    pub fn has_battery(&self) -> bool {
+        matches!(
+            self.header.cart_type,
+            0x03 | 0x06 | 0x09 | 0x0D | 0x0F | 0x10 | 0x13 | 0x1B | 0x1E
+        )
+    }
+
+    fn rtc(&self) -> Option<&Rtc> {
+        match &self.mbc {
+            Mbc::Mbc3 { rtc, .. } => rtc.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// The save, as a `.sav` file: cartridge RAM, then for MBC3 with a clock
+    /// the 48-byte clock block stamped with `now` (Unix seconds, from the
+    /// frontend: the core never reads the system clock). None without a
+    /// battery.
+    pub fn save_data(&self, now: u64) -> Option<Vec<u8>> {
+        if !self.has_battery() {
+            return None;
+        }
+        let mut data = self.ram.clone();
+        if let Some(rtc) = self.rtc() {
+            for regs in [rtc.live, rtc.latched] {
+                for reg in 0x08..=0x0C {
+                    data.extend_from_slice(&u32::from(regs.get(reg)).to_le_bytes());
+                }
+            }
+            data.extend_from_slice(&now.to_le_bytes());
+        }
+        Some(data)
+    }
+
+    /// Restores a save made by `save_data` or another emulator. The clock is
+    /// moved on by the time between the save's timestamp and `now`, as if the
+    /// cartridge's battery had kept it running. A save without the clock
+    /// block (just RAM) is accepted too; the clock then starts from zero.
+    pub fn load_save(&mut self, data: &[u8], now: u64) -> Result<(), SaveError> {
+        if !self.has_battery() {
+            return Err(SaveError::NoBattery);
+        }
+        let ram_len = self.ram.len();
+        let has_rtc = self.rtc().is_some();
+        let wrong_size = || SaveError::WrongSize {
+            got: data.len(),
+            expected: if has_rtc {
+                vec![ram_len + RTC_SAVE_LEN, ram_len]
+            } else {
+                vec![ram_len]
+            },
+        };
+        if data.len() < ram_len {
+            return Err(wrong_size());
+        }
+        let (ram, clock) = data.split_at(ram_len);
+        if !(clock.is_empty() || has_rtc && matches!(clock.len(), RTC_SAVE_LEN | RTC_SAVE_LEN_OLD))
+        {
+            return Err(wrong_size());
+        }
+
+        let mbc2 = matches!(self.mbc, Mbc::Mbc2 { .. });
+        for (dst, &src) in self.ram.iter_mut().zip(ram) {
+            *dst = if mbc2 { src & 0x0F } else { src };
+        }
+        if let (Mbc::Mbc3 { rtc: Some(rtc), .. }, false) = (&mut self.mbc, clock.is_empty()) {
+            // Little-endian integer from `len` bytes at `i` (lengths checked above).
+            let le_at = |i: usize, len: usize| {
+                let mut b = [0u8; 8];
+                b[..len].copy_from_slice(&clock[i..i + len]);
+                u64::from_le_bytes(b)
+            };
+            for (n, reg) in (0x08..=0x0C).enumerate() {
+                rtc.live.set(reg, le_at(n * 4, 4) as u8);
+                rtc.latched.set(reg, le_at(20 + n * 4, 4) as u8);
+            }
+            let saved_at = le_at(40, clock.len() - 40);
+            if saved_at != RTC_NO_TIMESTAMP && now > saved_at {
+                rtc.live.advance(now - saved_at);
+            }
+        }
+        self.save_dirty = false;
+        Ok(())
+    }
+
+    /// True once if the game has written cartridge RAM or the clock since the
+    /// last call: the frontend's cue to store the save.
+    pub fn take_save_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.save_dirty)
     }
 
     fn rom_banks(&self) -> usize {
@@ -445,8 +608,9 @@ impl Cartridge {
                     rtc.write(reg, val);
                 }
             }
-            RamTarget::None => {}
+            RamTarget::None => return,
         }
+        self.save_dirty = true;
     }
 
     /// Advances anything on the cartridge that runs on its own: MBC3's clock.
@@ -853,5 +1017,205 @@ pub(crate) mod tests {
             (0, 0, 5, 1, 0),
             "the rest of the second later"
         );
+    }
+
+    /// MBC1+RAM+BATTERY, 32 KiB RAM, enabled.
+    fn battery_cart() -> Cartridge {
+        let mut cart = Cartridge::from_rom(make_rom(0x03, 4, 0x03)).unwrap();
+        cart.write_rom(0x0000, 0x0A);
+        cart
+    }
+
+    #[test]
+    fn ram_save_round_trips() {
+        let mut cart = battery_cart();
+        cart.write_rom(0x6000, 1); // RAM banking mode, so all 4 banks are reachable
+        for bank in 0..4u8 {
+            cart.write_rom(0x4000, bank);
+            cart.write_ram(0xA000, 0x10 + bank);
+            cart.write_ram(0xBFFF, 0x20 + bank);
+        }
+        let save = cart.save_data(1_000).unwrap();
+        assert_eq!(save.len(), 0x8000, "just the RAM: no clock on MBC1");
+
+        let mut fresh = battery_cart();
+        fresh.load_save(&save, 2_000).unwrap();
+        assert_eq!(fresh.save_data(2_000).unwrap(), save);
+        fresh.write_rom(0x6000, 1);
+        fresh.write_rom(0x4000, 3);
+        assert_eq!(fresh.read_ram(0xBFFF), 0x23);
+    }
+
+    #[test]
+    fn saves_need_a_battery_and_the_right_size() {
+        let mut no_battery = Cartridge::from_rom(make_rom(0x02, 4, 0x03)).unwrap();
+        assert!(!no_battery.has_battery());
+        assert_eq!(no_battery.save_data(0), None);
+        assert_eq!(
+            no_battery.load_save(&[0; 0x8000], 0),
+            Err(SaveError::NoBattery)
+        );
+
+        let mut cart = battery_cart();
+        let err = cart.load_save(&[0; 100], 0).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "save is 100 bytes; this cartridge's is 32768 bytes"
+        );
+        assert!(
+            cart.load_save(&[0; 0x8000 + 48], 0).is_err(),
+            "no clock to restore"
+        );
+
+        let mut rtc = rtc_cart();
+        let err = rtc.load_save(&[0; 10], 0).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "save is 10 bytes; this cartridge's is 32816 or 32768 bytes"
+        );
+    }
+
+    #[test]
+    fn save_dirty_flags_game_writes_only() {
+        let mut cart = battery_cart();
+        assert!(!cart.take_save_dirty());
+        cart.write_ram(0xA000, 1);
+        assert!(cart.take_save_dirty());
+        assert!(!cart.take_save_dirty(), "reported once");
+        cart.write_rom(0x0000, 0x00); // RAM disabled: the write goes nowhere
+        cart.write_ram(0xA000, 2);
+        assert!(!cart.take_save_dirty());
+        cart.write_ram(0xA000, 2);
+        let save = cart.save_data(0).unwrap();
+        cart.load_save(&save, 0).unwrap();
+        assert!(!cart.take_save_dirty(), "loading isn't a change to store");
+    }
+
+    #[test]
+    fn mbc2_save_is_512_nibbles() {
+        let mut cart = Cartridge::from_rom(make_rom(0x06, 4, 0)).unwrap();
+        cart.write_rom(0x0000, 0x0A);
+        cart.write_ram(0xA1FF, 0x0C);
+        let save = cart.save_data(0).unwrap();
+        assert_eq!(save.len(), 512);
+        assert_eq!(save[511], 0x0C);
+
+        let mut fresh = Cartridge::from_rom(make_rom(0x06, 4, 0)).unwrap();
+        let mut foreign = save.clone();
+        foreign[0] = 0xAB; // another emulator may store the top bits
+        fresh.load_save(&foreign, 0).unwrap();
+        fresh.write_rom(0x0000, 0x0A);
+        assert_eq!(fresh.read_ram(0xA000), 0xFB, "only the low nibble is kept");
+        assert_eq!(fresh.read_ram(0xA1FF), 0xFC);
+    }
+
+    #[test]
+    fn rtc_save_uses_the_bgb_layout() {
+        let mut cart = rtc_cart();
+        set_time(&mut cart, 0x103, 4, 5, 6, 0);
+        latch(&mut cart);
+        cart.write_rom(0x4000, 0x00);
+        cart.write_ram(0xA000, 0x77);
+        let save = cart.save_data(0x0123_4567_89AB).unwrap();
+        assert_eq!(save.len(), 0x8000 + 48);
+        assert_eq!(save[0], 0x77);
+        let clock = &save[0x8000..];
+        let u32s: Vec<u32> = (0..10)
+            .map(|i| {
+                u32::from_le_bytes([
+                    clock[i * 4],
+                    clock[i * 4 + 1],
+                    clock[i * 4 + 2],
+                    clock[i * 4 + 3],
+                ])
+            })
+            .collect();
+        assert_eq!(
+            u32s[..5],
+            [6, 5, 4, 0x03, 0x01],
+            "live: s m h days days-high"
+        );
+        assert_eq!(u32s[5..], [6, 5, 4, 0x03, 0x01], "latched");
+        assert_eq!(
+            &clock[40..48],
+            &0x0123_4567_89ABu64.to_le_bytes(),
+            "timestamp"
+        );
+    }
+
+    #[test]
+    fn loading_an_rtc_save_catches_the_clock_up() {
+        let mut cart = rtc_cart();
+        set_time(&mut cart, 10, 23, 0, 0, 0);
+        let save = cart.save_data(1_000_000).unwrap();
+
+        // Two days, an hour and 30 seconds later.
+        let mut later = rtc_cart();
+        later
+            .load_save(&save, 1_000_000 + 2 * 86_400 + 3_600 + 30)
+            .unwrap();
+        assert_eq!(time(&mut later), (13, 0, 0, 30, 0));
+
+        // The old 44-byte format, with a 32-bit timestamp.
+        let mut old = save.clone();
+        old.truncate(0x8000 + 44);
+        let mut cart = rtc_cart();
+        cart.load_save(&old, 1_000_000 + 60).unwrap();
+        assert_eq!(time(&mut cart), (10, 23, 1, 0, 0));
+
+        // BGB's "no timestamp" marker, and a clock from the future: no catch-up.
+        let mut unknown = save.clone();
+        unknown[0x8000 + 40..].copy_from_slice(&RTC_NO_TIMESTAMP.to_le_bytes());
+        let mut cart = rtc_cart();
+        cart.load_save(&unknown, 2_000_000).unwrap();
+        assert_eq!(time(&mut cart), (10, 23, 0, 0, 0));
+        let mut cart = rtc_cart();
+        cart.load_save(&save, 999_000).unwrap();
+        assert_eq!(time(&mut cart), (10, 23, 0, 0, 0));
+    }
+
+    #[test]
+    fn a_halted_clock_stays_put_while_the_game_is_closed() {
+        let mut cart = rtc_cart();
+        set_time(&mut cart, 1, 2, 3, 4, RTC_HALT);
+        let save = cart.save_data(0).unwrap();
+        let mut later = rtc_cart();
+        later.load_save(&save, 86_400 * 30).unwrap();
+        assert_eq!(time(&mut later), (1, 2, 3, 4, RTC_HALT));
+    }
+
+    #[test]
+    fn rtc_catch_up_matches_ticking_one_second_at_a_time() {
+        // A small deterministic generator, so failures reproduce.
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move |bound: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % bound
+        };
+        for case in 0..300 {
+            // Mostly normal times, some out of range, days anywhere (so some
+            // runs overflow past 511 and set the carry).
+            let regs = RtcRegs {
+                seconds: next(64) as u8,
+                minutes: next(64) as u8,
+                hours: next(32) as u8,
+                days_low: next(256) as u8,
+                control: (next(2) as u8) | if next(4) == 0 { RTC_CARRY } else { 0 },
+            };
+            let secs = match case % 3 {
+                0 => next(200),
+                1 => next(5_000),
+                _ => next(200_000),
+            };
+            let mut stepped = regs;
+            for _ in 0..secs {
+                stepped.tick_second();
+            }
+            let mut jumped = regs;
+            jumped.advance(secs);
+            assert_eq!(jumped, stepped, "case {case}: {regs:?} + {secs} s");
+        }
     }
 }
