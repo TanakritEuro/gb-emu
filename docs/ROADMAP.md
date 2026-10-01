@@ -67,6 +67,8 @@ First homebrew title screen shows up in the browser. 🎉
 
 **Done when:** you can play a homebrew game from [Homebrew Hub](https://hh.gbdev.io/)
 start to finish on your phone.
+(Pending: all four steps are in, but the phone playthrough hasn't been done yet. Needs the
+page reachable from a phone: `serve.js` on the LAN, or the GitHub Pages deploy in milestone 7.)
 
 ## Milestone 5 — More cartridges and saves
 
