@@ -52,7 +52,7 @@ The big one: all 256 base opcodes and 256 `CB`-prefixed opcodes (minus 11 illega
 - [x] Background: tile data, tile maps, SCX/SCY scrolling, BGP palette
 - [x] Window layer (WX/WY, its own line counter)
 - [x] Sprites: OAM scan (10 per line), 8×8 and 8×16, flips, OBP0/OBP1, priority (dmg-acid2 matches pixel for pixel)
-- [x] STAT interrupts on mode changes; LCD off/on behavior (Mooneye `acceptance/ppu`: 4/12, the rest need dot-accurate mode 3)
+- [x] STAT interrupts on mode changes; LCD off/on behavior (Mooneye `acceptance/ppu`: 3/12; the rest need variable mode 3 timing and the LCD-on/line-144 quirks)
 
 **Done when:** `dmg-acid2.gb` matches its reference image pixel for pixel.
 First homebrew title screen shows up in the browser. 🎉
