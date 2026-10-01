@@ -5,6 +5,7 @@
 //! button presses, calls [`GameBoy::run_frame`], and reads back pixels and
 //! serial output.
 
+pub mod apu;
 pub mod bus;
 pub mod cartridge;
 pub mod cpu;
@@ -78,6 +79,18 @@ impl GameBoy {
     /// Test ROMs (Blargg's) print their results this way.
     pub fn take_serial_output(&mut self) -> String {
         self.bus.take_serial_output()
+    }
+
+    /// Sets the audio output rate (samples per second per channel), e.g. the
+    /// browser's AudioContext.sampleRate. 48000 until set.
+    pub fn set_sample_rate(&mut self, hz: u32) {
+        self.bus.apu.set_sample_rate(hz);
+    }
+
+    /// Audio made since the last call: interleaved left/right f32 samples in
+    /// roughly -1..1, at the rate set by `set_sample_rate`.
+    pub fn take_audio(&mut self) -> Vec<f32> {
+        self.bus.apu.take_samples()
     }
 
     /// Whether this game has a battery save (cartridge RAM, and for MBC3 the

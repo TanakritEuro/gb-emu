@@ -13,10 +13,11 @@ use std::io::{self, BufWriter, Write};
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-usage: gb-cli <rom.gb> [--frames N] [--doctor TRACE_FILE]
+usage: gb-cli <rom.gb> [--frames N] [--doctor TRACE_FILE] [--wav AUDIO_FILE]
 
   --frames N            stop after N frames (default 3600, about a minute of Game Boy time)
   --doctor TRACE_FILE   write a Gameboy Doctor trace line before every instruction
+  --wav AUDIO_FILE      record the sound to a 48 kHz stereo WAV file
 
 examples:
   cargo run --release -p gb-cli -- \"roms/blargg/cpu_instrs/individual/06-ld r,r.gb\"
@@ -26,17 +27,23 @@ struct Args {
     rom: String,
     frames: u64,
     doctor: Option<String>,
+    wav: Option<String>,
 }
+
+/// Sample rate for --wav.
+const WAV_RATE: u32 = 48_000;
 
 fn parse_args() -> Result<Option<Args>, String> {
     let mut rom = None;
     let mut frames = 3600;
     let mut doctor = None;
+    let mut wav = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => return Ok(None),
             "--doctor" => doctor = Some(args.next().ok_or("--doctor needs a file path")?),
+            "--wav" => wav = Some(args.next().ok_or("--wav needs a file path")?),
             "--frames" => {
                 let n = args.next().ok_or("--frames needs a number")?;
                 frames = n.parse().map_err(|_| format!("bad frame count: {n}"))?;
@@ -50,6 +57,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         rom,
         frames,
         doctor,
+        wav,
     }))
 }
 
@@ -94,6 +102,8 @@ fn main() -> ExitCode {
         None => None,
     };
     let mut serial = String::new();
+    gb.set_sample_rate(WAV_RATE);
+    let mut audio: Vec<f32> = Vec::new();
 
     let verdict = 'run: {
         for frame in 1..=args.frames {
@@ -101,6 +111,11 @@ fn main() -> ExitCode {
                 Some(t) => run_frame_traced(&mut gb, t),
                 None => gb.run_frame(),
             };
+
+            let sound = gb.take_audio();
+            if args.wav.is_some() {
+                audio.extend(sound);
+            }
 
             let new_output = gb.take_serial_output();
             if !new_output.is_empty() {
@@ -143,7 +158,41 @@ fn main() -> ExitCode {
             args.doctor.as_deref().unwrap_or_default()
         );
     }
+    if let Some(path) = &args.wav {
+        if let Err(e) =
+            File::create(path).and_then(|f| write_wav(BufWriter::new(f), &audio, WAV_RATE))
+        {
+            eprintln!("error: writing {path}: {e}");
+            return ExitCode::from(2);
+        }
+        eprintln!(
+            "{:.1} s of audio written to {path}",
+            audio.len() as f64 / 2.0 / f64::from(WAV_RATE)
+        );
+    }
     ExitCode::from(verdict)
+}
+
+/// Writes interleaved stereo f32 samples as a 16-bit PCM WAV file.
+fn write_wav(mut out: impl Write, samples: &[f32], rate: u32) -> io::Result<()> {
+    let data_len = (samples.len() * 2) as u32;
+    out.write_all(b"RIFF")?;
+    out.write_all(&(36 + data_len).to_le_bytes())?;
+    out.write_all(b"WAVEfmt ")?;
+    out.write_all(&16u32.to_le_bytes())?; // fmt chunk size
+    out.write_all(&1u16.to_le_bytes())?; // PCM
+    out.write_all(&2u16.to_le_bytes())?; // stereo
+    out.write_all(&rate.to_le_bytes())?;
+    out.write_all(&(rate * 4).to_le_bytes())?; // bytes per second
+    out.write_all(&4u16.to_le_bytes())?; // bytes per frame
+    out.write_all(&16u16.to_le_bytes())?; // bits per sample
+    out.write_all(b"data")?;
+    out.write_all(&data_len.to_le_bytes())?;
+    for &s in samples {
+        let pcm = (s.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16;
+        out.write_all(&pcm.to_le_bytes())?;
+    }
+    out.flush()
 }
 
 /// Mooneye's test ROMs send these six bytes over serial on a pass (the
@@ -186,5 +235,22 @@ mod tests {
         assert_eq!(verdict("BBBBBB"), Some(false));
         assert_eq!(verdict("\x03\x05\x08"), None, "pass bytes still arriving");
         assert_eq!(verdict("running..."), None);
+    }
+
+    #[test]
+    fn wav_has_a_valid_header_and_16_bit_samples() {
+        let mut out = Vec::new();
+        write_wav(&mut out, &[0.0, 1.0, -1.0, 2.0], 48_000).unwrap();
+        assert_eq!(&out[0..4], b"RIFF");
+        assert_eq!(u32::from_le_bytes(out[4..8].try_into().unwrap()), 36 + 8);
+        assert_eq!(&out[8..16], b"WAVEfmt ");
+        assert_eq!(u16::from_le_bytes([out[22], out[23]]), 2, "stereo");
+        assert_eq!(u32::from_le_bytes(out[24..28].try_into().unwrap()), 48_000);
+        assert_eq!(&out[36..40], b"data");
+        let pcm: Vec<i16> = out[44..]
+            .chunks(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        assert_eq!(pcm, [0, i16::MAX, -i16::MAX, i16::MAX], "clamped to -1..1");
     }
 }

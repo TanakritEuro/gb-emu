@@ -83,7 +83,7 @@ needs MBC1 multicart wiring, which isn't planned.)
 
 ## Milestone 6 — Sound
 
-- [ ] Four channels: two square waves (one with sweep), wave, noise
+- [x] Four channels: two square waves (one with sweep), wave, noise (plus mixer, high-pass filter, `gb-cli --wav`)
 - [ ] Frame sequencer: length, envelope, sweep
 - [ ] Output through a Web Audio `AudioWorklet`; let audio drive timing to avoid crackle
 

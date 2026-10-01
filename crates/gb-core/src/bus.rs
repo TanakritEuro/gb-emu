@@ -3,7 +3,7 @@
 //!
 //! Reference: https://gbdev.io/pandocs/Memory_Map.html
 
-use crate::{cartridge::Cartridge, joypad::Joypad, ppu::Ppu, timer::Timer};
+use crate::{apu::Apu, cartridge::Cartridge, joypad::Joypad, ppu::Ppu, timer::Timer};
 
 /// Bits of IF ($FF0F) and IE ($FFFF), in priority order.
 pub mod interrupt {
@@ -19,9 +19,10 @@ pub struct Bus {
     pub ppu: Ppu,
     pub timer: Timer,
     pub joypad: Joypad,
+    pub apu: Apu,
     wram: [u8; 0x2000],
     hram: [u8; 0x7F],
-    /// Backing store for I/O registers nothing emulates yet (sound, mostly).
+    /// Backing store for I/O registers nothing emulates yet.
     io: [u8; 0x80],
     pub if_reg: u8,
     pub ie_reg: u8,
@@ -38,6 +39,7 @@ impl Bus {
             ppu: Ppu::new(),
             timer: Timer::new(),
             joypad: Joypad::new(),
+            apu: Apu::new(),
             wram: [0; 0x2000],
             hram: [0; 0x7F],
             io: [0; 0x80],
@@ -71,6 +73,7 @@ impl Bus {
             0xFF01 => self.serial_data,
             0xFF02 => self.serial_ctrl | 0x7E,
             0xFF04..=0xFF07 => self.timer.read(addr),
+            0xFF10..=0xFF3F => self.apu.read(addr),
             0xFF0F => self.if_reg | 0xE0,
             0xFF44 if self.doctor_mode => 0x90,
             0xFF40..=0xFF4B => self.ppu.read_reg(addr),
@@ -109,6 +112,7 @@ impl Bus {
                 }
             }
             0xFF04..=0xFF07 => self.timer.write(addr, val),
+            0xFF10..=0xFF3F => self.apu.write(addr, val),
             0xFF0F => self.if_reg = val | 0xE0,
             0xFF46 => self.oam_dma(val),
             0xFF40..=0xFF4B => self.ppu.write_reg(addr, val),
@@ -138,14 +142,15 @@ impl Bus {
         }
     }
 
-    /// Advances timer, PPU and cartridge clock, collecting any interrupts
-    /// they raise.
+    /// Advances timer, PPU, cartridge clock and APU, collecting any
+    /// interrupts they raise.
     pub fn tick(&mut self, cycles: u32) {
         if self.timer.tick(cycles) {
             self.if_reg |= interrupt::TIMER;
         }
         self.if_reg |= self.ppu.tick(cycles);
         self.cart.tick(cycles);
+        self.apu.tick(cycles);
     }
 
     /// Interrupts that are both requested (IF) and enabled (IE).

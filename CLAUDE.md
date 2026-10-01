@@ -10,9 +10,10 @@ A Game Boy (DMG) emulator in Rust that runs in the browser via WebAssembly.
   - `cartridge.rs` header parsing + MBCs (ROM-only, MBC1, MBC2, MBC3 with its real-time clock, MBC5)
   - `ppu.rs` scanline timing, STAT/LY, framebuffer (scanline renderer: background, window, sprites)
   - `timer.rs` DIV/TIMA/TMA/TAC
+  - `apu.rs` sound: four channels, mixer, high-pass filter, stereo samples
   - `joypad.rs` $FF00
   - `tests/smoke.rs` end-to-end tests through the public `GameBoy` API
-- `crates/gb-cli/` — headless runner for test ROMs; `--doctor` writes Gameboy Doctor traces
+- `crates/gb-cli/` — headless runner for test ROMs; `--doctor` writes Gameboy Doctor traces, `--wav` records audio
 - `crates/gb-wasm/` — wasm-bindgen wrapper (`Emulator` class) used by `web/`
 - `web/` — static frontend (`index.html`, `main.js`, `style.css`; `input.js` maps keyboard/gamepad/touch to buttons, `timing.js` paces frames, `saves.js` keeps battery saves in localStorage); `web/pkg/` is generated
 - `scripts/build-web.ps1` / `build-web.sh` — build `web/pkg`
@@ -28,6 +29,7 @@ cargo clippy --workspace --all-targets -- -D warnings  # lint; keep it clean
 node --test "web/*.test.js"                             # frontend tests (input, timing, saves)
 cargo run --release -p gb-cli -- <rom.gb>              # run a test ROM headlessly
 cargo run --release -p gb-cli -- <rom.gb> --doctor trace.log   # CPU trace for Gameboy Doctor
+cargo run --release -p gb-cli -- <rom.gb> --wav out.wav        # record the sound (48 kHz WAV)
 ./scripts/build-web.ps1                                 # build the browser version (Windows)
 node scripts/serve.js                                   # serve it at http://localhost:8765
 ```
