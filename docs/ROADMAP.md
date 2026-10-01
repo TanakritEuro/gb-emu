@@ -27,10 +27,10 @@ The big one: all 256 base opcodes and 256 `CB`-prefixed opcodes (minus 11 illega
       (e.g. `x == 1` is `LD r, r'`, except `0x76` HALT). Search "decoding gbz80 opcodes".
 - [x] Helpers for reading/writing an 8-bit operand by index (B C D E H L (HL) A)
 - [x] 8-bit loads, 16-bit loads, `PUSH`/`POP` (remember F's low nibble is always 0)
-- [ ] 8-bit ALU with correct H and C flags; `DAA` last, it's notoriously fiddly
+- [x] 8-bit ALU with correct H and C flags; `DAA` last, it's notoriously fiddly
 - [ ] 16-bit arithmetic: `ADD HL,rr`, `ADD SP,e8`, `LD HL,SP+e8` (flags from the low byte!)
 - [ ] Jumps, calls, returns, `RST`, conditional cycle counts
-- [ ] `CB` prefix: rotates, shifts, `SWAP`, `BIT`/`RES`/`SET`
+- [ ] `CB` prefix: rotates, shifts, `SWAP`, `BIT`/`RES`/`SET` (plus `RLCA`/`RRCA`/`RLA`/`RRA`, which share the rotate logic)
 - [ ] Gameboy Doctor clean on `cpu_instrs` individual 01, 03–11
 
 **Done when:** `cpu_instrs/individual/` 01 and 03–11 print "Passed".

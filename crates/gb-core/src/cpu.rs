@@ -291,6 +291,106 @@ impl Cpu {
         u16::from_le_bytes([lo, hi])
     }
 
+    /// Sets all four flags at once (F's low nibble stays 0).
+    fn set_flags(&mut self, z: bool, n: bool, h: bool, c: bool) {
+        self.regs.f = u8::from(z) << 7 | u8::from(n) << 6 | u8::from(h) << 5 | u8::from(c) << 4;
+    }
+
+    /// `alu[y] A, val`: ADD ADC SUB SBC AND XOR OR CP, picked by `y`.
+    ///
+    /// H is the carry out of bit 3 (for subtraction, the borrow into bit 4)
+    /// and C the carry out of bit 7 (or the borrow). ADC and SBC count the
+    /// incoming carry in both. AND always sets H; that's how the hardware is.
+    /// https://gbdev.io/pandocs/CPU_Registers_and_Flags.html
+    fn alu(&mut self, y: u8, val: u8) {
+        let a = self.regs.a;
+        let carry_in = u8::from(self.regs.flag(FLAG_C));
+        match y {
+            // ADD, ADC
+            0 | 1 => {
+                let c = if y == 1 { carry_in } else { 0 };
+                let (sum, c1) = a.overflowing_add(val);
+                let (sum, c2) = sum.overflowing_add(c);
+                let h = (a & 0x0F) + (val & 0x0F) + c > 0x0F;
+                self.regs.a = sum;
+                self.set_flags(sum == 0, false, h, c1 || c2);
+            }
+            // SUB, SBC, and CP, which is SUB without storing the result
+            2 | 3 | 7 => {
+                let c = if y == 3 { carry_in } else { 0 };
+                let (diff, b1) = a.overflowing_sub(val);
+                let (diff, b2) = diff.overflowing_sub(c);
+                let h = (a & 0x0F) < (val & 0x0F) + c;
+                if y != 7 {
+                    self.regs.a = diff;
+                }
+                self.set_flags(diff == 0, true, h, b1 || b2);
+            }
+            4 => {
+                self.regs.a = a & val;
+                self.set_flags(self.regs.a == 0, false, true, false);
+            }
+            5 => {
+                self.regs.a = a ^ val;
+                self.set_flags(self.regs.a == 0, false, false, false);
+            }
+            _ => {
+                self.regs.a = a | val;
+                self.set_flags(self.regs.a == 0, false, false, false);
+            }
+        }
+    }
+
+    /// INC for 8-bit operands. Leaves C alone, unlike ADD.
+    fn inc8(&mut self, val: u8) -> u8 {
+        let r = val.wrapping_add(1);
+        self.regs.set_flag(FLAG_Z, r == 0);
+        self.regs.set_flag(FLAG_N, false);
+        self.regs.set_flag(FLAG_H, val & 0x0F == 0x0F);
+        r
+    }
+
+    /// DEC for 8-bit operands. Leaves C alone, unlike SUB.
+    fn dec8(&mut self, val: u8) -> u8 {
+        let r = val.wrapping_sub(1);
+        self.regs.set_flag(FLAG_Z, r == 0);
+        self.regs.set_flag(FLAG_N, true);
+        self.regs.set_flag(FLAG_H, val & 0x0F == 0);
+        r
+    }
+
+    /// DAA: after adding or subtracting two BCD numbers (one decimal digit
+    /// per nibble), corrects A back to BCD. N says which operation ran; H and
+    /// C say which digits overflowed. An addition can also produce a digit
+    /// above 9 without a carry, which shows up as A > $99 or a low nibble > 9.
+    /// https://gbdev.io/pandocs/CPU_Registers_and_Flags.html
+    fn daa(&mut self) {
+        let mut a = self.regs.a;
+        let mut carry = self.regs.flag(FLAG_C);
+        let half = self.regs.flag(FLAG_H);
+        let sub = self.regs.flag(FLAG_N);
+        if sub {
+            if carry {
+                a = a.wrapping_sub(0x60);
+            }
+            if half {
+                a = a.wrapping_sub(0x06);
+            }
+        } else {
+            // Both checks look at A before adjusting; +$60 leaves the low
+            // nibble unchanged, so doing the high digit first is safe.
+            if carry || a > 0x99 {
+                a = a.wrapping_add(0x60);
+                carry = true;
+            }
+            if half || (a & 0x0F) > 0x09 {
+                a = a.wrapping_add(0x06);
+            }
+        }
+        self.regs.a = a;
+        self.set_flags(a == 0, sub, false, carry);
+    }
+
     /// The address for block 0's `z=2` loads, picked by `p`: (BC) (DE) (HL+)
     /// (HL-). HL+ and HL- step HL after the access, for fast copy loops.
     fn indirect_addr(&mut self, p: u8) -> u16 {
@@ -394,15 +494,58 @@ impl Cpu {
                     Ok(8)
                 }
                 3 => MISSING, // q=0: INC rp[p]  q=1: DEC rp[p]
-                4 => MISSING, // INC r[y]
-                5 => MISSING, // DEC r[y]
+                // INC r[y]
+                4 => {
+                    let val = self.read_r8(bus, op.y);
+                    let r = self.inc8(val);
+                    self.write_r8(bus, op.y, r);
+                    Ok(if op.y == 6 { 12 } else { 4 })
+                }
+                // DEC r[y]
+                5 => {
+                    let val = self.read_r8(bus, op.y);
+                    let r = self.dec8(val);
+                    self.write_r8(bus, op.y, r);
+                    Ok(if op.y == 6 { 12 } else { 4 })
+                }
                 // LD r[y], d8
                 6 => {
                     let val = self.fetch8(bus);
                     self.write_r8(bus, op.y, val);
                     Ok(if op.y == 6 { 12 } else { 8 })
                 }
-                _ => MISSING, // y: RLCA RRCA RLA RRA DAA CPL SCF CCF
+                _ => match op.y {
+                    // RLCA RRCA RLA RRA: same logic as the CB rotates, but Z
+                    // is always cleared. Written alongside them.
+                    0..=3 => MISSING,
+                    // DAA
+                    4 => {
+                        self.daa();
+                        Ok(4)
+                    }
+                    // CPL: A = !A, sets N and H
+                    5 => {
+                        self.regs.a = !self.regs.a;
+                        self.regs.set_flag(FLAG_N, true);
+                        self.regs.set_flag(FLAG_H, true);
+                        Ok(4)
+                    }
+                    // SCF: set carry
+                    6 => {
+                        self.regs.set_flag(FLAG_N, false);
+                        self.regs.set_flag(FLAG_H, false);
+                        self.regs.set_flag(FLAG_C, true);
+                        Ok(4)
+                    }
+                    // CCF: complement carry
+                    _ => {
+                        let c = self.regs.flag(FLAG_C);
+                        self.regs.set_flag(FLAG_N, false);
+                        self.regs.set_flag(FLAG_H, false);
+                        self.regs.set_flag(FLAG_C, !c);
+                        Ok(4)
+                    }
+                },
             },
 
             // Block 1: LD r[y], r[z]. The slot for LD (HL),(HL) is HALT.
@@ -417,13 +560,11 @@ impl Cpu {
             }
 
             // Block 2: alu[y] A, r[z] with alu = ADD ADC SUB SBC AND XOR OR CP.
-            // XOR A: A ^= A is always 0, so Z=1 and N/H/C=0.
-            2 if op.y == 5 && op.z == 7 => {
-                self.regs.a = 0;
-                self.regs.f = FLAG_Z;
-                Ok(4)
+            2 => {
+                let val = self.read_r8(bus, op.z);
+                self.alu(op.y, val);
+                Ok(if op.z == 6 { 8 } else { 4 })
             }
-            2 => MISSING,
 
             // Block 3: control flow, stack, high-page loads, immediate ALU.
             _ => match op.z {
@@ -518,7 +659,12 @@ impl Cpu {
                     (_, 0) => MISSING, // CALL a16
                     _ => ILLEGAL,      // $DD $ED $FD
                 },
-                6 => MISSING, // alu[y] A, d8
+                // alu[y] A, d8
+                6 => {
+                    let val = self.fetch8(bus);
+                    self.alu(op.y, val);
+                    Ok(8)
+                }
                 _ => MISSING, // RST y*8
             },
         }
@@ -745,13 +891,13 @@ mod tests {
 
     #[test]
     fn unimplemented_opcode_reports_where() {
-        // DAA is written last in the ALU step. Swap in another opcode then.
-        let (mut cpu, mut bus) = setup(&[0x00, 0x27]);
+        // RLCA is written with the CB rotates. Swap in another opcode then.
+        let (mut cpu, mut bus) = setup(&[0x00, 0x07]);
         cpu.step(&mut bus).unwrap();
         assert_eq!(
             cpu.step(&mut bus),
             Err(CpuError::Unimplemented {
-                opcode: 0x27,
+                opcode: 0x07,
                 cb_prefixed: false,
                 pc: 0x0101
             })
@@ -953,5 +1099,243 @@ mod tests {
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.regs.hl(), 0x1F42);
         assert_eq!(cpu.regs.sp, 0x0000);
+    }
+
+    fn flags(z: bool, n: bool, h: bool, c: bool) -> u8 {
+        let mut f = 0;
+        for (on, bit) in [(z, FLAG_Z), (n, FLAG_N), (h, FLAG_H), (c, FLAG_C)] {
+            if on {
+                f |= bit;
+            }
+        }
+        f
+    }
+
+    /// Runs `alu[y] A, val` on a fresh CPU and returns (A, F).
+    fn run_alu(y: u8, a: u8, val: u8, carry: bool) -> (u8, u8) {
+        let mut cpu = Cpu::new();
+        cpu.regs.a = a;
+        cpu.regs.set_flag(FLAG_C, carry);
+        cpu.alu(y, val);
+        (cpu.regs.a, cpu.regs.f)
+    }
+
+    #[test]
+    fn add_half_carry_and_carry_are_independent() {
+        let (z, h, c, no) = (true, true, true, false);
+        // $0F + $01: carry out of bit 3 only
+        assert_eq!(run_alu(0, 0x0F, 0x01, no), (0x10, flags(no, no, h, no)));
+        // $F0 + $10: carry out of bit 7 only
+        assert_eq!(run_alu(0, 0xF0, 0x10, no), (0x00, flags(z, no, no, c)));
+        // $3A + $C6: both, and zero
+        assert_eq!(run_alu(0, 0x3A, 0xC6, no), (0x00, flags(z, no, h, c)));
+        // ADD ignores an incoming carry
+        assert_eq!(run_alu(0, 0x01, 0x01, c), (0x02, flags(no, no, no, no)));
+    }
+
+    #[test]
+    fn adc_counts_the_carry_in_h_and_c() {
+        let (z, h, c, no) = (true, true, true, false);
+        // $0F + $00 + 1: the carry alone causes the half carry
+        assert_eq!(run_alu(1, 0x0F, 0x00, c), (0x10, flags(no, no, h, no)));
+        // $FF + $00 + 1: and the full carry
+        assert_eq!(run_alu(1, 0xFF, 0x00, c), (0x00, flags(z, no, h, c)));
+    }
+
+    #[test]
+    fn sub_and_sbc_borrows() {
+        let (z, n, h, c, no) = (true, true, true, true, false);
+        assert_eq!(run_alu(2, 0x3E, 0x3E, no), (0x00, flags(z, n, no, no)));
+        // $E < $F in the low nibble: half borrow, no full borrow
+        assert_eq!(run_alu(2, 0x3E, 0x0F, no), (0x2F, flags(no, n, h, no)));
+        // $3E < $40: full borrow only
+        assert_eq!(run_alu(2, 0x3E, 0x40, no), (0xFE, flags(no, n, no, c)));
+        // SBC: $00 - $FF - 1 wraps to 0 and borrows from both nibbles
+        assert_eq!(run_alu(3, 0x00, 0xFF, c), (0x00, flags(z, n, h, c)));
+        // SBC: the carry alone causes the half borrow
+        assert_eq!(run_alu(3, 0x30, 0x00, c), (0x2F, flags(no, n, h, no)));
+    }
+
+    #[test]
+    fn logic_ops_flags() {
+        let (z, h, c, no) = (true, true, true, false);
+        // AND always sets H, and clears C even if it was set
+        assert_eq!(run_alu(4, 0x5A, 0x3F, c), (0x1A, flags(no, no, h, no)));
+        assert_eq!(run_alu(4, 0xF0, 0x0F, no), (0x00, flags(z, no, h, no)));
+        // XOR and OR clear H and C
+        assert_eq!(run_alu(5, 0xFF, 0xFF, c), (0x00, flags(z, no, no, no)));
+        assert_eq!(run_alu(6, 0x50, 0x05, c), (0x55, flags(no, no, no, no)));
+    }
+
+    #[test]
+    fn cp_sets_flags_like_sub_but_keeps_a() {
+        let (n, c, no) = (true, true, false);
+        assert_eq!(run_alu(7, 0x3E, 0x40, no), (0x3E, flags(no, n, no, c)));
+        assert_eq!(run_alu(7, 0x3E, 0x3E, no), (0x3E, flags(true, n, no, no)));
+    }
+
+    /// An independent model of the ALU: wide signed arithmetic, with H found
+    /// by the XOR trick (bit 4 of a^b^result is the carry/borrow into bit 4).
+    fn reference_alu(y: u8, a: u8, b: u8, carry: bool) -> (u8, u8) {
+        let (a32, b32) = (i32::from(a), i32::from(b));
+        let (r, n, h, c) = match y {
+            0 | 1 => {
+                let r = a32 + b32 + i32::from(y == 1 && carry);
+                (r, false, (a32 ^ b32 ^ r) & 0x10 != 0, r > 0xFF)
+            }
+            2 | 3 | 7 => {
+                let r = a32 - b32 - i32::from(y == 3 && carry);
+                (r, true, (a32 ^ b32 ^ r) & 0x10 != 0, r < 0)
+            }
+            4 => (a32 & b32, false, true, false),
+            5 => (a32 ^ b32, false, false, false),
+            _ => (a32 | b32, false, false, false),
+        };
+        let r = (r & 0xFF) as u8;
+        let new_a = if y == 7 { a } else { r };
+        (new_a, flags(r == 0, n, h, c))
+    }
+
+    #[test]
+    fn alu_matches_reference_for_every_input() {
+        for y in 0..8u8 {
+            for a in 0..=255u8 {
+                for b in 0..=255u8 {
+                    for carry in [false, true] {
+                        assert_eq!(
+                            run_alu(y, a, b, carry),
+                            reference_alu(y, a, b, carry),
+                            "alu[{y}] a={a:02X} b={b:02X} carry={carry}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn alu_opcodes_route_operand_and_cycles() {
+        // Block 2: alu[y] A, r[z]
+        for y in 0..8u8 {
+            for z in 0..8u8 {
+                let opcode = 0x80 | y << 3 | z;
+                let (mut cpu, mut bus) = setup_loaded(&[opcode]);
+                let mut want = cpu.clone();
+                want.alu(y, cpu.read_r8(&bus, z));
+                let cycles = if z == 6 { 8 } else { 4 };
+                assert_eq!(cpu.step(&mut bus), Ok(cycles), "opcode {opcode:02X}");
+                assert_eq!(
+                    (cpu.regs.a, cpu.regs.f),
+                    (want.regs.a, want.regs.f),
+                    "opcode {opcode:02X}"
+                );
+            }
+        }
+        // alu[y] A, d8
+        for y in 0..8u8 {
+            let opcode = 0xC6 | y << 3;
+            let (mut cpu, mut bus) = setup_loaded(&[opcode, 0x9C]);
+            let mut want = cpu.clone();
+            want.alu(y, 0x9C);
+            assert_eq!(cpu.step(&mut bus), Ok(8), "opcode {opcode:02X}");
+            assert_eq!(
+                (cpu.regs.a, cpu.regs.f),
+                (want.regs.a, want.regs.f),
+                "opcode {opcode:02X}"
+            );
+            assert_eq!(cpu.regs.pc, 0x0102);
+        }
+    }
+
+    #[test]
+    fn inc_and_dec_leave_carry_alone() {
+        for carry in [false, true] {
+            let mut cpu = Cpu::new();
+            cpu.regs.set_flag(FLAG_C, carry);
+            assert_eq!(cpu.inc8(0x0F), 0x10);
+            assert_eq!(cpu.regs.f, flags(false, false, true, carry));
+            assert_eq!(cpu.inc8(0xFF), 0x00);
+            assert_eq!(cpu.regs.f, flags(true, false, true, carry));
+            assert_eq!(cpu.inc8(0x41), 0x42);
+            assert_eq!(cpu.regs.f, flags(false, false, false, carry));
+            assert_eq!(cpu.dec8(0x10), 0x0F);
+            assert_eq!(cpu.regs.f, flags(false, true, true, carry));
+            assert_eq!(cpu.dec8(0x01), 0x00);
+            assert_eq!(cpu.regs.f, flags(true, true, false, carry));
+            assert_eq!(cpu.dec8(0x00), 0xFF);
+            assert_eq!(cpu.regs.f, flags(false, true, true, carry));
+        }
+    }
+
+    #[test]
+    fn inc_dec_opcodes_hit_every_operand() {
+        for y in 0..8u8 {
+            let (inc, dec) = (0x04 | y << 3, 0x05 | y << 3);
+            let (mut cpu, mut bus) = setup_loaded(&[inc, dec]);
+            let before = cpu.read_r8(&bus, y);
+            let cycles = if y == 6 { 12 } else { 4 };
+            assert_eq!(cpu.step(&mut bus), Ok(cycles), "opcode {inc:02X}");
+            assert_eq!(cpu.read_r8(&bus, y), before.wrapping_add(1));
+            assert_eq!(cpu.step(&mut bus), Ok(cycles), "opcode {dec:02X}");
+            assert_eq!(cpu.read_r8(&bus, y), before);
+        }
+    }
+
+    #[test]
+    fn cpl_scf_ccf_flags() {
+        // CPL ; SCF ; CCF ; CCF, starting with Z set so we see it untouched
+        let (mut cpu, mut bus) = setup(&[0x2F, 0x37, 0x3F, 0x3F]);
+        cpu.regs.a = 0x35;
+        cpu.regs.f = FLAG_Z;
+        assert_eq!(cpu.step(&mut bus), Ok(4));
+        assert_eq!(cpu.regs.a, 0xCA);
+        assert_eq!(cpu.regs.f, flags(true, true, true, false));
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.regs.f, flags(true, false, false, true));
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.regs.f, flags(true, false, false, false));
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.regs.f, flags(true, false, false, true));
+    }
+
+    fn bcd(n: u8) -> u8 {
+        ((n / 10) << 4) | (n % 10)
+    }
+
+    #[test]
+    fn daa_turns_binary_results_into_decimal() {
+        for x in 0..100u8 {
+            for y in 0..100u8 {
+                for carry_in in [false, true] {
+                    let ci = u8::from(carry_in);
+                    let mut cpu = Cpu::new();
+
+                    // ADC (ADD when carry_in is false), then DAA
+                    cpu.regs.a = bcd(x);
+                    cpu.regs.set_flag(FLAG_C, carry_in);
+                    cpu.alu(1, bcd(y));
+                    cpu.daa();
+                    let sum = x + y + ci;
+                    let msg = format!("{x} + {y} + {ci}");
+                    assert_eq!(cpu.regs.a, bcd(sum % 100), "{msg}");
+                    assert_eq!(
+                        cpu.regs.f,
+                        flags(sum % 100 == 0, false, false, sum >= 100),
+                        "{msg}"
+                    );
+
+                    // SBC (SUB when carry_in is false), then DAA
+                    cpu.regs.a = bcd(x);
+                    cpu.regs.set_flag(FLAG_C, carry_in);
+                    cpu.alu(3, bcd(y));
+                    cpu.daa();
+                    let borrow = x < y + ci;
+                    let diff = (100 + x - y - ci) % 100;
+                    let msg = format!("{x} - {y} - {ci}");
+                    assert_eq!(cpu.regs.a, bcd(diff), "{msg}");
+                    assert_eq!(cpu.regs.f, flags(diff == 0, true, false, borrow), "{msg}");
+                }
+            }
+        }
     }
 }
