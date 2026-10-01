@@ -18,7 +18,7 @@ Test ROMs: download the latest release of
 - [x] **You:** install the wasm target and `wasm-bindgen-cli` (see README), build the web
       version, drop a ROM in, and see "unimplemented opcode …" appear
 
-## Milestone 1 — The CPU
+## Milestone 1 — The CPU ✅
 
 The big one: all 256 base opcodes and 256 `CB`-prefixed opcodes (minus 11 illegal ones).
 
@@ -31,7 +31,7 @@ The big one: all 256 base opcodes and 256 `CB`-prefixed opcodes (minus 11 illega
 - [x] 16-bit arithmetic: `ADD HL,rr`, `ADD SP,e8`, `LD HL,SP+e8` (flags from the low byte!)
 - [x] Jumps, calls, returns, `RST`, conditional cycle counts
 - [x] `CB` prefix: rotates, shifts, `SWAP`, `BIT`/`RES`/`SET` (plus `RLCA`/`RRCA`/`RLA`/`RRA`, which share the rotate logic)
-- [ ] Gameboy Doctor clean on `cpu_instrs` individual 01, 03–11
+- [x] Gameboy Doctor clean on `cpu_instrs` individual 01, 03–11 (all pass; Doctor wasn't needed, the only failure was the missing RETI)
 
 **Done when:** `cpu_instrs/individual/` 01 and 03–11 print "Passed".
 (02 needs interrupts, which is the next milestone.)
@@ -40,7 +40,7 @@ The big one: all 256 base opcodes and 256 `CB`-prefixed opcodes (minus 11 illega
 
 - [ ] Interrupt dispatch in `Cpu::step` (see the TODO there): priority order, push PC,
       clear IF bit and IME, 20 T-cycles
-- [ ] `RETI`, `HALT` wake-up rules, the HALT bug (IME=0 with a pending interrupt)
+- [ ] `HALT` wake-up rules, the HALT bug (IME=0 with a pending interrupt). (`RETI` itself landed in milestone 1: `cpu_instrs` 07 needs it.)
 - [ ] Timer edge cases marked `TODO(accuracy)`
 
 **Done when:** `cpu_instrs.gb` (all 11 in one ROM) passes, and `instr_timing.gb` passes.

@@ -2,8 +2,7 @@
 //!
 //! Opcodes are decoded by bit pattern (see `Opcode`); `Cpu::execute` is the
 //! whole instruction table laid out by group, and `Cpu::execute_cb` the
-//! $CB-prefixed one. Arms that return `MISSING` (now only STOP and RETI)
-//! report [`CpuError::Unimplemented`] with the opcode and where it was hit.
+//! $CB-prefixed one. Arms that return `MISSING` (now only STOP) report [`CpuError::Unimplemented`] with the opcode and where it was hit.
 //!
 //! Opcode reference: https://gbdev.io/gb-opcodes/optables/
 //! Cycle counts here are T-cycles (4 per M-cycle).
@@ -698,9 +697,14 @@ impl Cpu {
                         self.regs.pc = self.pop16(bus);
                         Ok(16)
                     }
-                    // TODO(milestone 2): RETI = RET, then set IME immediately
-                    // (no one-instruction delay like EI). 16 cycles.
-                    (_, 1) => MISSING,
+                    // RETI: RET, then set IME immediately (no one-instruction
+                    // delay like EI). How it interacts with interrupt dispatch
+                    // is milestone 2's business.
+                    (_, 1) => {
+                        self.regs.pc = self.pop16(bus);
+                        self.ime = true;
+                        Ok(16)
+                    }
                     // JP HL: just a register copy, no extra cycle
                     (_, 2) => {
                         self.regs.pc = self.regs.hl();
@@ -1032,8 +1036,8 @@ mod tests {
 
     #[test]
     fn unimplemented_opcode_reports_where() {
-        // STOP isn't on the roadmap yet. If it gets written, use RETI ($D9)
-        // until milestone 2, then delete this test.
+        // STOP is the last unimplemented opcode. Delete this test once it's
+        // written (nothing will be left to report).
         let (mut cpu, mut bus) = setup(&[0x00, 0x10, 0x00]);
         cpu.step(&mut bus).unwrap();
         assert_eq!(
@@ -1774,6 +1778,17 @@ mod tests {
             assert_eq!(cpu.regs.pc, u16::from(y) * 8, "opcode {opcode:02X}");
             assert_eq!(bus.read16(cpu.regs.sp), 0xC001, "opcode {opcode:02X}");
         }
+    }
+
+    #[test]
+    fn reti_returns_and_enables_interrupts_immediately() {
+        let (mut cpu, mut bus) = setup_wram(&[0xD9]);
+        cpu.regs.sp = 0xCFFE;
+        bus.write16(0xCFFE, 0xC200);
+        assert_eq!(cpu.step(&mut bus), Ok(16));
+        assert_eq!(cpu.regs.pc, 0xC200);
+        assert_eq!(cpu.regs.sp, 0xD000);
+        assert!(cpu.ime, "no EI-style delay");
     }
 
     /// Runs `rot[y]` on a fresh CPU and returns (result, F).
