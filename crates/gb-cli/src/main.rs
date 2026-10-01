@@ -1,7 +1,8 @@
 //! Headless runner for test ROMs.
 //!
 //! Blargg's test ROMs print their results over the serial port and end with
-//! "Passed" or "Failed", so this runs frames until one of those shows up.
+//! "Passed" or "Failed"; Mooneye's send a fixed byte sequence (see `verdict`).
+//! This runs frames until one of those shows up.
 //!
 //! Exit codes: 0 passed (or ran to the frame limit with no verdict expected),
 //! 1 failed, 2 emulator or usage error, 3 frame limit hit with output but no verdict.
@@ -112,13 +113,16 @@ fn main() -> ExitCode {
                 eprintln!("\n✘ stopped in frame {frame}: {e}");
                 break 'run 2;
             }
-            if serial.contains("Passed") {
-                eprintln!("\n✔ passed after {frame} frames");
-                break 'run 0;
-            }
-            if serial.contains("Failed") {
-                eprintln!("\n✘ failed after {frame} frames");
-                break 'run 1;
+            match verdict(&serial) {
+                Some(true) => {
+                    eprintln!("\n✔ passed after {frame} frames");
+                    break 'run 0;
+                }
+                Some(false) => {
+                    eprintln!("\n✘ failed after {frame} frames");
+                    break 'run 1;
+                }
+                None => {}
             }
         }
         eprintln!("\nstopped after {} frames", args.frames);
@@ -142,6 +146,24 @@ fn main() -> ExitCode {
     ExitCode::from(verdict)
 }
 
+/// Mooneye's test ROMs send these six bytes over serial on a pass (the
+/// Fibonacci numbers 3 5 8 13 21 34), and $42 ("B") six times on a fail.
+/// See roms/mooneye-test-suite/README.markdown.
+const MOONEYE_PASS: &str = "\x03\x05\x08\x0d\x15\x22";
+const MOONEYE_FAIL: &str = "BBBBBB";
+
+/// Pass (true), fail (false), or no verdict yet, from the serial output so far.
+/// Understands Blargg's "Passed"/"Failed" text and Mooneye's byte signatures.
+fn verdict(serial: &str) -> Option<bool> {
+    if serial.contains("Passed") || serial.contains(MOONEYE_PASS) {
+        Some(true)
+    } else if serial.contains("Failed") || serial.contains(MOONEYE_FAIL) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 fn run_frame_traced(gb: &mut GameBoy, out: &mut impl Write) -> Result<(), gb_core::cpu::CpuError> {
     let mut elapsed = 0;
     while elapsed < CYCLES_PER_FRAME {
@@ -150,4 +172,19 @@ fn run_frame_traced(gb: &mut GameBoy, out: &mut impl Write) -> Result<(), gb_cor
         elapsed += gb.step()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verdict_understands_blargg_and_mooneye() {
+        assert_eq!(verdict("cpu_instrs\n\nPassed all tests\n"), Some(true));
+        assert_eq!(verdict("01-special\n\nFailed #6\n"), Some(false));
+        assert_eq!(verdict("\x03\x05\x08\x0d\x15\x22"), Some(true));
+        assert_eq!(verdict("BBBBBB"), Some(false));
+        assert_eq!(verdict("\x03\x05\x08"), None, "pass bytes still arriving");
+        assert_eq!(verdict("running..."), None);
+    }
 }
