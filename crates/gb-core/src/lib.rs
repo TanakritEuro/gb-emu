@@ -61,7 +61,9 @@ impl GameBoy {
         Ok(())
     }
 
-    /// The screen as RGBA bytes, row-major, 160 × 144 × 4.
+    /// The screen as RGBA bytes, row-major, 160 × 144 × 4. The buffer stays at
+    /// the same address for the life of this `GameBoy`, so a frontend can
+    /// keep a pointer or view to it instead of copying each frame.
     pub fn framebuffer(&self) -> &[u8] {
         self.bus.ppu.framebuffer()
     }

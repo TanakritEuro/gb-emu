@@ -26,10 +26,24 @@ impl Emulator {
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
-    /// RGBA, 160 × 144 × 4 bytes. Copies each frame (about 92 KB), which is
-    /// fine at 60 fps; a zero-copy view into wasm memory is an easy later win.
+    /// A copy of the screen as RGBA, 160 × 144 × 4 bytes (about 92 KB).
+    /// Handy for tests and screenshots; the page draws from
+    /// `framebuffer_ptr` instead, without copying.
     pub fn framebuffer(&self) -> Vec<u8> {
         self.gb.framebuffer().to_vec()
+    }
+
+    /// Where the screen's RGBA bytes live in wasm memory. JS can wrap
+    /// `framebuffer_len()` bytes from here in a `Uint8ClampedArray` over
+    /// `memory.buffer` and hand it to `ImageData` with no copy. The address
+    /// is fixed for this `Emulator`, but the view must be rebuilt if wasm
+    /// memory grows (that detaches the old `ArrayBuffer`).
+    pub fn framebuffer_ptr(&self) -> *const u8 {
+        self.gb.framebuffer().as_ptr()
+    }
+
+    pub fn framebuffer_len(&self) -> usize {
+        self.gb.framebuffer().len()
     }
 
     /// `button` is the index of a `gb_core::Button`:

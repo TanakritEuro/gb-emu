@@ -63,7 +63,7 @@ First homebrew title screen shows up in the browser. 🎉
 - [x] Gamepad API support alongside the keyboard
 - [x] Touch controls for phones
 - [x] Pause, reset, speed toggle (fast-forward is very satisfying)
-- [ ] Zero-copy framebuffer (a `Uint8ClampedArray` view on wasm memory)
+- [x] Zero-copy framebuffer (a `Uint8ClampedArray` view on wasm memory)
 
 **Done when:** you can play a homebrew game from [Homebrew Hub](https://hh.gbdev.io/)
 start to finish on your phone.

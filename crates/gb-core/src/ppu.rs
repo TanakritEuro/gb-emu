@@ -46,7 +46,9 @@ pub struct Ppu {
     stat_line: bool,
     /// IF bits raised by register writes, handed over on the next `tick`.
     pending_irq: u8,
-    framebuffer: Vec<u8>,
+    /// RGBA, allocated once and never replaced: frontends may keep a pointer
+    /// to it (the browser draws straight from wasm memory).
+    framebuffer: Box<[u8]>,
 }
 
 impl Default for Ppu {
@@ -78,7 +80,9 @@ impl Ppu {
             window_line: 0,
             stat_line: false,
             pending_irq: 0,
-            framebuffer: DMG_PALETTE[0].repeat(SCREEN_WIDTH * SCREEN_HEIGHT),
+            framebuffer: DMG_PALETTE[0]
+                .repeat(SCREEN_WIDTH * SCREEN_HEIGHT)
+                .into_boxed_slice(),
         }
     }
 
@@ -167,7 +171,10 @@ impl Ppu {
         self.dot = 0;
         self.stat &= !0x03;
         self.stat_line = false;
-        self.framebuffer = DMG_PALETTE[0].repeat(SCREEN_WIDTH * SCREEN_HEIGHT);
+        // Blank it in place: the buffer's address must not change.
+        for px in self.framebuffer.as_chunks_mut::<4>().0 {
+            *px = DMG_PALETTE[0];
+        }
     }
 
     /// Advances by `cycles` dots, one at a time, so mode and LY == LYC change

@@ -67,6 +67,22 @@ fn halt_with_nothing_pending_burns_cycles() {
 }
 
 #[test]
+fn framebuffer_never_moves() {
+    // The browser keeps a view on this buffer in wasm memory instead of
+    // copying it every frame, so its address must stay put, including when
+    // the LCD is switched off (which blanks it) and back on.
+    // $0150 XOR A ; LDH ($40),A (LCD off) ; LD A,$91 ; LDH ($40),A (on) ; JR -8
+    let code = [0xAF, 0xE0, 0x40, 0x3E, 0x91, 0xE0, 0x40, 0x18, 0xF7];
+    let mut gb = GameBoy::new(rom(&code)).unwrap();
+    let addr = gb.framebuffer().as_ptr();
+    for _ in 0..3 {
+        gb.run_frame().unwrap();
+        assert_eq!(gb.framebuffer().as_ptr(), addr);
+        assert_eq!(gb.framebuffer().len(), 160 * 144 * 4);
+    }
+}
+
+#[test]
 fn a_frame_is_70224_cycles() {
     assert_eq!(CYCLES_PER_FRAME, 154 * 456);
 }

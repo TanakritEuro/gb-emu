@@ -9,7 +9,9 @@ import { TURBO, framesDue, nextSpeed } from "./timing.js";
 const $ = (id) => document.getElementById(id);
 const canvas = $("screen");
 const ctx = canvas.getContext("2d");
-const image = ctx.createImageData(160, 144);
+// An ImageData whose pixels *are* the emulator's framebuffer in wasm memory
+// (see screenImage()), so drawing a frame copies nothing on the JS side.
+let screenView = null;
 
 let emu = null;
 // The loaded ROM, kept so Reset can power-cycle with it.
@@ -29,7 +31,7 @@ let sentMask = 0;
 // Each finger on the on-screen controls: pointerId -> { onDpad, mask }.
 const touches = new Map();
 
-await init();
+const wasm = await init(); // the wasm exports, including its memory
 
 async function loadRom(file) {
   const bytes = new Uint8Array(await file.arrayBuffer());
@@ -120,8 +122,20 @@ function loop(now) {
 }
 
 function draw() {
-  image.data.set(emu.framebuffer());
-  ctx.putImageData(image, 0, 0);
+  ctx.putImageData(screenImage(), 0, 0);
+}
+
+/** The ImageData view on the framebuffer, rebuilt when it has gone stale: a
+ * new emulator has its framebuffer elsewhere, and growing wasm memory
+ * detaches the old ArrayBuffer (any view on it then reads as empty). */
+function screenImage() {
+  const ptr = emu.framebuffer_ptr();
+  const data = screenView?.data;
+  if (!data || data.buffer !== wasm.memory.buffer || data.byteOffset !== ptr) {
+    const pixels = new Uint8ClampedArray(wasm.memory.buffer, ptr, emu.framebuffer_len());
+    screenView = new ImageData(pixels, 160, 144);
+  }
+  return screenView;
 }
 
 function collectSerial() {
