@@ -418,6 +418,28 @@ impl Cpu {
         self.set_flags(a == 0, sub, false, carry);
     }
 
+    /// Condition `cc[i]`: NZ Z NC C.
+    fn condition(&self, i: u8) -> bool {
+        match i {
+            0 => !self.regs.flag(FLAG_Z),
+            1 => self.regs.flag(FLAG_Z),
+            2 => !self.regs.flag(FLAG_C),
+            _ => self.regs.flag(FLAG_C),
+        }
+    }
+
+    /// Relative jump. The offset is signed and counts from the address after
+    /// the JR instruction, which is where PC already points.
+    fn jr(&mut self, offset: u8) {
+        self.regs.pc = self.regs.pc.wrapping_add_signed(i16::from(offset as i8));
+    }
+
+    /// Pushes the return address (PC, already past the CALL) and jumps.
+    fn call(&mut self, bus: &mut Bus, addr: u16) {
+        self.push16(bus, self.regs.pc);
+        self.regs.pc = addr;
+    }
+
     /// The address for block 0's `z=2` loads, picked by `p`: (BC) (DE) (HL+)
     /// (HL-). HL+ and HL- step HL after the access, for fast copy loops.
     fn indirect_addr(&mut self, p: u8) -> u16 {
@@ -497,8 +519,22 @@ impl Cpu {
                         Ok(20)
                     }
                     2 => MISSING, // STOP
-                    3 => MISSING, // JR e8
-                    _ => MISSING, // JR cc[y-4], e8
+                    // JR e8
+                    3 => {
+                        let offset = self.fetch8(bus);
+                        self.jr(offset);
+                        Ok(12)
+                    }
+                    // JR cc[y-4], e8: the taken branch costs 4 more cycles
+                    _ => {
+                        let offset = self.fetch8(bus);
+                        if self.condition(op.y - 4) {
+                            self.jr(offset);
+                            Ok(12)
+                        } else {
+                            Ok(8)
+                        }
+                    }
                 },
                 1 => match op.q {
                     // LD rp[p], d16
@@ -613,7 +649,16 @@ impl Cpu {
             // Block 3: control flow, stack, high-page loads, immediate ALU.
             _ => match op.z {
                 0 => match op.y {
-                    0..=3 => MISSING, // RET cc[y]
+                    // RET cc[y]: checking the condition takes a cycle of its
+                    // own, so taken is 20 (vs 16 for RET) and not taken is 8.
+                    0..=3 => {
+                        if self.condition(op.y) {
+                            self.regs.pc = self.pop16(bus);
+                            Ok(20)
+                        } else {
+                            Ok(8)
+                        }
+                    }
                     // LDH (a8), A: high page $FF00-$FFFF (I/O and HRAM)
                     4 => {
                         let addr = 0xFF00 | u16::from(self.fetch8(bus));
@@ -645,9 +690,19 @@ impl Cpu {
                         self.write_rp2(op.p, val);
                         Ok(12)
                     }
-                    (_, 0) => MISSING, // RET
-                    (_, 1) => MISSING, // RETI
-                    (_, 2) => MISSING, // JP HL
+                    // RET
+                    (_, 0) => {
+                        self.regs.pc = self.pop16(bus);
+                        Ok(16)
+                    }
+                    // TODO(milestone 2): RETI = RET, then set IME immediately
+                    // (no one-instruction delay like EI). 16 cycles.
+                    (_, 1) => MISSING,
+                    // JP HL: just a register copy, no extra cycle
+                    (_, 2) => {
+                        self.regs.pc = self.regs.hl();
+                        Ok(4)
+                    }
                     // LD SP, HL
                     _ => {
                         self.regs.sp = self.regs.hl();
@@ -655,7 +710,16 @@ impl Cpu {
                     }
                 },
                 2 => match op.y {
-                    0..=3 => MISSING, // JP cc[y], a16
+                    // JP cc[y], a16
+                    0..=3 => {
+                        let addr = self.fetch16(bus);
+                        if self.condition(op.y) {
+                            self.regs.pc = addr;
+                            Ok(16)
+                        } else {
+                            Ok(12)
+                        }
+                    }
                     // LDH (C), A
                     4 => {
                         bus.write(0xFF00 | u16::from(self.regs.c), self.regs.a);
@@ -699,8 +763,17 @@ impl Cpu {
                     _ => ILLEGAL, // $D3 $DB $E3 $EB
                 },
                 4 => match op.y {
-                    0..=3 => MISSING, // CALL cc[y], a16
-                    _ => ILLEGAL,     // $E4 $EC $F4 $FC
+                    // CALL cc[y], a16
+                    0..=3 => {
+                        let addr = self.fetch16(bus);
+                        if self.condition(op.y) {
+                            self.call(bus, addr);
+                            Ok(24)
+                        } else {
+                            Ok(12)
+                        }
+                    }
+                    _ => ILLEGAL, // $E4 $EC $F4 $FC
                 },
                 5 => match (op.q, op.p) {
                     // PUSH rp2[p]: 4 more cycles than POP, for the SP decrement
@@ -709,8 +782,13 @@ impl Cpu {
                         self.push16(bus, val);
                         Ok(16)
                     }
-                    (_, 0) => MISSING, // CALL a16
-                    _ => ILLEGAL,      // $DD $ED $FD
+                    // CALL a16
+                    (_, 0) => {
+                        let addr = self.fetch16(bus);
+                        self.call(bus, addr);
+                        Ok(24)
+                    }
+                    _ => ILLEGAL, // $DD $ED $FD
                 },
                 // alu[y] A, d8
                 6 => {
@@ -718,7 +796,11 @@ impl Cpu {
                     self.alu(op.y, val);
                     Ok(8)
                 }
-                _ => MISSING, // RST y*8
+                // RST y*8: a one-byte CALL to $00, $08, ... $38
+                _ => {
+                    self.call(bus, u16::from(op.y) * 8);
+                    Ok(16)
+                }
             },
         }
     }
@@ -1530,6 +1612,161 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Runs `program` from WRAM at $C000 (no 4-byte limit, room to jump
+    /// around) with SP = $D000.
+    fn setup_wram(program: &[u8]) -> (Cpu, Bus) {
+        let (mut cpu, mut bus) = setup(&[]);
+        for (i, &b) in program.iter().enumerate() {
+            bus.write(0xC000 + i as u16, b);
+        }
+        cpu.regs.pc = 0xC000;
+        cpu.regs.sp = 0xD000;
+        (cpu, bus)
+    }
+
+    /// F values to try, and for each cc (NZ Z NC C) whether it holds.
+    const FLAG_CASES: [u8; 4] = [0, FLAG_Z, FLAG_C, FLAG_Z | FLAG_C];
+    const CC_HOLDS: [[bool; 4]; 4] = [
+        [true, false, true, false], // NZ
+        [false, true, false, true], // Z
+        [true, true, false, false], // NC
+        [false, false, true, true], // C
+    ];
+
+    #[test]
+    fn jr_offset_counts_from_the_next_instruction() {
+        // JR +$10 at $C000: lands at $C002 + $10
+        let (mut cpu, mut bus) = setup_wram(&[0x18, 0x10]);
+        assert_eq!(cpu.step(&mut bus), Ok(12));
+        assert_eq!(cpu.regs.pc, 0xC012);
+
+        // JR -2 jumps back onto itself
+        let (mut cpu, mut bus) = setup_wram(&[0x18, 0xFE]);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.regs.pc, 0xC000);
+
+        // JR -128 is the furthest back
+        let (mut cpu, mut bus) = setup_wram(&[0x18, 0x80]);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.regs.pc, 0xC002 - 128);
+    }
+
+    #[test]
+    fn jr_cc_taken_and_not_taken() {
+        for cc in 0..4u8 {
+            for (i, &f) in FLAG_CASES.iter().enumerate() {
+                let opcode = 0x20 | cc << 3;
+                let (mut cpu, mut bus) = setup_wram(&[opcode, 0x10]);
+                cpu.regs.f = f;
+                let taken = CC_HOLDS[cc as usize][i];
+                let (cycles, pc) = if taken { (12, 0xC012) } else { (8, 0xC002) };
+                let msg = format!("opcode {opcode:02X} F={f:02X}");
+                assert_eq!(cpu.step(&mut bus), Ok(cycles), "{msg}");
+                assert_eq!(cpu.regs.pc, pc, "{msg}");
+            }
+        }
+    }
+
+    #[test]
+    fn jp_cc_taken_and_not_taken() {
+        for cc in 0..4u8 {
+            for (i, &f) in FLAG_CASES.iter().enumerate() {
+                let opcode = 0xC2 | cc << 3;
+                let (mut cpu, mut bus) = setup_wram(&[opcode, 0x00, 0xC1]);
+                cpu.regs.f = f;
+                let taken = CC_HOLDS[cc as usize][i];
+                let (cycles, pc) = if taken { (16, 0xC100) } else { (12, 0xC003) };
+                let msg = format!("opcode {opcode:02X} F={f:02X}");
+                assert_eq!(cpu.step(&mut bus), Ok(cycles), "{msg}");
+                assert_eq!(cpu.regs.pc, pc, "{msg}");
+            }
+        }
+    }
+
+    #[test]
+    fn jp_hl() {
+        let (mut cpu, mut bus) = setup_wram(&[0xE9]);
+        cpu.regs.set_hl(0x4000);
+        assert_eq!(cpu.step(&mut bus), Ok(4));
+        assert_eq!(cpu.regs.pc, 0x4000);
+    }
+
+    #[test]
+    fn call_pushes_the_return_address_and_ret_pops_it() {
+        // $C000 CALL $C010 ; ... ; $C010 RET
+        let mut program = vec![0xCD, 0x10, 0xC0];
+        program.resize(0x10, 0x00);
+        program.push(0xC9);
+        let (mut cpu, mut bus) = setup_wram(&program);
+
+        assert_eq!(cpu.step(&mut bus), Ok(24));
+        assert_eq!(cpu.regs.pc, 0xC010);
+        assert_eq!(cpu.regs.sp, 0xCFFE);
+        assert_eq!(bus.read16(0xCFFE), 0xC003, "return address is after CALL");
+
+        assert_eq!(cpu.step(&mut bus), Ok(16));
+        assert_eq!(cpu.regs.pc, 0xC003);
+        assert_eq!(cpu.regs.sp, 0xD000);
+    }
+
+    #[test]
+    fn call_cc_taken_and_not_taken() {
+        for cc in 0..4u8 {
+            for (i, &f) in FLAG_CASES.iter().enumerate() {
+                let opcode = 0xC4 | cc << 3;
+                let (mut cpu, mut bus) = setup_wram(&[opcode, 0x00, 0xC1]);
+                cpu.regs.f = f;
+                let taken = CC_HOLDS[cc as usize][i];
+                let msg = format!("opcode {opcode:02X} F={f:02X}");
+                if taken {
+                    assert_eq!(cpu.step(&mut bus), Ok(24), "{msg}");
+                    assert_eq!(cpu.regs.pc, 0xC100, "{msg}");
+                    assert_eq!(cpu.regs.sp, 0xCFFE, "{msg}");
+                    assert_eq!(bus.read16(0xCFFE), 0xC003, "{msg}");
+                } else {
+                    assert_eq!(cpu.step(&mut bus), Ok(12), "{msg}");
+                    assert_eq!(cpu.regs.pc, 0xC003, "{msg}");
+                    assert_eq!(cpu.regs.sp, 0xD000, "nothing pushed: {msg}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ret_cc_taken_and_not_taken() {
+        for cc in 0..4u8 {
+            for (i, &f) in FLAG_CASES.iter().enumerate() {
+                let opcode = 0xC0 | cc << 3;
+                let (mut cpu, mut bus) = setup_wram(&[opcode]);
+                cpu.regs.sp = 0xCFFE;
+                bus.write16(0xCFFE, 0xC200);
+                cpu.regs.f = f;
+                let taken = CC_HOLDS[cc as usize][i];
+                let msg = format!("opcode {opcode:02X} F={f:02X}");
+                if taken {
+                    assert_eq!(cpu.step(&mut bus), Ok(20), "{msg}");
+                    assert_eq!(cpu.regs.pc, 0xC200, "{msg}");
+                    assert_eq!(cpu.regs.sp, 0xD000, "{msg}");
+                } else {
+                    assert_eq!(cpu.step(&mut bus), Ok(8), "{msg}");
+                    assert_eq!(cpu.regs.pc, 0xC001, "{msg}");
+                    assert_eq!(cpu.regs.sp, 0xCFFE, "{msg}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rst_calls_one_of_eight_fixed_addresses() {
+        for y in 0..8u8 {
+            let opcode = 0xC7 | y << 3;
+            let (mut cpu, mut bus) = setup_wram(&[opcode]);
+            assert_eq!(cpu.step(&mut bus), Ok(16), "opcode {opcode:02X}");
+            assert_eq!(cpu.regs.pc, u16::from(y) * 8, "opcode {opcode:02X}");
+            assert_eq!(bus.read16(cpu.regs.sp), 0xC001, "opcode {opcode:02X}");
         }
     }
 }
