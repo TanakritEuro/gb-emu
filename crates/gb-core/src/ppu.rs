@@ -8,7 +8,7 @@
 
 use crate::bus::interrupt;
 use crate::state::{StateError, StateReader, StateWriter};
-use crate::{SCREEN_HEIGHT, SCREEN_WIDTH};
+use crate::{Model, SCREEN_HEIGHT, SCREEN_WIDTH};
 
 /// Shades 0 (lightest) to 3 (darkest) as RGBA, in the classic green.
 pub const DMG_PALETTE: [[u8; 4]; 4] = [
@@ -28,7 +28,12 @@ const VBLANK_LINE: u8 = 144;
 
 #[derive(Clone)]
 pub struct Ppu {
-    vram: [u8; 0x2000],
+    model: Model,
+    /// 8 KiB on the original; two 8 KiB banks on the Color, bank 1 at
+    /// `0x2000..`. Rendering reads bank 0 for now.
+    vram: Box<[u8; 0x4000]>,
+    /// The bank the CPU sees at $8000-$9FFF (VBK, $FF4F). Color only.
+    vram_bank: u8,
     oam: [u8; 0xA0],
     pub lcdc: u8,
     pub stat: u8,
@@ -66,8 +71,14 @@ impl Default for Ppu {
 impl Ppu {
     /// Register values as the boot ROM leaves them.
     pub fn new() -> Self {
+        Self::with_model(Model::Dmg)
+    }
+
+    pub fn with_model(model: Model) -> Self {
         Self {
-            vram: [0; 0x2000],
+            model,
+            vram: Box::new([0; 0x4000]),
+            vram_bank: 0,
             oam: [0; 0xA0],
             lcdc: 0x91,
             stat: 0x85,
@@ -98,7 +109,8 @@ impl Ppu {
 
     pub(crate) fn save_state(&self, w: &mut StateWriter) {
         w.tag(b"PPU ");
-        w.bytes(&self.vram);
+        w.sized_bytes(&self.vram[..self.vram_size()]);
+        w.u8(self.vram_bank);
         w.bytes(&self.oam);
         w.bytes(&[
             self.lcdc, self.stat, self.scy, self.scx, self.ly, self.lyc, self.dma, self.bgp,
@@ -121,7 +133,9 @@ impl Ppu {
 
     pub(crate) fn load_state(&mut self, r: &mut StateReader) -> Result<(), StateError> {
         r.tag(b"PPU ")?;
-        r.bytes(&mut self.vram)?;
+        let size = self.vram_size();
+        r.sized_bytes(&mut self.vram[..size])?;
+        self.vram_bank = r.u8()? & 1;
         r.bytes(&mut self.oam)?;
         let mut regs = [0; 12];
         r.bytes(&mut regs)?;
@@ -159,11 +173,28 @@ impl Ppu {
         std::mem::swap(&mut self.framebuffer, &mut old.framebuffer);
     }
 
+    /// The VRAM bank the CPU sees, 0 or 1 (always 0 on the original).
+    pub fn vram_bank(&self) -> u8 {
+        self.vram_bank
+    }
+    pub fn set_vram_bank(&mut self, bank: u8) {
+        self.vram_bank = bank & 1;
+    }
+
+    /// The part of `vram` this model has.
+    fn vram_size(&self) -> usize {
+        if self.model == Model::Cgb {
+            0x4000
+        } else {
+            0x2000
+        }
+    }
+
     pub fn read_vram(&self, addr: u16) -> u8 {
-        self.vram[(addr - 0x8000) as usize]
+        self.vram[usize::from(self.vram_bank) * 0x2000 + usize::from(addr - 0x8000)]
     }
     pub fn write_vram(&mut self, addr: u16, val: u8) {
-        self.vram[(addr - 0x8000) as usize] = val;
+        self.vram[usize::from(self.vram_bank) * 0x2000 + usize::from(addr - 0x8000)] = val;
     }
     pub fn read_oam(&self, addr: u16) -> u8 {
         self.oam[(addr - 0xFE00) as usize]

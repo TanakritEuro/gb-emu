@@ -47,6 +47,29 @@ pub struct GameBoy {
     resume_here: bool,
 }
 
+/// Which console to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Model {
+    /// The original Game Boy (DMG).
+    Dmg,
+    /// The Game Boy Color, running a game in Color mode: double speed, color
+    /// palettes, banked VRAM and WRAM.
+    Cgb,
+}
+
+impl Model {
+    /// The model a game is best played on: Color mode if its header says it
+    /// knows about the Color, the original otherwise. (A real Color runs
+    /// the others in a DMG compatibility mode, which isn't emulated.)
+    pub fn for_cartridge(cart: &Cartridge) -> Self {
+        if cart.header.cgb {
+            Self::Cgb
+        } else {
+            Self::Dmg
+        }
+    }
+}
+
 /// How a call to [`GameBoy::run_frame`] ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameEnd {
@@ -60,16 +83,28 @@ pub enum FrameEnd {
 impl GameBoy {
     /// Loads a ROM and starts in the state the boot ROM leaves behind,
     /// so execution begins at $0100 without needing a copy of the boot ROM.
+    /// The model comes from the cartridge header ([`Model::for_cartridge`]).
     pub fn new(rom: Vec<u8>) -> Result<Self, CartridgeError> {
+        Self::with_model(rom, None)
+    }
+
+    /// Like [`new`](Self::new), but `Some(model)` overrides the choice,
+    /// e.g. to run a test ROM on a particular console.
+    pub fn with_model(rom: Vec<u8>, model: Option<Model>) -> Result<Self, CartridgeError> {
         let cart = Cartridge::from_rom(rom)?;
+        let model = model.unwrap_or_else(|| Model::for_cartridge(&cart));
         let mut cpu = Cpu::new();
-        cpu.reset_post_boot();
+        cpu.reset_post_boot(model);
         Ok(Self {
             cpu,
-            bus: Bus::new(cart),
+            bus: Bus::new(cart, model),
             breakpoints: BTreeSet::new(),
             resume_here: false,
         })
+    }
+
+    pub fn model(&self) -> Model {
+        self.bus.model
     }
 
     /// Executes one instruction and advances the rest of the hardware by the
@@ -94,7 +129,8 @@ impl GameBoy {
         Ok(cycles)
     }
 
-    /// Runs until one frame's worth of T-cycles has elapsed, or until PC
+    /// Runs until one frame's worth of time has passed (70224 T-cycles at
+    /// normal speed, twice as many CPU cycles in double speed), or until PC
     /// reaches a breakpoint.
     pub fn run_frame(&mut self) -> Result<FrameEnd, CpuError> {
         let mut elapsed = 0;
@@ -103,7 +139,8 @@ impl GameBoy {
                 self.resume_here = true;
                 return Ok(FrameEnd::Breakpoint);
             }
-            elapsed += self.step()?;
+            let cycles = self.step()?;
+            elapsed += self.bus.real_cycles(cycles);
         }
         Ok(FrameEnd::Done)
     }

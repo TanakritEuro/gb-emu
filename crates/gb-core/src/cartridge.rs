@@ -75,6 +75,10 @@ pub struct Header {
     pub title: String,
     pub cart_type: u8,
     pub checksum_ok: bool,
+    /// $0143 bit 7: the game knows about the Game Boy Color ($80 runs on
+    /// both, $C0 on the Color only), so a Color starts it in Color mode.
+    /// https://gbdev.io/pandocs/The_Cartridge_Header.html#0143--cgb-flag
+    pub cgb: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -289,7 +293,10 @@ impl Cartridge {
         if rom.len() < 0x150 {
             return Err(CartridgeError::TooSmall(rom.len()));
         }
-        let title = rom[0x134..0x144]
+        let cgb = rom[0x143] & 0x80 != 0;
+        // On Color games the title is 15 bytes: $0143 is the flag.
+        let title_end = if cgb { 0x143 } else { 0x144 };
+        let title = rom[0x134..title_end]
             .iter()
             .take_while(|&&b| b != 0)
             .map(|&b| {
@@ -346,6 +353,7 @@ impl Cartridge {
             title,
             cart_type,
             checksum_ok: header_checksum(&rom) == rom[0x14D],
+            cgb,
         };
         Ok(Self {
             rom_hash: fnv1a64(&rom),
@@ -826,6 +834,28 @@ pub(crate) mod tests {
         let cart = Cartridge::from_rom(make_rom(0x00, 2, 0)).unwrap();
         assert_eq!(cart.header.title, "TEST");
         assert!(cart.header.checksum_ok);
+    }
+
+    #[test]
+    fn the_cgb_flag_marks_color_games_and_ends_their_title_early() {
+        let mut rom = make_rom(0x00, 2, 0);
+        rom[0x134..0x144].copy_from_slice(b"FIFTEEN LETTERSX");
+        rom[0x143] = 0x80;
+        let cart = Cartridge::from_rom(rom.clone()).unwrap();
+        assert!(cart.header.cgb);
+        assert_eq!(cart.header.title, "FIFTEEN LETTERS", "$0143 isn't title");
+        rom[0x143] = 0xC0;
+        assert!(
+            Cartridge::from_rom(rom.clone()).unwrap().header.cgb,
+            "Color only"
+        );
+        rom[0x143] = b'X';
+        let dmg = Cartridge::from_rom(rom).unwrap();
+        assert!(!dmg.header.cgb);
+        assert_eq!(
+            dmg.header.title, "FIFTEEN LETTERSX",
+            "16 letters on the original"
+        );
     }
 
     #[test]

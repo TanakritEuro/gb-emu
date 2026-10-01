@@ -10,6 +10,7 @@
 
 use crate::bus::Bus;
 use crate::state::{StateError, StateReader, StateWriter};
+use crate::Model;
 use std::fmt;
 
 pub const FLAG_Z: u8 = 0x80;
@@ -157,19 +158,35 @@ impl Cpu {
         Self::default()
     }
 
-    /// Register values the DMG boot ROM leaves behind when it jumps to $0100.
-    pub fn reset_post_boot(&mut self) {
-        self.regs = Registers {
-            a: 0x01,
-            f: 0xB0,
-            b: 0x00,
-            c: 0x13,
-            d: 0x00,
-            e: 0xD8,
-            h: 0x01,
-            l: 0x4D,
-            sp: 0xFFFE,
-            pc: 0x0100,
+    /// Register values the boot ROM leaves behind when it jumps to $0100.
+    /// A = $11 is how a game tells it's running on a Game Boy Color.
+    /// https://gbdev.io/pandocs/Power_Up_Sequence.html#cpu-registers
+    pub fn reset_post_boot(&mut self, model: Model) {
+        self.regs = match model {
+            Model::Dmg => Registers {
+                a: 0x01,
+                f: 0xB0,
+                b: 0x00,
+                c: 0x13,
+                d: 0x00,
+                e: 0xD8,
+                h: 0x01,
+                l: 0x4D,
+                sp: 0xFFFE,
+                pc: 0x0100,
+            },
+            Model::Cgb => Registers {
+                a: 0x11,
+                f: 0x80,
+                b: 0x00,
+                c: 0x00,
+                d: 0xFF,
+                e: 0x56,
+                h: 0x00,
+                l: 0x0D,
+                sp: 0xFFFE,
+                pc: 0x0100,
+            },
         };
         self.ime = false;
         self.ime_pending = false;
@@ -584,14 +601,18 @@ impl Cpu {
                         bus.write16(addr, self.regs.sp);
                         Ok(20)
                     }
-                    // STOP: two bytes, the second ignored. Resets DIV.
+                    // STOP: two bytes, the second ignored. Resets DIV. On a
+                    // Color with KEY1 armed it switches CPU speed instead.
                     // https://gbdev.io/pandocs/Reducing_Power_Consumption.html
                     // TODO(accuracy): a DMG really stops the CPU, timer and LCD
                     // until a button is pressed, and in some situations (Pan
                     // Docs' STOP flowchart) acts as 1 byte. Few games rely on it.
+                    // TODO(accuracy): a speed switch pauses the CPU for 2050
+                    // M-cycles, with DIV not ticking; here it's instant.
                     2 => {
                         self.fetch8(bus);
                         bus.write(0xFF04, 0);
+                        bus.speed_switch();
                         Ok(4)
                     }
                     // JR e8
@@ -940,8 +961,8 @@ mod tests {
     fn setup(program: &[u8]) -> (Cpu, Bus) {
         let cart = Cartridge::from_rom(rom_with_program(program)).unwrap();
         let mut cpu = Cpu::new();
-        cpu.reset_post_boot();
-        (cpu, Bus::new(cart))
+        cpu.reset_post_boot(Model::Dmg);
+        (cpu, Bus::new(cart, Model::Dmg))
     }
 
     #[test]

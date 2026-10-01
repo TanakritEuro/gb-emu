@@ -1,6 +1,6 @@
 //! End-to-end checks through the public API.
 
-use gb_core::{cpu::CpuError, FrameEnd, GameBoy, Rewind, StateError, CYCLES_PER_FRAME};
+use gb_core::{cpu::CpuError, FrameEnd, GameBoy, Model, Rewind, StateError, CYCLES_PER_FRAME};
 
 /// A 32 KiB ROM-only cartridge with a valid header and `code` at $0150.
 /// The entry point at $0100 is NOP; JP $0150, like real games.
@@ -247,6 +247,98 @@ fn busy_rom() -> Vec<u8> {
         .iter()
         .fold(0u8, |x, &b| x.wrapping_sub(b).wrapping_sub(1));
     r
+}
+
+/// Marks `rom` as a Game Boy Color game ($0143 = $80) and fixes its checksum.
+fn color(mut rom: Vec<u8>) -> Vec<u8> {
+    rom[0x143] = 0x80;
+    rom[0x14D] = rom[0x134..=0x14C]
+        .iter()
+        .fold(0u8, |x, &b| x.wrapping_sub(b).wrapping_sub(1));
+    rom
+}
+
+/// `busy_rom` as a Color game that first switches to double speed and to
+/// WRAM bank 3, so its scribbling covers banked RAM.
+fn color_busy_rom() -> Vec<u8> {
+    let mut r = color(busy_rom());
+    #[rustfmt::skip]
+    let prelude = [
+        0x3E, 0x01, 0xE0, 0x4D, // KEY1: arm the speed switch
+        0x10, 0x00,             // STOP: switch
+        0x3E, 0x03, 0xE0, 0x70, // SVBK: WRAM bank 3 at $D000
+        0xC3, 0x50, 0x01,       // JP $0150 (busy_rom's program)
+    ];
+    r[0x200..0x200 + prelude.len()].copy_from_slice(&prelude);
+    r[0x101..0x104].copy_from_slice(&[0xC3, 0x00, 0x02]); // entry: JP $0200
+    r
+}
+
+#[test]
+fn the_header_picks_the_model_and_the_boot_state_says_which() {
+    let gb = GameBoy::new(rom(&COUNTER)).unwrap();
+    assert_eq!((gb.model(), gb.cpu().regs.a), (Model::Dmg, 0x01));
+    let gb = GameBoy::new(color(rom(&COUNTER))).unwrap();
+    assert_eq!(
+        (gb.model(), gb.cpu().regs.a),
+        (Model::Cgb, 0x11),
+        "A = $11 on a Color"
+    );
+    let gb = GameBoy::with_model(color(rom(&COUNTER)), Some(Model::Dmg)).unwrap();
+    assert_eq!(
+        (gb.model(), gb.cpu().regs.a),
+        (Model::Dmg, 0x01),
+        "overridden"
+    );
+}
+
+#[test]
+fn double_speed_fits_twice_the_cpu_work_in_a_frame() {
+    #[rustfmt::skip]
+    let code = [
+        0x3E, 0x01, 0xE0, 0x4D, // KEY1: arm
+        0x10, 0x00,             // STOP: switch (on a Color)
+        0x03,                   // $0156 INC BC   (8 T-cycles)
+        0x18, 0xFD,             //       JR $0156 (12): 20 a time round
+    ];
+    let loops_per_frame = |model| {
+        let mut gb = GameBoy::with_model(color(rom(&code)), Some(model)).unwrap();
+        gb.run_frame().unwrap(); // switched, and into the loop
+        let before = gb.cpu().regs.bc();
+        gb.run_frame().unwrap();
+        u32::from(gb.cpu().regs.bc().wrapping_sub(before))
+    };
+    let normal = loops_per_frame(Model::Dmg); // STOP doesn't switch there
+    let double = loops_per_frame(Model::Cgb);
+    assert!(normal.abs_diff(70_224 / 20) <= 1, "{normal}");
+    assert!(double.abs_diff(2 * 70_224 / 20) <= 1, "{double}");
+}
+
+#[test]
+fn a_color_state_carries_on_exactly_like_the_original() {
+    let mut gb = GameBoy::new(color_busy_rom()).unwrap();
+    run_frames(&mut gb, 10);
+    assert_eq!(gb.peek(0xFF4D), 0xFE, "double speed by now");
+    assert_eq!(gb.peek(0xFF70), 0xFB, "WRAM bank 3");
+    let saved = gb.save_state();
+    run_frames(&mut gb, 20);
+    let original = gb.save_state();
+    gb.load_state(&saved).unwrap();
+    run_frames(&mut gb, 20);
+    assert!(gb.save_state() == original, "reloaded in place");
+    let mut fresh = GameBoy::new(color_busy_rom()).unwrap();
+    fresh.load_state(&saved).unwrap();
+    run_frames(&mut fresh, 20);
+    assert!(
+        fresh.save_state() == original,
+        "loaded into a fresh Game Boy Color"
+    );
+    // Same ROM run as the other model: refused rather than half-loaded.
+    let mut dmg = GameBoy::with_model(color_busy_rom(), Some(Model::Dmg)).unwrap();
+    assert!(matches!(
+        dmg.load_state(&saved),
+        Err(StateError::Corrupt(_))
+    ));
 }
 
 fn run_frames(gb: &mut GameBoy, n: usize) {

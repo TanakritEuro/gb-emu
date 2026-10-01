@@ -8,15 +8,17 @@
 //! Exit codes: 0 passed (or ran to the frame limit with no verdict expected),
 //! 1 failed, 2 emulator or usage error, 3 frame limit hit with output but no verdict.
 
-use gb_core::{GameBoy, CYCLES_PER_FRAME};
+use gb_core::{GameBoy, Model, CYCLES_PER_FRAME};
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-usage: gb-cli <rom.gb> [--frames N] [--doctor TRACE_FILE] [--wav AUDIO_FILE]
+usage: gb-cli <rom.gb> [--frames N] [--model dmg|cgb] [--doctor TRACE_FILE] [--wav AUDIO_FILE]
 
   --frames N            stop after N frames (default 3600, about a minute of Game Boy time)
+  --model dmg|cgb       run on the original or the Color (default: the Color for games whose
+                        header says they support it, the original for the rest)
   --doctor TRACE_FILE   write a Gameboy Doctor trace line before every instruction
   --wav AUDIO_FILE      record the sound to a 48 kHz stereo WAV file
 
@@ -27,6 +29,7 @@ examples:
 struct Args {
     rom: String,
     frames: u64,
+    model: Option<Model>,
     doctor: Option<String>,
     wav: Option<String>,
 }
@@ -37,6 +40,7 @@ const WAV_RATE: u32 = 48_000;
 fn parse_args() -> Result<Option<Args>, String> {
     let mut rom = None;
     let mut frames = 3600;
+    let mut model = None;
     let mut doctor = None;
     let mut wav = None;
     let mut args = std::env::args().skip(1);
@@ -45,6 +49,13 @@ fn parse_args() -> Result<Option<Args>, String> {
             "-h" | "--help" => return Ok(None),
             "--doctor" => doctor = Some(args.next().ok_or("--doctor needs a file path")?),
             "--wav" => wav = Some(args.next().ok_or("--wav needs a file path")?),
+            "--model" => {
+                model = match args.next().as_deref() {
+                    Some("dmg") => Some(Model::Dmg),
+                    Some("cgb") => Some(Model::Cgb),
+                    other => return Err(format!("--model needs dmg or cgb, not {other:?}")),
+                }
+            }
             "--frames" => {
                 let n = args.next().ok_or("--frames needs a number")?;
                 frames = n.parse().map_err(|_| format!("bad frame count: {n}"))?;
@@ -57,6 +68,7 @@ fn parse_args() -> Result<Option<Args>, String> {
     Ok(Some(Args {
         rom,
         frames,
+        model,
         doctor,
         wav,
     }))
@@ -82,7 +94,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let mut gb = match GameBoy::new(rom) {
+    let mut gb = match GameBoy::with_model(rom, args.model) {
         Ok(gb) => gb,
         Err(e) => {
             eprintln!("error: {e}");
@@ -90,7 +102,11 @@ fn main() -> ExitCode {
         }
     };
     gb.set_doctor_mode(args.doctor.is_some());
-    eprintln!("loaded \"{}\"", gb.title());
+    let model = match gb.model() {
+        Model::Dmg => "Game Boy",
+        Model::Cgb => "Game Boy Color",
+    };
+    eprintln!("loaded \"{}\" on a {model}", gb.title());
 
     let mut trace = match &args.doctor {
         Some(path) => match File::create(path) {

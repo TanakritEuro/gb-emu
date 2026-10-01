@@ -294,8 +294,8 @@ mod tests {
 
         let run = |program: &[u8]| {
             let cart = Cartridge::from_rom(rom_with_program(program)).unwrap();
-            let (mut cpu, mut bus) = (Cpu::new(), Bus::new(cart));
-            cpu.reset_post_boot();
+            let (mut cpu, mut bus) = (Cpu::new(), Bus::new(cart, crate::Model::Dmg));
+            cpu.reset_post_boot(crate::Model::Dmg);
             let pc = cpu.regs.pc;
             cpu.step(&mut bus).unwrap();
             let len = disassemble(|a| bus.read(a), pc).len;

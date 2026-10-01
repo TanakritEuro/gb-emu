@@ -106,6 +106,14 @@ Pick whichever sound most fun:
   - [x] Save states in the browser: slots per game, kept between visits
   - [x] Rewind: keep recent states, hold a key to run backwards (30 s of history in ~350 KB)
 - [ ] Game Boy Color support (double-speed CPU, color palettes, VRAM banks)
+  - [x] Color mode: picked from the header, the Color's boot state, VRAM and WRAM banks, double
+        speed (Blargg `cpu_instrs`/`instr_timing` pass in Color mode, `interrupt_time` passes;
+        `cgb_sound` 8/12. Mooneye's Color tests need DMG compatibility mode, which isn't planned)
+  - [ ] Color palettes and per-tile background attributes (palette, VRAM bank, flips, priority)
+  - [ ] Color sprites: palette and bank bits, OAM-order priority, LCDC bit 0 as master priority
+        (`cgb-acid2` matches pixel for pixel)
+  - [ ] HDMA: copying to VRAM all at once, or a block per HBlank
+  - [ ] A Game Boy Color homebrew game plays in the browser
 - [ ] Link cable over WebRTC: two browsers, two-player games
 
 ---

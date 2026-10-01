@@ -4,7 +4,8 @@ A Game Boy (DMG) emulator in Rust that runs in the browser via WebAssembly.
 
 ## Layout
 
-- `crates/gb-core/` — the emulator. Pure Rust, no I/O, no `unsafe`, no dependencies.
+- `crates/gb-core/` — the emulator. Pure Rust, no I/O, no `unsafe`, no dependencies. Two models
+  (`Model::Dmg`, `Model::Cgb`), picked from the cartridge header unless overridden.
   - `cpu.rs` SM83 CPU (registers, fetch/decode/execute)
   - `bus.rs` memory map; routes every read/write; IF/IE; serial; OAM DMA
   - `cartridge.rs` header parsing + MBCs (ROM-only, MBC1, MBC2, MBC3 with its real-time clock, MBC5)
@@ -37,6 +38,7 @@ node --test "web/*.test.js"                             # frontend tests (input,
 cargo run --release -p gb-cli -- <rom.gb>              # run a test ROM headlessly
 cargo run --release -p gb-cli -- <rom.gb> --doctor trace.log   # CPU trace for Gameboy Doctor
 cargo run --release -p gb-cli -- <rom.gb> --wav out.wav        # record the sound (48 kHz WAV)
+cargo run --release -p gb-cli -- <rom.gb> --model dmg           # force a model (dmg or cgb)
 ./scripts/build-web.ps1                                 # build the browser version (Windows)
 node scripts/serve.js                                   # serve it at http://localhost:8765
 ```

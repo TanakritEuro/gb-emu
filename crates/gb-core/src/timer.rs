@@ -33,11 +33,28 @@ pub struct Timer {
     /// Falling edges of DIV bit 4 (counter bit 12) not yet passed to the
     /// APU: they clock its frame sequencer ("DIV-APU", 512 Hz).
     div_apu: u32,
+    /// Color double speed: the counter runs twice as fast, so DIV-APU comes
+    /// from DIV bit 5 (counter bit 13) to stay at 512 Hz.
+    /// https://gbdev.io/pandocs/Audio_details.html#div-apu
+    double_speed: bool,
 }
 
 impl Timer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn set_double_speed(&mut self, on: bool) {
+        self.double_speed = on;
+    }
+
+    /// The counter bit whose falling edge is a DIV-APU event.
+    fn div_apu_bit(&self) -> u16 {
+        if self.double_speed {
+            0x2000
+        } else {
+            0x1000
+        }
     }
 
     pub(crate) fn save_state(&self, w: &mut StateWriter) {
@@ -84,16 +101,18 @@ impl Timer {
     }
 
     /// Runs `change` and increments TIMA if it made the signal fall.
-    /// Also counts falling edges of counter bit 12 for the APU, including the
-    /// one a DIV write causes when the bit was set (Pan Docs: Audio_details).
+    /// Also counts falling edges of counter bit 12 (13 in double speed) for
+    /// the APU, including the one a DIV write causes when the bit was set
+    /// (Pan Docs: Audio_details).
     fn update(&mut self, change: impl FnOnce(&mut Self)) {
         let before = self.signal();
-        let apu_bit_before = self.counter & 0x1000 != 0;
+        let apu_bit = self.div_apu_bit();
+        let apu_bit_before = self.counter & apu_bit != 0;
         change(self);
         if before && !self.signal() {
             self.increment_tima();
         }
-        if apu_bit_before && self.counter & 0x1000 == 0 {
+        if apu_bit_before && self.counter & apu_bit == 0 {
             self.div_apu += 1;
         }
     }
@@ -192,6 +211,20 @@ mod tests {
         t.tick(1);
         assert_eq!(t.take_div_apu_ticks(), 1, "one per 8192 T-cycles");
         t.tick(crate::CPU_HZ);
+        assert_eq!(t.take_div_apu_ticks(), 512);
+    }
+
+    #[test]
+    fn in_double_speed_div_bit_5_clocks_the_apu_so_it_stays_at_512_hz() {
+        // Double speed: twice the CPU cycles per second, so 2 * CPU_HZ of
+        // them is still one second, and still 512 events.
+        let mut t = Timer::new();
+        t.set_double_speed(true);
+        t.tick(16384 - 1);
+        assert_eq!(t.take_div_apu_ticks(), 0, "not at 8192 any more");
+        t.tick(1);
+        assert_eq!(t.take_div_apu_ticks(), 1);
+        t.tick(2 * crate::CPU_HZ);
         assert_eq!(t.take_div_apu_ticks(), 512);
     }
 

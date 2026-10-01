@@ -622,6 +622,10 @@ impl Apu {
         }
     }
 
+    // TODO(accuracy): on the Game Boy Color, powering off also clears the
+    // length counters, and length writes while off are ignored (blargg
+    // cgb_sound 08 and 11 check this); this does the DMG thing on both.
+    // https://gbdev.io/pandocs/Audio_details.html#power-control
     fn set_power(&mut self, on: bool) {
         if self.power && !on {
             // Off: every register clears (wave RAM stays). On the DMG the
