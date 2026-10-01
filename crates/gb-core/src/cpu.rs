@@ -359,6 +359,33 @@ impl Cpu {
         r
     }
 
+    /// ADD HL, val. H is the carry out of bit 11 and C out of bit 15 (the
+    /// hardware adds the low bytes, then the high bytes with carry). Z is
+    /// left alone, even for a zero result.
+    fn add_hl(&mut self, val: u16) {
+        let hl = self.regs.hl();
+        let (sum, carry) = hl.overflowing_add(val);
+        self.regs.set_flag(FLAG_N, false);
+        self.regs
+            .set_flag(FLAG_H, (hl & 0x0FFF) + (val & 0x0FFF) > 0x0FFF);
+        self.regs.set_flag(FLAG_C, carry);
+        self.regs.set_hl(sum);
+    }
+
+    /// Fetches a signed offset and returns SP + e8, for ADD SP,e8 and
+    /// LD HL,SP+e8. H and C come from adding the offset's raw byte to SP's
+    /// low byte as unsigned 8-bit numbers, whatever the sign: SP + (-1) on
+    /// $0005 sets both. Z and N are cleared.
+    /// https://gbdev.io/pandocs/CPU_Instruction_Set.html
+    fn sp_plus_e8(&mut self, bus: &Bus) -> u16 {
+        let e = self.fetch8(bus);
+        let sp = self.regs.sp;
+        let lo = sp.to_le_bytes()[0];
+        let (_, carry) = lo.overflowing_add(e);
+        self.set_flags(false, false, (lo & 0x0F) + (e & 0x0F) > 0x0F, carry);
+        sp.wrapping_add_signed(i16::from(e as i8))
+    }
+
     /// DAA: after adding or subtracting two BCD numbers (one decimal digit
     /// per nibble), corrects A back to BCD. N says which operation ran; H and
     /// C say which digits overflowed. An addition can also produce a digit
@@ -480,7 +507,12 @@ impl Cpu {
                         self.write_rp(op.p, val);
                         Ok(12)
                     }
-                    _ => MISSING, // ADD HL, rp[p]
+                    // ADD HL, rp[p]
+                    _ => {
+                        let val = self.read_rp(op.p);
+                        self.add_hl(val);
+                        Ok(8)
+                    }
                 },
                 // q=0: LD (BC)/(DE)/(HL+)/(HL-), A
                 // q=1: LD A, (BC)/(DE)/(HL+)/(HL-)
@@ -493,7 +525,19 @@ impl Cpu {
                     }
                     Ok(8)
                 }
-                3 => MISSING, // q=0: INC rp[p]  q=1: DEC rp[p]
+                // q=0: INC rp[p]  q=1: DEC rp[p]. No flags.
+                // TODO(accuracy): with a pair pointing into OAM ($FE00-$FEFF)
+                // during PPU mode 2, the DMG corrupts OAM (the "OAM bug").
+                3 => {
+                    let val = self.read_rp(op.p);
+                    let r = if op.q == 0 {
+                        val.wrapping_add(1)
+                    } else {
+                        val.wrapping_sub(1)
+                    };
+                    self.write_rp(op.p, r);
+                    Ok(8)
+                }
                 // INC r[y]
                 4 => {
                     let val = self.read_r8(bus, op.y);
@@ -576,14 +620,23 @@ impl Cpu {
                         bus.write(addr, self.regs.a);
                         Ok(12)
                     }
-                    5 => MISSING, // ADD SP, e8
+                    // ADD SP, e8
+                    5 => {
+                        self.regs.sp = self.sp_plus_e8(bus);
+                        Ok(16)
+                    }
                     // LDH A, (a8)
                     6 => {
                         let addr = 0xFF00 | u16::from(self.fetch8(bus));
                         self.regs.a = bus.read(addr);
                         Ok(12)
                     }
-                    _ => MISSING, // LD HL, SP+e8
+                    // LD HL, SP+e8
+                    _ => {
+                        let val = self.sp_plus_e8(bus);
+                        self.regs.set_hl(val);
+                        Ok(12)
+                    }
                 },
                 1 => match (op.q, op.p) {
                     // POP rp2[p]
@@ -1334,6 +1387,147 @@ mod tests {
                     let msg = format!("{x} - {y} - {ci}");
                     assert_eq!(cpu.regs.a, bcd(diff), "{msg}");
                     assert_eq!(cpu.regs.f, flags(diff == 0, true, false, borrow), "{msg}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn add_hl_flags_come_from_bits_11_and_15() {
+        let mut cpu = Cpu::new();
+        cpu.regs.set_hl(0x0FFF);
+        cpu.add_hl(0x0001);
+        assert_eq!(cpu.regs.hl(), 0x1000);
+        assert_eq!(cpu.regs.f, flags(false, false, true, false));
+
+        // $00FF + $0001: a carry out of bit 7 doesn't count
+        cpu.regs.set_hl(0x00FF);
+        cpu.add_hl(0x0001);
+        assert_eq!(cpu.regs.f, flags(false, false, false, false));
+
+        cpu.regs.set_hl(0x8000);
+        cpu.add_hl(0x8000);
+        assert_eq!(cpu.regs.hl(), 0x0000);
+        assert_eq!(cpu.regs.f, flags(false, false, false, true));
+    }
+
+    #[test]
+    fn add_hl_leaves_z_alone_and_clears_n() {
+        for z in [false, true] {
+            let mut cpu = Cpu::new();
+            cpu.regs.f = flags(z, true, false, false);
+            cpu.regs.set_hl(0x1234);
+            cpu.add_hl(0x1111);
+            assert_eq!(cpu.regs.f, flags(z, false, false, false));
+        }
+    }
+
+    #[test]
+    fn add_hl_matches_reference_on_interesting_values() {
+        let values = [
+            0x0000, 0x0001, 0x00FF, 0x0100, 0x0F00, 0x0FFF, 0x1000, 0x7FFF, 0x8000, 0x8A23, 0xF000,
+            0xFFFF,
+        ];
+        for a in values {
+            for b in values {
+                let mut cpu = Cpu::new();
+                cpu.regs.set_hl(a);
+                cpu.add_hl(b);
+                let r = u32::from(a) + u32::from(b);
+                let h = (u32::from(a) ^ u32::from(b) ^ r) & 0x1000 != 0;
+                assert_eq!(cpu.regs.hl(), r as u16, "{a:04X} + {b:04X}");
+                assert_eq!(
+                    cpu.regs.f,
+                    flags(false, false, h, r > 0xFFFF),
+                    "{a:04X} + {b:04X}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn add_hl_opcodes_for_every_pair() {
+        for p in 0..4u8 {
+            let opcode = 0x09 | p << 4;
+            let (mut cpu, mut bus) = setup_loaded(&[opcode]);
+            cpu.regs.sp = 0x0F0F;
+            let want = cpu.regs.hl().wrapping_add(cpu.read_rp(p));
+            assert_eq!(cpu.step(&mut bus), Ok(8), "opcode {opcode:02X}");
+            assert_eq!(cpu.regs.hl(), want, "opcode {opcode:02X}");
+        }
+    }
+
+    #[test]
+    fn inc_dec_rr_wrap_and_leave_flags_alone() {
+        for p in 0..4u8 {
+            let (inc, dec) = (0x03 | p << 4, 0x0B | p << 4);
+            let (mut cpu, mut bus) = setup(&[inc, dec, dec]);
+            cpu.write_rp(p, 0xFFFF);
+            cpu.regs.f = 0xF0;
+            assert_eq!(cpu.step(&mut bus), Ok(8), "opcode {inc:02X}");
+            assert_eq!(cpu.read_rp(p), 0x0000, "opcode {inc:02X}");
+            assert_eq!(cpu.step(&mut bus), Ok(8), "opcode {dec:02X}");
+            assert_eq!(cpu.read_rp(p), 0xFFFF, "opcode {dec:02X}");
+            cpu.step(&mut bus).unwrap();
+            assert_eq!(cpu.read_rp(p), 0xFFFE, "opcode {dec:02X}");
+            assert_eq!(cpu.regs.f, 0xF0, "16-bit INC/DEC touch no flags");
+        }
+    }
+
+    #[test]
+    fn sp_plus_e8_flags_come_from_the_low_byte() {
+        // SP + (-1) on $0005: the result goes down, yet $05 + $FF carries
+        // out of both bit 3 and bit 7.
+        let (mut cpu, mut bus) = setup(&[0xF8, 0xFF]); // LD HL, SP-1
+        cpu.regs.sp = 0x0005;
+        assert_eq!(cpu.step(&mut bus), Ok(12));
+        assert_eq!(cpu.regs.hl(), 0x0004);
+        assert_eq!(cpu.regs.sp, 0x0005, "LD HL,SP+e8 leaves SP alone");
+        assert_eq!(cpu.regs.f, flags(false, false, true, true));
+
+        // $FFF8 + 8 = $0000, but Z is always cleared
+        let (mut cpu, mut bus) = setup(&[0xE8, 0x08]); // ADD SP, 8
+        cpu.regs.sp = 0xFFF8;
+        cpu.regs.f = FLAG_Z | FLAG_N;
+        assert_eq!(cpu.step(&mut bus), Ok(16));
+        assert_eq!(cpu.regs.sp, 0x0000);
+        assert_eq!(cpu.regs.f, flags(false, false, true, true));
+        assert_eq!(cpu.regs.pc, 0x0102);
+
+        // $00FF + 1 = $0100: carries out of the low byte, not out of bit 15
+        let (mut cpu, mut bus) = setup(&[0xE8, 0x01]);
+        cpu.regs.sp = 0x00FF;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.regs.sp, 0x0100);
+        assert_eq!(cpu.regs.f, flags(false, false, true, true));
+    }
+
+    #[test]
+    fn sp_plus_e8_matches_reference_for_every_low_byte_and_offset() {
+        let (mut cpu, mut bus) = setup(&[]);
+        for hi in [0x00u8, 0x7F, 0xFF] {
+            for lo in 0..=255u8 {
+                for e in 0..=255u8 {
+                    let sp = u16::from_be_bytes([hi, lo]);
+                    // Fetch the offset from WRAM rather than building a ROM
+                    // for each of the ~200k cases.
+                    bus.write(0xC000, e);
+                    cpu.regs.pc = 0xC000;
+                    cpu.regs.sp = sp;
+                    let got = cpu.sp_plus_e8(&bus);
+
+                    // Reference: signed 16-bit add, flags by the XOR trick
+                    // on the sign-extended offset.
+                    let offset = i32::from(e as i8);
+                    let r = i32::from(sp) + offset;
+                    let x = i32::from(sp) ^ offset ^ r;
+                    let msg = format!("SP={sp:04X} e={e:02X}");
+                    assert_eq!(got, (r & 0xFFFF) as u16, "{msg}");
+                    assert_eq!(
+                        cpu.regs.f,
+                        flags(false, false, x & 0x10 != 0, x & 0x100 != 0),
+                        "{msg}"
+                    );
                 }
             }
         }
