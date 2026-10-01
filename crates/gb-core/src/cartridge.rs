@@ -63,6 +63,13 @@ enum Mbc {
         /// Only cartridge types $0F and $10 have the clock.
         rtc: Option<Rtc>,
     },
+    /// 16 ROM banks and 512 four-bit RAM cells built into the chip.
+    /// https://gbdev.io/pandocs/MBC2.html
+    Mbc2 {
+        ram_enabled: bool,
+        /// 4 bits; 0 behaves as 1.
+        rom_bank: u8,
+    },
     /// https://gbdev.io/pandocs/MBC5.html
     Mbc5 {
         ram_enabled: bool,
@@ -221,11 +228,13 @@ impl Cartridge {
             .trim_end()
             .to_string();
         let cart_type = rom[0x147];
-        let ram_size = match rom[0x149] {
-            0x02 => 0x2000,
-            0x03 => 0x8000,
-            0x04 => 0x20000,
-            0x05 => 0x10000,
+        let ram_size = match (cart_type, rom[0x149]) {
+            // MBC2's RAM is inside the chip; the header says 0.
+            (0x05 | 0x06, _) => 512,
+            (_, 0x02) => 0x2000,
+            (_, 0x03) => 0x8000,
+            (_, 0x04) => 0x20000,
+            (_, 0x05) => 0x10000,
             _ => 0,
         };
         let mbc = match cart_type {
@@ -243,6 +252,11 @@ impl Cartridge {
                 ram_select: 0,
                 latch_prev: 0xFF,
                 rtc: matches!(cart_type, 0x0F | 0x10).then(Rtc::default),
+            },
+            // $05 MBC2, $06 MBC2+BATTERY
+            0x05 | 0x06 => Mbc::Mbc2 {
+                ram_enabled: false,
+                rom_bank: 1,
             },
             // $19 MBC5, $1A +RAM, $1B +RAM+BATTERY, $1C-$1E the same with rumble
             0x19..=0x1E => Mbc::Mbc5 {
@@ -291,7 +305,7 @@ impl Cartridge {
                 (bank % self.rom_banks()) * ROM_BANK + (addr as usize & 0x3FFF)
             }
             // $0000-$3FFF is always bank 0; $4000-$7FFF any bank, $20/$40/$60 too.
-            Mbc::Mbc3 { rom_bank, .. } => {
+            Mbc::Mbc2 { rom_bank, .. } | Mbc::Mbc3 { rom_bank, .. } => {
                 let bank = if addr < 0x4000 { 0 } else { rom_bank as usize };
                 (bank % self.rom_banks()) * ROM_BANK + (addr as usize & 0x3FFF)
             }
@@ -339,6 +353,16 @@ impl Cartridge {
                     *latch_prev = val;
                 }
             },
+            // One register area for both: address bit 8 clear is RAM enable,
+            // set is the ROM bank. $4000-$7FFF does nothing.
+            Mbc::Mbc2 {
+                ram_enabled,
+                rom_bank,
+            } => match addr {
+                0x0000..=0x3FFF if addr & 0x0100 == 0 => *ram_enabled = val & 0x0F == 0x0A,
+                0x0000..=0x3FFF => *rom_bank = (val & 0x0F).max(1),
+                _ => {}
+            },
             Mbc::Mbc5 {
                 ram_enabled,
                 rom_bank,
@@ -358,6 +382,14 @@ impl Cartridge {
     fn ram_target(&self, addr: u16) -> RamTarget {
         let bank = match &self.mbc {
             Mbc::None => 0,
+            // 512 cells repeated across $A000-$BFFF: only address bits 0-8 count.
+            Mbc::Mbc2 { ram_enabled, .. } => {
+                return if *ram_enabled {
+                    RamTarget::Ram(usize::from(addr & 0x01FF))
+                } else {
+                    RamTarget::None
+                };
+            }
             Mbc::Mbc1 {
                 ram_enabled: false, ..
             }
@@ -391,6 +423,10 @@ impl Cartridge {
 
     pub fn read_ram(&self, addr: u16) -> u8 {
         match self.ram_target(addr) {
+            // MBC2's cells are 4 bits wide; the upper bits aren't connected and
+            // read as 1s. (Pan Docs calls them undefined; Mooneye's
+            // mbc2/bits_unused expects 1s.)
+            RamTarget::Ram(i) if matches!(self.mbc, Mbc::Mbc2 { .. }) => 0xF0 | self.ram[i],
             RamTarget::Ram(i) => self.ram[i],
             RamTarget::Rtc(reg) => match &self.mbc {
                 Mbc::Mbc3 { rtc: Some(rtc), .. } => rtc.latched.get(reg),
@@ -402,6 +438,7 @@ impl Cartridge {
 
     pub fn write_ram(&mut self, addr: u16, val: u8) {
         match self.ram_target(addr) {
+            RamTarget::Ram(i) if matches!(self.mbc, Mbc::Mbc2 { .. }) => self.ram[i] = val & 0x0F,
             RamTarget::Ram(i) => self.ram[i] = val,
             RamTarget::Rtc(reg) => {
                 if let Mbc::Mbc3 { rtc: Some(rtc), .. } = &mut self.mbc {
@@ -483,8 +520,8 @@ pub(crate) mod tests {
     #[test]
     fn rejects_unsupported_type() {
         assert_eq!(
-            Cartridge::from_rom(make_rom(0x05, 2, 0)).err(),
-            Some(CartridgeError::UnsupportedType(0x05))
+            Cartridge::from_rom(make_rom(0x22, 2, 0)).err(),
+            Some(CartridgeError::UnsupportedType(0x22))
         );
     }
 
@@ -511,6 +548,48 @@ pub(crate) mod tests {
     /// Which ROM bank is mapped at `base` ($0000 or $4000), from make_rom's tags.
     fn bank_at(cart: &Cartridge, base: u16) -> u16 {
         u16::from_le_bytes([cart.read_rom(base), cart.read_rom(base + 1)])
+    }
+
+    #[test]
+    fn mbc2_address_bit_8_picks_ram_enable_or_rom_bank() {
+        let mut cart = Cartridge::from_rom(make_rom(0x06, 16, 0)).unwrap();
+        assert_eq!(bank_at(&cart, 0x4000), 1, "bank 1 mapped at power-on");
+        cart.write_rom(0x2100, 0x05); // bit 8 set: ROM bank
+        assert_eq!(bank_at(&cart, 0x4000), 5);
+        cart.write_rom(0x0100, 0x0F); // anywhere in $0000-$3FFF with bit 8 set
+        assert_eq!(bank_at(&cart, 0x4000), 15);
+        cart.write_rom(0x3F00, 0x13); // only 4 bits
+        assert_eq!(bank_at(&cart, 0x4000), 3);
+        cart.write_rom(0x2100, 0x00);
+        assert_eq!(bank_at(&cart, 0x4000), 1, "0 means 1");
+        cart.write_rom(0x2000, 0x07); // bit 8 clear: that's RAM enable
+        assert_eq!(bank_at(&cart, 0x4000), 1, "not a bank write");
+        cart.write_rom(0x4100, 0x07); // $4000-$7FFF does nothing
+        assert_eq!(bank_at(&cart, 0x4000), 1);
+        assert_eq!(bank_at(&cart, 0x0000), 0, "$0000-$3FFF is always bank 0");
+    }
+
+    #[test]
+    fn mbc2_ram_is_512_nibbles_repeated_across_a000_bfff() {
+        // The header's RAM size says 0: MBC2's RAM is inside the chip.
+        let mut cart = Cartridge::from_rom(make_rom(0x06, 4, 0)).unwrap();
+        cart.write_ram(0xA000, 0x05);
+        assert_eq!(cart.read_ram(0xA000), 0xFF, "disabled at power-on");
+        cart.write_rom(0x0000, 0x1A); // low nibble $A, bit 8 clear: enable
+        cart.write_ram(0xA000, 0x3C);
+        assert_eq!(cart.read_ram(0xA000), 0xFC, "4 bits kept; the top reads 1s");
+        cart.write_ram(0xA1FF, 0x07);
+        assert_eq!(cart.read_ram(0xA1FF), 0xF7);
+        assert_eq!(cart.read_ram(0xA200), 0xFC, "$A200 echoes $A000");
+        assert_eq!(cart.read_ram(0xBFFF), 0xF7, "$BFFF echoes $A1FF");
+        cart.write_ram(0xB000, 0x09);
+        assert_eq!(
+            cart.read_ram(0xA000),
+            0xF9,
+            "writes through the echo land too"
+        );
+        cart.write_rom(0x0000, 0x0B);
+        assert_eq!(cart.read_ram(0xA000), 0xFF, "any other value disables");
     }
 
     #[test]
