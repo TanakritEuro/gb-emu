@@ -237,9 +237,40 @@ main > * { min-width: 0; }
 }
 .flags span.on { background: var(--accent); border-color: var(--accent); color: var(--bg); }
 .disasm { margin: 0; overflow-x: auto; white-space: pre; }
-.disasm div:first-child { color: var(--accent); }
-.disasm div:first-child::before { content: "▶ "; }
-.disasm div:not(:first-child)::before { content: "  "; }
+/* A gutter for ▶ (the next instruction) and ● (a breakpoint). */
+.disasm div { cursor: pointer; border-radius: 3px; }
+.disasm div:hover { background: #2c343c; }
+.disasm div::before { content: ""; display: inline-block; width: 3ch; }
+.disasm .current { color: var(--accent); }
+.disasm .current::before { content: "▶"; }
+.disasm .bp::before { content: "●"; color: var(--error); }
+.disasm .bp.current::before { content: "●▶"; }
+
+/* Breakpoint list, under the flags */
+.bps { margin-top: 12px; display: grid; gap: 6px; }
+.bps input {
+  font: 13px ui-monospace, monospace;
+  padding: 4px 6px;
+  width: 100%;
+  min-width: 0;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid #3a444e;
+  border-radius: 6px;
+}
+.bps input.invalid { border-color: var(--error); }
+.bp-list { list-style: none; margin: 0; padding: 0; }
+.bp-list li { display: flex; align-items: center; gap: 8px; }
+.bp-list li:not(.muted)::before { content: "●"; color: var(--error); }
+.bp-list button {
+  font: inherit;
+  padding: 0 4px;
+  color: var(--muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+.bp-list button:hover { color: var(--error); }
 
 /* Memory hex view */
 .memory > :not(summary) { margin-top: 8px; }

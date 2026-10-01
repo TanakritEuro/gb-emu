@@ -3,7 +3,7 @@
 //! Errors become thrown JS `Error`s, so web/main.js can show messages like
 //! "illegal opcode DD at $0150" right on the page.
 
-use gb_core::{Button, GameBoy, CPU_HZ};
+use gb_core::{Button, FrameEnd, GameBoy, CPU_HZ};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -20,9 +20,12 @@ impl Emulator {
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
-    pub fn run_frame(&mut self) -> Result<(), JsError> {
+    /// Runs one frame. Returns true if it stopped early at a breakpoint
+    /// (see `set_breakpoint`).
+    pub fn run_frame(&mut self) -> Result<bool, JsError> {
         self.gb
             .run_frame()
+            .map(|end| end == FrameEnd::Breakpoint)
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
@@ -108,6 +111,18 @@ impl Emulator {
         self.gb
             .step_instruction(CPU_HZ)
             .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Sets (`on`) or clears a breakpoint: `run_frame` stops before running
+    /// the instruction at `addr` (in whichever ROM bank is mapped there).
+    pub fn set_breakpoint(&mut self, addr: u16, on: bool) {
+        self.gb.set_breakpoint(addr, on);
+    }
+
+    /// Makes the next `run_frame` run the instruction at PC even if it has a
+    /// breakpoint. Call it when continuing from a pause.
+    pub fn resume_past_breakpoint(&mut self) {
+        self.gb.resume_past_breakpoint();
     }
 
     /// A snapshot of the CPU registers.

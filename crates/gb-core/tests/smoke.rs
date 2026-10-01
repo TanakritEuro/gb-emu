@@ -1,6 +1,6 @@
 //! End-to-end checks through the public API.
 
-use gb_core::{cpu::CpuError, GameBoy, CYCLES_PER_FRAME};
+use gb_core::{cpu::CpuError, FrameEnd, GameBoy, CYCLES_PER_FRAME};
 
 /// A 32 KiB ROM-only cartridge with a valid header and `code` at $0150.
 /// The entry point at $0100 is NOP; JP $0150, like real games.
@@ -132,6 +132,85 @@ fn peeking_reads_memory_without_running_anything() {
         (0, 1),
         "ROM only"
     );
+}
+
+/// $0150 LD A,1 ; $0152 INC A ; $0153 JR $0152 (forever)
+const COUNTER: [u8; 5] = [0x3E, 0x01, 0x3C, 0x18, 0xFD];
+
+#[test]
+fn a_breakpoint_stops_before_its_instruction_and_resuming_runs_it() {
+    let mut gb = GameBoy::new(rom(&COUNTER)).unwrap();
+    gb.set_breakpoint(0x0152, true);
+    assert_eq!(gb.run_frame(), Ok(FrameEnd::Breakpoint));
+    assert_eq!(
+        (gb.cpu().regs.pc, gb.cpu().regs.a),
+        (0x0152, 1),
+        "INC A not run yet"
+    );
+    // Resuming runs INC A rather than stopping on it again, and stops when
+    // the loop comes back round.
+    assert_eq!(gb.run_frame(), Ok(FrameEnd::Breakpoint));
+    assert_eq!((gb.cpu().regs.pc, gb.cpu().regs.a), (0x0152, 2));
+    // A debugger step from there, then running, stops again next time round.
+    gb.step_instruction(CYCLES_PER_FRAME).unwrap();
+    assert_eq!(gb.cpu().regs.pc, 0x0153);
+    assert_eq!(gb.run_frame(), Ok(FrameEnd::Breakpoint));
+    assert_eq!((gb.cpu().regs.pc, gb.cpu().regs.a), (0x0152, 3));
+}
+
+#[test]
+fn a_breakpoint_on_the_first_instruction_of_a_frame_still_stops() {
+    // Games that wait for VBlank start every frame at the same PC, so a run
+    // must only skip the check when the debugger stopped it there.
+    let mut gb = GameBoy::new(rom(&COUNTER)).unwrap();
+    gb.set_breakpoint(0x0100, true);
+    assert_eq!(gb.run_frame(), Ok(FrameEnd::Breakpoint));
+    assert_eq!(gb.cpu().regs.pc, 0x0100);
+}
+
+#[test]
+fn resuming_from_a_pause_gets_past_a_breakpoint_set_right_there() {
+    let mut gb = GameBoy::new(rom(&COUNTER)).unwrap();
+    gb.run_frame().unwrap(); // paused somewhere in the loop
+    let (pc, a) = (gb.cpu().regs.pc, gb.cpu().regs.a);
+    gb.set_breakpoint(pc, true);
+    assert_eq!(
+        gb.run_frame(),
+        Ok(FrameEnd::Breakpoint),
+        "without: stops at once"
+    );
+    assert_eq!(gb.cpu().regs.a, a, "having run nothing");
+    // The same again, but continuing the way a debugger's Resume does.
+    let mut gb = GameBoy::new(rom(&COUNTER)).unwrap();
+    gb.run_frame().unwrap();
+    gb.set_breakpoint(pc, true);
+    gb.resume_past_breakpoint();
+    assert_eq!(gb.run_frame(), Ok(FrameEnd::Breakpoint));
+    assert_eq!(gb.cpu().regs.pc, pc, "stopped next time round");
+    assert_eq!(gb.cpu().regs.a, a.wrapping_add(1), "after one more loop");
+}
+
+#[test]
+fn breakpoints_can_be_listed_and_cleared() {
+    let mut gb = GameBoy::new(rom(&COUNTER)).unwrap();
+    gb.set_breakpoint(0x0153, true);
+    gb.set_breakpoint(0x0150, true);
+    gb.set_breakpoint(0x0150, true);
+    assert_eq!(gb.breakpoints().collect::<Vec<_>>(), [0x0150, 0x0153]);
+    gb.set_breakpoint(0x0153, false);
+    gb.set_breakpoint(0x0150, false);
+    assert_eq!(gb.breakpoints().count(), 0);
+    assert_eq!(gb.run_frame(), Ok(FrameEnd::Done));
+}
+
+#[test]
+fn a_breakpoint_after_halt_waits_for_the_cpu_to_wake() {
+    // HALT with IE = 0 never wakes: PC sits on $0151 the whole time, but the
+    // instruction there never runs, so the frame runs to its end.
+    let mut gb = GameBoy::new(rom(&[0x76, 0x00])).unwrap();
+    gb.set_breakpoint(0x0151, true);
+    assert_eq!(gb.run_frame(), Ok(FrameEnd::Done));
+    assert!(gb.cpu().halted);
 }
 
 #[test]

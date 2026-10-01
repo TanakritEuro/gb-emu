@@ -56,6 +56,9 @@ or M mutes it. Fast-forward is silent.
 The Debugger panel under the screen shows the CPU registers, flags and the next instructions.
 Step (or N) pauses and runs one instruction; while the CPU sleeps in HALT, one step runs until
 an interrupt wakes it. Step frame runs one frame.
+Click an instruction to set a breakpoint there (or type an address under Breakpoints): the game
+pauses just before running it. Resume runs on to the next one. Breakpoints are CPU addresses, so
+one in $4000-$7FFF stops in whichever ROM bank is mapped there.
 Under that, a memory view shows 256 bytes at a time, live: type an address (`C000`, `PC`, `LY`)
 and press Enter, jump to a region, or follow PC, SP or HL. Bytes the game just wrote light up;
 click one to see its value and what it is.

@@ -74,6 +74,12 @@
         <div>
           <dl id="regs" class="regs"></dl>
           <div id="flags" class="flags"></div>
+          <div class="bps">
+            <span class="muted">Breakpoints</span>
+            <input id="bp-addr" type="text" size="10" spellcheck="false" autocomplete="off"
+                   placeholder="Add: 0150, PC…" aria-label="Add a breakpoint (Enter)">
+            <ul id="bp-list" class="bp-list"></ul>
+          </div>
         </div>
         <pre id="disasm" class="disasm" aria-label="Next instructions"></pre>
       </div>

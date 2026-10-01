@@ -1,10 +1,11 @@
 // The debugger panel: CPU registers, flags and the next few instructions,
-// plus the memory view (memview.js) and the VRAM viewer (vramview.js).
+// breakpoints, plus the memory view (memview.js) and the VRAM viewer
+// (vramview.js).
 // The formatting helpers are plain functions, tested with
 // node --test "web/*.test.js"; only DebugPanel touches the page.
 
-/** `n` as upper-case hex, zero-padded to `digits`. */
-export const hex = (n, digits) => n.toString(16).toUpperCase().padStart(digits, "0");
+import { hex } from "./format.js";
+import { parseAddress } from "./memview.js";
 
 /** The register pairs as [name, "1234"], from an Emulator.cpu_state(). */
 export function registerPairs(s) {
@@ -30,9 +31,37 @@ export const DISASM_LINES = 12;
 
 export class DebugPanel {
   /** `els`: { panel (the <details>), regs, flags, disasm, note, memory (a
-   * MemoryView), vram (a VramView) }. */
+   * MemoryView), vram (a VramView), breakpoints (a BreakpointList), bpAddr
+   * (an input), bpList (a <ul>) }. */
   constructor(els) {
     this.els = els;
+    this.emu = null; // the one last shown, for breakpoint edits
+    this.regs = {}; // its registers, so "PC" can be typed as an address
+    // Clicking an instruction toggles a breakpoint on it.
+    els.disasm.addEventListener("click", (e) => {
+      const line = e.target.closest("[data-addr]");
+      if (line) this.editBreakpoint(Number(line.dataset.addr), "toggle");
+    });
+    els.bpAddr.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      const addr = parseAddress(e.target.value, this.regs);
+      e.target.classList.toggle("invalid", addr === null);
+      if (addr === null) return;
+      e.target.value = "";
+      this.editBreakpoint(addr, true);
+    });
+    els.bpList.addEventListener("click", (e) => {
+      const button = e.target.closest("button[data-addr]");
+      if (button) this.editBreakpoint(Number(button.dataset.addr), false);
+    });
+  }
+
+  /** Sets (true), clears (false) or toggles ("toggle") the breakpoint at `addr`. */
+  editBreakpoint(addr, on) {
+    const list = this.els.breakpoints;
+    if (on === "toggle") list.toggle(addr, this.emu);
+    else list.set(addr, on, this.emu);
+    this.update(this.emu);
   }
 
   get open() {
@@ -41,7 +70,9 @@ export class DebugPanel {
 
   /** Shows `emu`'s current state; does nothing while the panel is closed. */
   update(emu) {
+    this.emu = emu;
     if (!this.open) return;
+    this.showBreakpoints();
     if (!emu) {
       this.els.regs.replaceChildren();
       this.els.flags.replaceChildren();
@@ -50,6 +81,13 @@ export class DebugPanel {
     }
     const state = emu.cpu_state();
     try {
+      this.regs = {
+        PC: state.pc,
+        SP: state.sp,
+        HL: (state.h << 8) | state.l,
+        BC: (state.b << 8) | state.c,
+        DE: (state.d << 8) | state.e,
+      };
       this.els.regs.replaceChildren(
         ...registerPairs(state).flatMap(([name, value]) => [el("dt", name), el("dd", value)]),
       );
@@ -61,13 +99,44 @@ export class DebugPanel {
           return badge;
         }),
       );
-      const lines = emu.disassemble(state.pc, DISASM_LINES);
-      this.els.disasm.replaceChildren(...lines.map((line) => el("div", line)));
+      // Each line starts with its address: "0150  3E 01     LD A,$01".
+      const lines = emu.disassemble(state.pc, DISASM_LINES).map((text, i) => {
+        const line = el("div", text);
+        const addr = parseInt(text.slice(0, 4), 16);
+        line.dataset.addr = addr;
+        line.classList.toggle("current", i === 0);
+        line.classList.toggle("bp", this.els.breakpoints.has(addr));
+        line.title = "Click to set or clear a breakpoint";
+        return line;
+      });
+      this.els.disasm.replaceChildren(...lines);
       this.els.memory.update(emu, state);
       this.els.vram.update(emu);
     } finally {
       state.free();
     }
+  }
+
+  /** The list under the flags: one row per breakpoint, with a remove button. */
+  showBreakpoints() {
+    const addrs = this.els.breakpoints.sorted();
+    if (!addrs.length) {
+      const hint = el("li", "none: click an instruction");
+      hint.className = "muted";
+      this.els.bpList.replaceChildren(hint);
+      return;
+    }
+    this.els.bpList.replaceChildren(
+      ...addrs.map((addr) => {
+        const row = el("li", `$${hex(addr, 4)}`);
+        const remove = el("button", "✕");
+        remove.type = "button";
+        remove.dataset.addr = addr;
+        remove.title = `Remove the breakpoint at $${hex(addr, 4)}`;
+        row.append(remove);
+        return row;
+      }),
+    );
   }
 
   /** A short message under the buttons, e.g. how long the last step took. */

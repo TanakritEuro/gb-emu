@@ -16,6 +16,7 @@ pub mod timer;
 
 use bus::{interrupt, Bus};
 use cpu::{Cpu, CpuError};
+use std::collections::BTreeSet;
 
 pub use cartridge::{Cartridge, CartridgeError, SaveError};
 pub use disasm::Instruction;
@@ -32,6 +33,22 @@ pub const CYCLES_PER_FRAME: u32 = 70_224;
 pub struct GameBoy {
     cpu: Cpu,
     bus: Bus,
+    /// Addresses where [`run_frame`](Self::run_frame) stops before running
+    /// the instruction there. Debugger-only: the hardware has nothing like it.
+    breakpoints: BTreeSet<u16>,
+    /// The debugger stopped the CPU here (a breakpoint, or a step), so the
+    /// next run starts by running this instruction instead of stopping on it.
+    resume_here: bool,
+}
+
+/// How a call to [`GameBoy::run_frame`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameEnd {
+    /// A whole frame's worth of T-cycles ran.
+    Done,
+    /// PC reached a breakpoint, partway through the frame. The instruction
+    /// there hasn't run yet.
+    Breakpoint,
 }
 
 impl GameBoy {
@@ -44,6 +61,8 @@ impl GameBoy {
         Ok(Self {
             cpu,
             bus: Bus::new(cart),
+            breakpoints: BTreeSet::new(),
+            resume_here: false,
         })
     }
 
@@ -64,16 +83,60 @@ impl GameBoy {
         while self.cpu.halted && cycles < max_cycles {
             cycles += self.step()?;
         }
+        // Stopped by the debugger: running on from here mustn't stop here.
+        self.resume_here = true;
         Ok(cycles)
     }
 
-    /// Runs until one frame's worth of T-cycles has elapsed.
-    pub fn run_frame(&mut self) -> Result<(), CpuError> {
+    /// Runs until one frame's worth of T-cycles has elapsed, or until PC
+    /// reaches a breakpoint.
+    pub fn run_frame(&mut self) -> Result<FrameEnd, CpuError> {
         let mut elapsed = 0;
         while elapsed < CYCLES_PER_FRAME {
+            if self.at_breakpoint() {
+                self.resume_here = true;
+                return Ok(FrameEnd::Breakpoint);
+            }
             elapsed += self.step()?;
         }
-        Ok(())
+        Ok(FrameEnd::Done)
+    }
+
+    /// Whether the instruction at PC is about to run with a breakpoint on
+    /// it. While HALT sleeps, PC sits on the next instruction without
+    /// running it, so that doesn't count. Clears `resume_here` (the first
+    /// check after the debugger stopped is the instruction it stopped on).
+    fn at_breakpoint(&mut self) -> bool {
+        let resuming = std::mem::take(&mut self.resume_here);
+        !resuming
+            && !self.breakpoints.is_empty()
+            && !self.cpu.halted
+            && self.breakpoints.contains(&self.cpu.regs.pc)
+    }
+
+    /// Makes the next [`run_frame`](Self::run_frame) run the instruction at
+    /// PC even if it has a breakpoint, like stopping there would. For a
+    /// debugger continuing from a pause: it should always get past where it
+    /// is, even if a breakpoint was just set right there.
+    pub fn resume_past_breakpoint(&mut self) {
+        self.resume_here = true;
+    }
+
+    /// Sets (`on`) or clears a breakpoint: [`run_frame`](Self::run_frame)
+    /// stops before running the instruction at `addr`. Addresses are CPU
+    /// addresses, so one in $4000-$7FFF stops in whichever ROM bank is
+    /// mapped there at the time.
+    pub fn set_breakpoint(&mut self, addr: u16, on: bool) {
+        if on {
+            self.breakpoints.insert(addr);
+        } else {
+            self.breakpoints.remove(&addr);
+        }
+    }
+
+    /// The breakpoints, lowest address first.
+    pub fn breakpoints(&self) -> impl Iterator<Item = u16> + '_ {
+        self.breakpoints.iter().copied()
     }
 
     /// The screen as RGBA bytes, row-major, 160 × 144 × 4. The buffer stays at

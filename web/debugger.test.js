@@ -1,7 +1,8 @@
 // Run with: node --test "web/*.test.js"
 import test from "node:test";
 import assert from "node:assert/strict";
-import { hex, registerPairs, flagStates } from "./debugger.js";
+import { registerPairs, flagStates } from "./debugger.js";
+import { hex } from "./format.js";
 
 test("hex pads and upper-cases", () => {
   assert.equal(hex(0x3e, 2), "3E");

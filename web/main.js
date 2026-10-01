@@ -10,6 +10,8 @@ import { AudioOut } from "./audio.js";
 import { DebugPanel } from "./debugger.js";
 import { MemoryView } from "./memview.js";
 import { VramView } from "./vramview.js";
+import { BreakpointList } from "./breakpoints.js";
+import { hex } from "./format.js";
 
 const audio = new AudioOut();
 
@@ -29,7 +31,12 @@ const memory = new MemoryView(
   },
   () => debug.update(emu),
 );
+// Kept here, not just in the emulator: Reset swaps in a new one.
+const breakpoints = new BreakpointList();
 const debug = new DebugPanel({
+  breakpoints,
+  bpAddr: $("bp-addr"),
+  bpList: $("bp-list"),
   panel: $("debug-panel"),
   regs: $("regs"),
   flags: $("flags"),
@@ -98,6 +105,7 @@ async function loadRom(file) {
   $("title").textContent = emu.title() || file.name;
   $("hint").hidden = true;
   restoreStoredSave();
+  breakpoints.clear(emu); // a different game: the old addresses mean nothing
   setPaused(false);
   showStatus();
 }
@@ -120,6 +128,7 @@ function boot(bytes, what, save = null) {
   stop();
   emu?.free();
   emu = next;
+  breakpoints.applyTo(emu);
   $("error").hidden = true;
   $("serial").textContent = "";
   emu.set_sample_rate(audio.sampleRate);
@@ -194,7 +203,11 @@ function setPaused(on) {
   paused = on;
   if (paused) stop();
   else if (emu && !rafId) start();
-  if (!paused) debug.note("");
+  if (!paused) {
+    // Continuing gets past where it paused, even onto a breakpoint set there.
+    emu?.resume_past_breakpoint();
+    debug.note("");
+  }
   showPaused();
   showStatus();
   debug.update(emu);
@@ -246,9 +259,11 @@ function loop(now) {
   lastTime = now;
   syncButtons(); // gamepads have no events: poll them every frame
   let ran = 0;
+  let hit = false; // stopped at a breakpoint
   try {
-    for (; ran < frames; ran++) {
-      emu.run_frame();
+    while (ran < frames && !hit) {
+      hit = emu.run_frame();
+      ran++;
       const sound = emu.take_audio(); // always drain; only play it when paced
       if (audioPaced) audio.push(sound);
     }
@@ -265,7 +280,26 @@ function loop(now) {
   }
   collectSerial();
   countFps(now, ran);
+  if (hit) {
+    showBreakpointHit();
+    return;
+  }
   rafId = requestAnimationFrame(loop);
+}
+
+/** Pauses at a breakpoint and opens the debugger there. */
+function showBreakpointHit() {
+  setPaused(true);
+  $("debug-panel").open = true;
+  debug.note(`stopped at the breakpoint at $${hex(pcNow(), 4)}`);
+  debug.update(emu);
+}
+
+function pcNow() {
+  const state = emu.cpu_state();
+  const pc = state.pc;
+  state.free();
+  return pc;
 }
 
 function draw() {
@@ -429,8 +463,8 @@ function stepInstruction() {
 
 function stepFrame() {
   debugRun(() => {
-    emu.run_frame();
-    return "1 frame";
+    emu.resume_past_breakpoint();
+    return emu.run_frame() ? `stopped at the breakpoint at $${hex(pcNow(), 4)}` : "1 frame";
   });
 }
 

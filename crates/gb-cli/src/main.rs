@@ -110,7 +110,7 @@ fn main() -> ExitCode {
         for frame in 1..=args.frames {
             let result = match trace.as_mut() {
                 Some(t) => run_frame_traced(&mut gb, t),
-                None => gb.run_frame(),
+                None => gb.run_frame().map(|_| ()), // no breakpoints set here
             };
 
             let sound = gb.take_audio();

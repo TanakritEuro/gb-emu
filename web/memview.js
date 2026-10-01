@@ -1,7 +1,7 @@
 // The debugger's memory hex view: 256 bytes of the CPU's address space,
 // live while the game runs. The helpers at the top are plain functions,
 // tested with node --test "web/*.test.js"; MemoryView touches the page.
-import { hex } from "./debugger.js";
+import { hex } from "./format.js";
 
 export const COLS = 16;
 export const ROWS = 16;

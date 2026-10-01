@@ -1,7 +1,7 @@
 // The debugger's VRAM viewer: every tile, and a whole background map with
 // the part on screen outlined. The helpers at the top are plain functions,
 // tested with node --test "web/*.test.js"; VramView touches the page.
-import { hex } from "./debugger.js";
+import { hex } from "./format.js";
 
 export const SHEET_W = 128; // 16 tiles across
 export const SHEET_H = 192; // 24 tiles down: all 384
