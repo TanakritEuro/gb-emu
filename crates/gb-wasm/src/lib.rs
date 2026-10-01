@@ -3,7 +3,7 @@
 //! Errors become thrown JS `Error`s, so web/main.js can show messages like
 //! "illegal opcode DD at $0150" right on the page.
 
-use gb_core::{Button, GameBoy};
+use gb_core::{Button, GameBoy, CPU_HZ};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -98,6 +98,74 @@ impl Emulator {
     pub fn take_serial(&mut self) -> String {
         self.gb.take_serial_output()
     }
+
+    // Debugger
+
+    /// Runs one instruction, or dispatches an interrupt, and returns the
+    /// T-cycles that took. In HALT it runs until an interrupt wakes the CPU,
+    /// giving up after a second of Game Boy time.
+    pub fn step(&mut self) -> Result<u32, JsError> {
+        self.gb
+            .step_instruction(CPU_HZ)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// A snapshot of the CPU registers.
+    pub fn cpu_state(&self) -> CpuState {
+        let cpu = self.gb.cpu();
+        let r = &cpu.regs;
+        CpuState {
+            a: r.a,
+            f: r.f,
+            b: r.b,
+            c: r.c,
+            d: r.d,
+            e: r.e,
+            h: r.h,
+            l: r.l,
+            sp: r.sp,
+            pc: r.pc,
+            ime: cpu.ime,
+            halted: cpu.halted,
+        }
+    }
+
+    /// `count` instructions from `addr`, one line each, like
+    /// `"0150  3E 01     LD A,$01"`.
+    pub fn disassemble(&self, addr: u16, count: usize) -> Vec<String> {
+        let mut addr = addr;
+        let mut lines = Vec::with_capacity(count);
+        for _ in 0..count {
+            let ins = self.gb.disassemble(addr);
+            let bytes: Vec<String> = (0..ins.len)
+                .map(|i| format!("{:02X}", self.gb.bus().read(addr.wrapping_add(i))))
+                .collect();
+            lines.push(format!("{addr:04X}  {:<9} {}", bytes.join(" "), ins.text));
+            addr = addr.wrapping_add(ins.len);
+        }
+        lines
+    }
+}
+
+/// The CPU registers at one moment, for the debugger panel.
+#[wasm_bindgen]
+#[derive(Clone, Copy)]
+pub struct CpuState {
+    pub a: u8,
+    /// Flags in the top four bits: Z N H C.
+    pub f: u8,
+    pub b: u8,
+    pub c: u8,
+    pub d: u8,
+    pub e: u8,
+    pub h: u8,
+    pub l: u8,
+    pub sp: u16,
+    pub pc: u16,
+    /// Interrupt master enable.
+    pub ime: bool,
+    /// Asleep in HALT, waiting for an interrupt.
+    pub halted: bool,
 }
 
 /// JS time (a float of seconds) as whole Unix seconds; nonsense becomes 0.

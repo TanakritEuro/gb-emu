@@ -207,3 +207,36 @@ summary { cursor: pointer; color: var(--muted); }
   font: 13px/1.4 ui-monospace, monospace;
 }
 main > * { min-width: 0; }
+
+/* Debugger panel */
+#debug-panel .toolbar { margin-top: 8px; align-items: center; }
+#debug-note { font-size: 13px; font-variant-numeric: tabular-nums; }
+.debug {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px 24px;
+  margin-top: 12px;
+  font: 13px/1.5 ui-monospace, monospace;
+}
+@media (max-width: 480px) { .debug { grid-template-columns: 1fr; } }
+.regs {
+  display: grid;
+  grid-template-columns: auto auto;
+  justify-content: start;
+  gap: 0 12px;
+  margin: 0;
+}
+.regs dt { color: var(--muted); }
+.regs dd { margin: 0; }
+.flags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+.flags span {
+  padding: 0 6px;
+  border: 1px solid #3a444e;
+  border-radius: 4px;
+  color: var(--muted);
+}
+.flags span.on { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+.disasm { margin: 0; overflow-x: auto; white-space: pre; }
+.disasm div:first-child { color: var(--accent); }
+.disasm div:first-child::before { content: "▶ "; }
+.disasm div:not(:first-child)::before { content: "  "; }

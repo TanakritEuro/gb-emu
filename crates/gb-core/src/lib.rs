@@ -9,6 +9,7 @@ pub mod apu;
 pub mod bus;
 pub mod cartridge;
 pub mod cpu;
+pub mod disasm;
 pub mod joypad;
 pub mod ppu;
 pub mod timer;
@@ -17,6 +18,7 @@ use bus::{interrupt, Bus};
 use cpu::{Cpu, CpuError};
 
 pub use cartridge::{Cartridge, CartridgeError, SaveError};
+pub use disasm::Instruction;
 pub use joypad::Button;
 
 pub const SCREEN_WIDTH: usize = 160;
@@ -50,6 +52,18 @@ impl GameBoy {
     pub fn step(&mut self) -> Result<u32, CpuError> {
         let cycles = self.cpu.step(&mut self.bus)?;
         self.bus.tick(cycles);
+        Ok(cycles)
+    }
+
+    /// A debugger's step: like [`step`](Self::step), but a CPU asleep in HALT
+    /// keeps running until an interrupt wakes it (or `max_cycles` pass), so
+    /// each call ends where an instruction or interrupt handler starts.
+    /// Returns the T-cycles that passed.
+    pub fn step_instruction(&mut self, max_cycles: u32) -> Result<u32, CpuError> {
+        let mut cycles = self.step()?;
+        while self.cpu.halted && cycles < max_cycles {
+            cycles += self.step()?;
+        }
         Ok(cycles)
     }
 
@@ -149,6 +163,12 @@ impl GameBoy {
             mem(2),
             mem(3)
         )
+    }
+
+    /// The instruction at `addr`, as text. Reading memory this way has no
+    /// side effects, so a debugger can call it at any time.
+    pub fn disassemble(&self, addr: u16) -> Instruction {
+        disasm::disassemble(|a| self.bus.read(a), addr)
     }
 
     pub fn cpu(&self) -> &Cpu {

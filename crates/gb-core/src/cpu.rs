@@ -110,16 +110,16 @@ impl std::error::Error for CpuError {}
 /// Search "decoding gbz80 opcodes" for the full table in this notation, or see
 /// the per-block tables at https://gbdev.io/pandocs/CPU_Instruction_Set.html
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Opcode {
-    x: u8,
-    y: u8,
-    z: u8,
-    p: u8,
-    q: u8,
+pub(crate) struct Opcode {
+    pub(crate) x: u8,
+    pub(crate) y: u8,
+    pub(crate) z: u8,
+    pub(crate) p: u8,
+    pub(crate) q: u8,
 }
 
 impl Opcode {
-    fn new(byte: u8) -> Self {
+    pub(crate) fn new(byte: u8) -> Self {
         let y = (byte >> 3) & 7;
         Self {
             x: byte >> 6,

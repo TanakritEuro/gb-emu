@@ -52,6 +52,10 @@ emulators (BGB/VBA-M format, including the MBC3 clock, which catches up on time 
 Sound starts with your first click, tap or key press (browsers require one). The Sound button
 or M mutes it. Fast-forward is silent.
 
+The Debugger panel under the screen shows the CPU registers, flags and the next instructions.
+Step (or N) pauses and runs one instruction; while the CPU sleeps in HALT, one step runs until
+an interrupt wakes it. Step frame runs one frame.
+
 ## Working with Claude Code
 
 `CLAUDE.md` describes the project for Claude Code. Some good ways to start:

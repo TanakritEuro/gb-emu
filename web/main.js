@@ -7,12 +7,20 @@ import { KEYMAP, gamepadsMask, dpadMask, withButton, changes } from "./input.js"
 import { FRAME_MS, TURBO, framesDue, nextSpeed, audioFramesDue } from "./timing.js";
 import { nowSeconds, saveKey, readSave, writeSave, saveFileName } from "./saves.js";
 import { AudioOut } from "./audio.js";
+import { DebugPanel } from "./debugger.js";
 
 const audio = new AudioOut();
 
 const $ = (id) => document.getElementById(id);
 const canvas = $("screen");
 const ctx = canvas.getContext("2d");
+const debug = new DebugPanel({
+  panel: $("debug-panel"),
+  regs: $("regs"),
+  flags: $("flags"),
+  disasm: $("disasm"),
+  note: $("debug-note"),
+});
 // An ImageData whose pixels *are* the emulator's framebuffer in wasm memory
 // (see screenImage()), so drawing a frame copies nothing on the JS side.
 let screenView = null;
@@ -85,6 +93,8 @@ function boot(bytes, what, save = null) {
   $("error").hidden = true;
   $("serial").textContent = "";
   emu.set_sample_rate(audio.sampleRate);
+  debug.note("");
+  debug.update(emu);
   sentMask = 0; // a fresh emulator has nothing held; resend what is
   syncButtons();
   return true;
@@ -154,8 +164,16 @@ function setPaused(on) {
   paused = on;
   if (paused) stop();
   else if (emu && !rafId) start();
-  $("paused").hidden = !paused;
+  if (!paused) debug.note("");
+  showPaused();
   showStatus();
+  debug.update(emu);
+}
+
+// The "Paused" cover hides the screen, so leave it off while debugging:
+// stepping draws the frame as far as it has got.
+function showPaused() {
+  $("paused").hidden = !paused || debug.open;
 }
 
 function cycleSpeed() {
@@ -207,10 +225,14 @@ function loop(now) {
   } catch (e) {
     stop();
     draw();
+    debug.update(emu);
     showError(String(e.message ?? e));
     return;
   }
-  if (ran) draw();
+  if (ran) {
+    draw();
+    debug.update(emu);
+  }
   collectSerial();
   countFps(now, ran);
   rafId = requestAnimationFrame(loop);
@@ -255,7 +277,7 @@ function countFps(now, ran) {
 /** Updates the toolbar buttons to match the current state. */
 function showStatus() {
   const loaded = Boolean(emu);
-  for (const id of ["pause", "reset", "speed"]) $(id).disabled = !loaded;
+  for (const id of ["pause", "reset", "speed", "step", "step-frame"]) $(id).disabled = !loaded;
   const battery = Boolean(emu?.has_battery());
   for (const id of ["export-save", "import-save"]) $(id).disabled = !battery;
   $("sound").textContent = !audio.running ? "🔇 Sound off" : audio.muted ? "🔇 Muted" : "🔈 Sound";
@@ -321,6 +343,7 @@ addEventListener("keydown", (e) => {
   else if (e.code === "KeyR") reset();
   else if (e.code === "KeyF") cycleSpeed();
   else if (e.code === "KeyM") toggleSound();
+  else if (e.code === "KeyN") stepInstruction();
 });
 addEventListener("keyup", (e) => {
   if (e.code === "Space") setTurbo(false);
@@ -334,6 +357,8 @@ const toolbar = [
   ["export-save", exportSave],
   ["import-save", () => $("save-file").click()],
   ["sound", toggleSound],
+  ["step", stepInstruction],
+  ["step-frame", stepFrame],
 ];
 for (const [id, action] of toolbar) {
   $(id).addEventListener("click", (e) => {
@@ -351,6 +376,49 @@ addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") persistSave();
 });
 addEventListener("pagehide", persistSave);
+
+// Debugger. Stepping pauses the game first, and opens the panel to show
+// where it stopped.
+function stepInstruction() {
+  debugRun(() => {
+    const cycles = emu.step();
+    const state = emu.cpu_state();
+    const halted = state.halted;
+    state.free();
+    const t = `${cycles.toLocaleString("en")} T-cycles`;
+    if (halted) return `${t}, still in HALT: no enabled interrupt woke it`;
+    // The longest instruction (CALL) takes 24; anything more was spent in HALT.
+    return cycles > 24 ? `${t}, mostly asleep in HALT until an interrupt` : t;
+  });
+}
+
+function stepFrame() {
+  debugRun(() => {
+    emu.run_frame();
+    return "1 frame";
+  });
+}
+
+function debugRun(run) {
+  if (!emu) return;
+  if (!paused) setPaused(true);
+  $("debug-panel").open = true;
+  try {
+    debug.note(run());
+  } catch (e) {
+    debug.note("");
+    showError(String(e.message ?? e));
+  }
+  emu.take_audio(); // nothing plays while paused
+  draw();
+  collectSerial();
+  debug.update(emu);
+}
+
+$("debug-panel").addEventListener("toggle", () => {
+  showPaused();
+  debug.update(emu);
+});
 
 // Sound. Browsers only let audio start from a user gesture, so the first
 // click, tap or key press anywhere switches it on (the Sound button handles

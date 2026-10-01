@@ -58,9 +58,26 @@
       <span><kbd>R</kbd> reset</span>
       <span><kbd>F</kbd> speed</span>
       <span><kbd>M</kbd> mute</span>
+      <span><kbd>N</kbd> step</span>
       <span>hold <kbd>Space</kbd> fast-forward</span>
       <span id="pad"></span>
     </section>
+
+    <details id="debug-panel">
+      <summary>Debugger</summary>
+      <div class="toolbar">
+        <button id="step" type="button" title="Run one instruction (N)" disabled>Step</button>
+        <button id="step-frame" type="button" title="Run one frame: 70,224 T-cycles" disabled>Step frame</button>
+        <span id="debug-note" class="muted"></span>
+      </div>
+      <div class="debug">
+        <div>
+          <dl id="regs" class="regs"></dl>
+          <div id="flags" class="flags"></div>
+        </div>
+        <pre id="disasm" class="disasm" aria-label="Next instructions"></pre>
+      </div>
+    </details>
 
     <details id="serial-panel">
       <summary>Serial output</summary>

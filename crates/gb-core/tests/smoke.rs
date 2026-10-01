@@ -67,6 +67,48 @@ fn halt_with_nothing_pending_burns_cycles() {
 }
 
 #[test]
+fn a_debugger_step_runs_through_halt_to_the_interrupt_handler() {
+    let code = [
+        0xAF, //       XOR A
+        0xE0, 0x0F, // LDH ($FF0F),A   clear IF
+        0x3C, //       INC A
+        0xE0, 0xFF, // LDH ($FFFF),A   IE = VBlank
+        0xFB, //       EI
+        0x76, //       HALT
+    ];
+    let mut gb = GameBoy::new(rom(&code)).unwrap();
+    // The entry point's NOP and JP $0150, then the five instructions before HALT.
+    for _ in 0..7 {
+        assert!(gb.step_instruction(CYCLES_PER_FRAME).unwrap() <= 16);
+    }
+    assert_eq!(gb.cpu().regs.pc, 0x0157, "at HALT");
+    // HALT, the sleep until VBlank, then the 20-cycle interrupt dispatch.
+    let cycles = gb.step_instruction(2 * CYCLES_PER_FRAME).unwrap();
+    assert!(cycles > 20 && cycles <= CYCLES_PER_FRAME, "{cycles}");
+    assert_eq!(gb.cpu().regs.pc, 0x0040, "at the VBlank handler");
+    assert!(!gb.cpu().halted);
+}
+
+#[test]
+fn a_debugger_step_gives_up_on_a_halt_that_never_wakes() {
+    let mut gb = GameBoy::new(rom(&[0x76])).unwrap(); // IE = 0
+    gb.step().unwrap(); // NOP
+    gb.step().unwrap(); // JP $0150
+    let cycles = gb.step_instruction(1000).unwrap();
+    assert!((1000..1004).contains(&cycles), "{cycles}");
+    assert!(gb.cpu().halted);
+}
+
+#[test]
+fn disassembles_from_memory() {
+    let mut gb = GameBoy::new(rom(&[0x3E, 0x42])).unwrap();
+    gb.step().unwrap(); // NOP at $0100
+    let ins = gb.disassemble(gb.cpu().regs.pc); // JP $0150
+    assert_eq!((ins.len, ins.text.as_str()), (3, "JP $0150"));
+    assert_eq!(gb.disassemble(0x0150).text, "LD A,$42");
+}
+
+#[test]
 fn framebuffer_never_moves() {
     // The browser keeps a view on this buffer in wasm memory instead of
     // copying it every frame, so its address must stay put, including when
