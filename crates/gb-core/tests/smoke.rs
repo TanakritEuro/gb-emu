@@ -29,19 +29,19 @@ fn runs_a_frame_of_a_tiny_program() {
 
 #[test]
 fn reports_the_first_missing_instruction() {
-    // LD A,$42 isn't implemented yet. When it is, change this test to use an
-    // opcode that still isn't (or delete it once the CPU is complete).
-    let mut gb = GameBoy::new(rom(&[0x3E, 0x42])).unwrap();
+    // SWAP A (CB 37) isn't implemented yet. When it is, change this test to use
+    // an opcode that still isn't (or delete it once the CPU is complete).
+    let mut gb = GameBoy::new(rom(&[0xCB, 0x37])).unwrap();
     let err = gb.run_frame().unwrap_err();
     assert_eq!(
         err,
         CpuError::Unimplemented {
-            opcode: 0x3E,
-            cb_prefixed: false,
+            opcode: 0x37,
+            cb_prefixed: true,
             pc: 0x0150
         }
     );
-    assert_eq!(err.to_string(), "unimplemented opcode 3E at $0150");
+    assert_eq!(err.to_string(), "unimplemented opcode CB 37 at $0150");
 }
 
 #[test]

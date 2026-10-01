@@ -208,10 +208,6 @@ impl Cpu {
     /// B C D E H L (HL) A. Index 6 is the byte in memory at HL, which costs
     /// an extra 4 T-cycles per access; the caller's cycle count covers that.
     /// https://gbdev.io/pandocs/CPU_Instruction_Set.html
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "first used by the 8-bit load step")
-    )]
     fn read_r8(&self, bus: &Bus, r: u8) -> u8 {
         match r {
             0 => self.regs.b,
@@ -226,10 +222,6 @@ impl Cpu {
     }
 
     /// Writes the 8-bit operand named by a 3-bit field. See [`Cpu::read_r8`].
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "first used by the 8-bit load step")
-    )]
     fn write_r8(&mut self, bus: &mut Bus, r: u8, val: u8) {
         match r {
             0 => self.regs.b = val,
@@ -240,6 +232,25 @@ impl Cpu {
             5 => self.regs.l = val,
             6 => bus.write(self.regs.hl(), val),
             _ => self.regs.a = val,
+        }
+    }
+
+    /// The address for block 0's `z=2` loads, picked by `p`: (BC) (DE) (HL+)
+    /// (HL-). HL+ and HL- step HL after the access, for fast copy loops.
+    fn indirect_addr(&mut self, p: u8) -> u16 {
+        match p {
+            0 => self.regs.bc(),
+            1 => self.regs.de(),
+            2 => {
+                let hl = self.regs.hl();
+                self.regs.set_hl(hl.wrapping_add(1));
+                hl
+            }
+            _ => {
+                let hl = self.regs.hl();
+                self.regs.set_hl(hl.wrapping_sub(1));
+                hl
+            }
         }
     }
 
@@ -312,11 +323,24 @@ impl Cpu {
                 },
                 // q=0: LD (BC)/(DE)/(HL+)/(HL-), A
                 // q=1: LD A, (BC)/(DE)/(HL+)/(HL-)
-                2 => MISSING,
+                2 => {
+                    let addr = self.indirect_addr(op.p);
+                    if op.q == 0 {
+                        bus.write(addr, self.regs.a);
+                    } else {
+                        self.regs.a = bus.read(addr);
+                    }
+                    Ok(8)
+                }
                 3 => MISSING, // q=0: INC rp[p]  q=1: DEC rp[p]
                 4 => MISSING, // INC r[y]
                 5 => MISSING, // DEC r[y]
-                6 => MISSING, // LD r[y], d8
+                // LD r[y], d8
+                6 => {
+                    let val = self.fetch8(bus);
+                    self.write_r8(bus, op.y, val);
+                    Ok(if op.y == 6 { 12 } else { 8 })
+                }
                 _ => MISSING, // y: RLCA RRCA RLA RRA DAA CPL SCF CCF
             },
 
@@ -325,7 +349,11 @@ impl Cpu {
                 self.halted = true;
                 Ok(4)
             }
-            1 => MISSING,
+            1 => {
+                let val = self.read_r8(bus, op.z);
+                self.write_r8(bus, op.y, val);
+                Ok(if op.y == 6 || op.z == 6 { 8 } else { 4 })
+            }
 
             // Block 2: alu[y] A, r[z] with alu = ADD ADC SUB SBC AND XOR OR CP.
             // XOR A: A ^= A is always 0, so Z=1 and N/H/C=0.
@@ -340,10 +368,20 @@ impl Cpu {
             _ => match op.z {
                 0 => match op.y {
                     0..=3 => MISSING, // RET cc[y]
-                    4 => MISSING,     // LDH (a8), A
-                    5 => MISSING,     // ADD SP, e8
-                    6 => MISSING,     // LDH A, (a8)
-                    _ => MISSING,     // LD HL, SP+e8
+                    // LDH (a8), A: high page $FF00-$FFFF (I/O and HRAM)
+                    4 => {
+                        let addr = 0xFF00 | u16::from(self.fetch8(bus));
+                        bus.write(addr, self.regs.a);
+                        Ok(12)
+                    }
+                    5 => MISSING, // ADD SP, e8
+                    // LDH A, (a8)
+                    6 => {
+                        let addr = 0xFF00 | u16::from(self.fetch8(bus));
+                        self.regs.a = bus.read(addr);
+                        Ok(12)
+                    }
+                    _ => MISSING, // LD HL, SP+e8
                 },
                 1 => match (op.q, op.p) {
                     (0, _) => MISSING, // POP rp2[p]
@@ -354,10 +392,28 @@ impl Cpu {
                 },
                 2 => match op.y {
                     0..=3 => MISSING, // JP cc[y], a16
-                    4 => MISSING,     // LDH (C), A
-                    5 => MISSING,     // LD (a16), A
-                    6 => MISSING,     // LDH A, (C)
-                    _ => MISSING,     // LD A, (a16)
+                    // LDH (C), A
+                    4 => {
+                        bus.write(0xFF00 | u16::from(self.regs.c), self.regs.a);
+                        Ok(8)
+                    }
+                    // LD (a16), A
+                    5 => {
+                        let addr = self.fetch16(bus);
+                        bus.write(addr, self.regs.a);
+                        Ok(16)
+                    }
+                    // LDH A, (C)
+                    6 => {
+                        self.regs.a = bus.read(0xFF00 | u16::from(self.regs.c));
+                        Ok(8)
+                    }
+                    // LD A, (a16)
+                    _ => {
+                        let addr = self.fetch16(bus);
+                        self.regs.a = bus.read(addr);
+                        Ok(16)
+                    }
                 },
                 3 => match op.y {
                     // JP a16
@@ -614,15 +670,133 @@ mod tests {
 
     #[test]
     fn unimplemented_opcode_reports_where() {
-        let (mut cpu, mut bus) = setup(&[0x00, 0x3E, 0x42]);
+        // DAA is written last in the ALU step. Swap in another opcode then.
+        let (mut cpu, mut bus) = setup(&[0x00, 0x27]);
         cpu.step(&mut bus).unwrap();
         assert_eq!(
             cpu.step(&mut bus),
             Err(CpuError::Unimplemented {
-                opcode: 0x3E,
+                opcode: 0x27,
                 cb_prefixed: false,
                 pc: 0x0101
             })
         );
+    }
+
+    /// A CPU with distinct values in every register and HL pointing at
+    /// WRAM ($C123, holding $99), so r8 index 6 is a real memory operand.
+    fn setup_loaded(program: &[u8]) -> (Cpu, Bus) {
+        let (mut cpu, mut bus) = setup(program);
+        cpu.regs.a = 0x11;
+        cpu.regs.b = 0x22;
+        cpu.regs.c = 0x33;
+        cpu.regs.d = 0x44;
+        cpu.regs.e = 0x55;
+        cpu.regs.set_hl(0xC123);
+        bus.write(0xC123, 0x99);
+        (cpu, bus)
+    }
+
+    #[test]
+    fn all_63_ld_r_r_copy_and_take_4_or_8_cycles() {
+        for y in 0..8u8 {
+            for z in 0..8u8 {
+                if y == 6 && z == 6 {
+                    continue; // HALT
+                }
+                let opcode = 0x40 | y << 3 | z;
+                let (mut cpu, mut bus) = setup_loaded(&[opcode]);
+                let f = cpu.regs.f;
+                let src = cpu.read_r8(&bus, z);
+                let want = if y == 6 || z == 6 { 8 } else { 4 };
+                assert_eq!(cpu.step(&mut bus), Ok(want), "opcode {opcode:02X}");
+                assert_eq!(cpu.read_r8(&bus, y), src, "opcode {opcode:02X}");
+                assert_eq!(cpu.regs.f, f, "loads leave flags alone");
+            }
+        }
+    }
+
+    #[test]
+    fn ld_r_d8_for_every_register() {
+        for y in 0..8u8 {
+            let opcode = 0x06 | y << 3;
+            let (mut cpu, mut bus) = setup_loaded(&[opcode, 0x5A]);
+            let want = if y == 6 { 12 } else { 8 };
+            assert_eq!(cpu.step(&mut bus), Ok(want), "opcode {opcode:02X}");
+            assert_eq!(cpu.read_r8(&bus, y), 0x5A, "opcode {opcode:02X}");
+            assert_eq!(cpu.regs.pc, 0x0102);
+        }
+    }
+
+    #[test]
+    fn ld_through_bc_and_de() {
+        // LD (BC),A ; LD A,(DE)
+        let (mut cpu, mut bus) = setup_loaded(&[0x02, 0x1A]);
+        cpu.regs.set_bc(0xC010);
+        cpu.regs.set_de(0xC020);
+        bus.write(0xC020, 0x7E);
+        assert_eq!(cpu.step(&mut bus), Ok(8));
+        assert_eq!(bus.read(0xC010), 0x11);
+        assert_eq!(cpu.step(&mut bus), Ok(8));
+        assert_eq!(cpu.regs.a, 0x7E);
+    }
+
+    #[test]
+    fn ld_hl_plus_and_minus_step_hl_after_the_access() {
+        // LD (HL+),A ; LD A,(HL-)
+        let (mut cpu, mut bus) = setup_loaded(&[0x22, 0x3A]);
+        bus.write(0xC124, 0x42);
+        assert_eq!(cpu.step(&mut bus), Ok(8));
+        assert_eq!(bus.read(0xC123), 0x11);
+        assert_eq!(cpu.regs.hl(), 0xC124);
+        assert_eq!(cpu.step(&mut bus), Ok(8));
+        assert_eq!(cpu.regs.a, 0x42);
+        assert_eq!(cpu.regs.hl(), 0xC123);
+    }
+
+    #[test]
+    fn ld_hl_minus_wraps_at_zero() {
+        // LD (HL-),A with HL=0 writes to $0000 (an MBC register) and wraps.
+        let (mut cpu, mut bus) = setup_loaded(&[0x32]);
+        cpu.regs.set_hl(0x0000);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.regs.hl(), 0xFFFF);
+    }
+
+    #[test]
+    fn ldh_with_immediate_offset() {
+        // LDH ($80),A ; LDH A,($81)
+        let (mut cpu, mut bus) = setup_loaded(&[0xE0, 0x80, 0xF0, 0x81]);
+        bus.write(0xFF81, 0x6C);
+        assert_eq!(cpu.step(&mut bus), Ok(12));
+        assert_eq!(bus.read(0xFF80), 0x11);
+        assert_eq!(cpu.step(&mut bus), Ok(12));
+        assert_eq!(cpu.regs.a, 0x6C);
+    }
+
+    #[test]
+    fn ldh_through_c() {
+        // LDH (C),A ; LDH A,(C)
+        let (mut cpu, mut bus) = setup_loaded(&[0xE2, 0xF2]);
+        cpu.regs.c = 0x90;
+        assert_eq!(cpu.step(&mut bus), Ok(8));
+        assert_eq!(bus.read(0xFF90), 0x11);
+        bus.write(0xFF90, 0xA5);
+        assert_eq!(cpu.step(&mut bus), Ok(8));
+        assert_eq!(cpu.regs.a, 0xA5);
+    }
+
+    #[test]
+    fn ld_with_absolute_address() {
+        // LD ($C200),A
+        let (mut cpu, mut bus) = setup_loaded(&[0xEA, 0x00, 0xC2]);
+        assert_eq!(cpu.step(&mut bus), Ok(16));
+        assert_eq!(bus.read(0xC200), 0x11);
+        // LD A,($C300)
+        let (mut cpu, mut bus) = setup_loaded(&[0xFA, 0x00, 0xC3]);
+        bus.write(0xC300, 0x3C);
+        assert_eq!(cpu.step(&mut bus), Ok(16));
+        assert_eq!(cpu.regs.a, 0x3C);
+        assert_eq!(cpu.regs.pc, 0x0103);
     }
 }
