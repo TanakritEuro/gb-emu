@@ -1,6 +1,6 @@
 //! End-to-end checks through the public API.
 
-use gb_core::{cpu::CpuError, FrameEnd, GameBoy, StateError, CYCLES_PER_FRAME};
+use gb_core::{cpu::CpuError, FrameEnd, GameBoy, Rewind, StateError, CYCLES_PER_FRAME};
 
 /// A 32 KiB ROM-only cartridge with a valid header and `code` at $0150.
 /// The entry point at $0100 is NOP; JP $0150, like real games.
@@ -323,6 +323,43 @@ fn host_settings_stay_when_a_state_loads() {
         "breakpoints"
     );
     assert_eq!(gb.run_frame(), Ok(FrameEnd::Breakpoint));
+}
+
+#[test]
+fn rewinding_steps_back_through_exactly_the_recorded_states() {
+    let mut gb = GameBoy::new(busy_rom()).unwrap();
+    let mut rewind = Rewind::new(2, 1000, usize::MAX);
+    let mut recorded = Vec::new();
+    for frame in 1..=20 {
+        run_frames(&mut gb, 1);
+        rewind.record(&gb);
+        if frame % 2 == 0 {
+            recorded.push(gb.save_state());
+        }
+    }
+    assert_eq!(rewind.len(), 10);
+    assert_eq!(rewind.frames_available(), 20);
+    // The busy program rewrites thousands of bytes a frame; even so the
+    // history costs well under ten whole states.
+    let whole = recorded[0].len();
+    assert!(
+        rewind.bytes() < 10 * whole,
+        "{} vs {}",
+        rewind.bytes(),
+        10 * whole
+    );
+
+    for expected in recorded.iter().rev() {
+        assert!(rewind.step_back(&mut gb));
+        assert!(gb.save_state() == *expected);
+    }
+    assert!(!rewind.step_back(&mut gb), "nothing older");
+
+    // Playing on after a rewind records a new future from there.
+    run_frames(&mut gb, 2);
+    rewind.record(&gb);
+    rewind.record(&gb);
+    assert_eq!(rewind.len(), 1);
 }
 
 #[test]

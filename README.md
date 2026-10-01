@@ -50,6 +50,10 @@ Battery saves are kept in the browser (localStorage, per ROM) and stored a momen
 game saves and when the page closes. Export .sav / Import .sav move them to and from other
 emulators (BGB/VBA-M format, including the MBC3 clock, which catches up on time that passed).
 
+Rewind: hold Backspace (or the ⏪ button) to run time backwards at double speed, up to 30 seconds;
+let go and play on from there. While paused, each press steps back two frames. The button shows
+how much history there is.
+
 Save states: four slots per game under the screen, each with a picture and when it was saved,
 kept in the browser (IndexedDB) between visits. Keys: 1-4 pick a slot, S saves, L loads. A state
 is the whole machine, so loading one also puts the battery save (and the MBC3 clock) back to how

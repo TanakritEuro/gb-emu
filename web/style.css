@@ -110,6 +110,15 @@ canvas {
   color: var(--bg);
 }
 #speed { min-width: 4em; font-variant-numeric: tabular-nums; }
+/* Held down to rewind: no text selection, scrolling or long-press menu. */
+#rewind {
+  min-width: 5.5em;
+  font-variant-numeric: tabular-nums;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
 
 .controls { display: flex; flex-wrap: wrap; gap: 8px 20px; font-size: 13px; }
 kbd {

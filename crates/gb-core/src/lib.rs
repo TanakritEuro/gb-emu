@@ -12,6 +12,7 @@ pub mod cpu;
 pub mod disasm;
 pub mod joypad;
 pub mod ppu;
+pub mod rewind;
 pub mod state;
 pub mod timer;
 
@@ -23,6 +24,7 @@ use std::collections::BTreeSet;
 pub use cartridge::{Cartridge, CartridgeError, SaveError};
 pub use disasm::Instruction;
 pub use joypad::Button;
+pub use rewind::Rewind;
 pub use state::StateError;
 
 pub const SCREEN_WIDTH: usize = 160;

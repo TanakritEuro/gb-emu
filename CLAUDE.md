@@ -14,6 +14,7 @@ A Game Boy (DMG) emulator in Rust that runs in the browser via WebAssembly.
   - `apu.rs` sound: four channels, frame sequencer (length, envelope, sweep), mixer, high-pass filter
   - `joypad.rs` $FF00
   - `disasm.rs` disassembler for the debugger panel (same x/y/z decoding as `cpu.rs`)
+  - `rewind.rs` rewind history: recent states as XOR deltas, newest first
   - `state.rs` save state format; each component has `save_state`/`load_state` next to its
     fields. Adding state to a component means adding it there too and bumping `state::VERSION`
   - `tests/smoke.rs` end-to-end tests through the public `GameBoy` API

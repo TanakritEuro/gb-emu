@@ -3,30 +3,63 @@
 //! Errors become thrown JS `Error`s, so web/main.js can show messages like
 //! "illegal opcode DD at $0150" right on the page.
 
-use gb_core::{Button, FrameEnd, GameBoy, CPU_HZ};
+use gb_core::{Button, FrameEnd, GameBoy, Rewind, CPU_HZ, CYCLES_PER_FRAME};
 use wasm_bindgen::prelude::*;
+
+/// Rewind history: a snapshot every 2 frames (so rewinding one snapshot per
+/// frame runs time backwards at double speed), for up to 30 seconds or
+/// 32 MB, whichever comes first.
+const REWIND_EVERY: u32 = 2;
+const REWIND_SECONDS: usize = 30;
+const REWIND_BYTES: usize = 32 << 20;
+
+/// Frames per second: 4194304 / 70224, about 59.73.
+const FPS: f64 = CPU_HZ as f64 / CYCLES_PER_FRAME as f64;
 
 #[wasm_bindgen]
 pub struct Emulator {
     gb: GameBoy,
+    rewind: Rewind,
 }
 
 #[wasm_bindgen]
 impl Emulator {
     #[wasm_bindgen(constructor)]
     pub fn new(rom: Vec<u8>) -> Result<Emulator, JsError> {
+        let snapshots = (REWIND_SECONDS as f64 * FPS) as usize / REWIND_EVERY as usize;
         GameBoy::new(rom)
-            .map(|gb| Emulator { gb })
+            .map(|gb| Emulator {
+                gb,
+                rewind: Rewind::new(REWIND_EVERY, snapshots, REWIND_BYTES),
+            })
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
-    /// Runs one frame. Returns true if it stopped early at a breakpoint
-    /// (see `set_breakpoint`).
+    /// Runs one frame, and keeps a rewind snapshot when one is due.
+    /// Returns true if it stopped early at a breakpoint (see `set_breakpoint`).
     pub fn run_frame(&mut self) -> Result<bool, JsError> {
-        self.gb
+        let end = self
+            .gb
             .run_frame()
-            .map(|end| end == FrameEnd::Breakpoint)
-            .map_err(|e| JsError::new(&e.to_string()))
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        self.rewind.record(&self.gb);
+        Ok(end == FrameEnd::Breakpoint)
+    }
+
+    /// Goes back to the newest rewind snapshot (2 frames apart), forgetting
+    /// it. False when the history is used up.
+    pub fn rewind_step(&mut self) -> bool {
+        self.rewind.step_back(&mut self.gb)
+    }
+
+    /// How far back rewinding can go, in seconds of game time.
+    pub fn rewind_seconds(&self) -> f64 {
+        f64::from(self.rewind.frames_available()) / FPS
+    }
+
+    /// Memory the rewind history uses, in bytes.
+    pub fn rewind_bytes(&self) -> usize {
+        self.rewind.bytes()
     }
 
     /// A copy of the screen as RGBA, 160 × 144 × 4 bytes (about 92 KB).

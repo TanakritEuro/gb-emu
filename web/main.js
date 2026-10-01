@@ -91,6 +91,7 @@ let fpsTimer = 0;
 let paused = false;
 let speed = 1; // from the speed button: 1, 2 or 4
 let turbo = false; // Space held: fast-forward at TURBO
+let rewinding = false; // Backspace or the ⏪ button held: run time backwards
 // Buttons held on the keyboard, and what the emulator was last told is held
 // (keyboard OR gamepads OR touch), as masks indexed like gb_core::Button.
 let keyMask = 0;
@@ -255,6 +256,11 @@ function stop() {
 // and the sound neither crackles nor drifts. Otherwise (no sound yet, or
 // fast-forward, which is muted) the wall clock does.
 function loop(now) {
+  if (rewinding) {
+    rewindFrames(now);
+    rafId = requestAnimationFrame(loop);
+    return;
+  }
   const audioPaced = audio.running && !turbo && speed === 1;
   let frames;
   if (audioPaced) {
@@ -312,6 +318,46 @@ function pcNow() {
   return pc;
 }
 
+// Rewinding: one snapshot back per Game Boy frame due, so with snapshots
+// 2 frames apart time runs backwards at double speed. Nothing runs, so
+// there's no sound; the audio queue fades out, and back in afterwards.
+function rewindFrames(now) {
+  const due = framesDue(backlog, now - lastTime, 1);
+  backlog = due.backlog;
+  lastTime = now;
+  let went = 0;
+  while (went < due.frames && emu.rewind_step()) went++;
+  if (went) {
+    draw();
+    debug.update(emu);
+  }
+  showRewind();
+  countFps(now, went);
+}
+
+/** While paused, each press steps back one snapshot. */
+function rewindOnce() {
+  if (emu?.rewind_step()) {
+    draw();
+    debug.update(emu);
+  }
+  showRewind();
+}
+
+function setRewinding(on) {
+  if (!emu || rewinding === on) return;
+  rewinding = on;
+  showRewind();
+}
+
+/** The ⏪ button: how much history is left, lit while rewinding. */
+function showRewind() {
+  const seconds = emu ? Math.floor(emu.rewind_seconds()) : 0;
+  $("rewind").textContent = `⏪ ${seconds} s`;
+  $("rewind").classList.toggle("fast", rewinding);
+  $("rewind").setAttribute("aria-pressed", String(rewinding));
+}
+
 function draw() {
   ctx.putImageData(screenImage(), 0, 0);
 }
@@ -345,13 +391,17 @@ function countFps(now, ran) {
     fpsTimer = now;
     // Once a second, store the save if the game changed it.
     if (emu.take_save_dirty()) persistSave();
+    showRewind();
   }
 }
 
 /** Updates the toolbar buttons to match the current state. */
 function showStatus() {
   const loaded = Boolean(emu);
-  for (const id of ["pause", "reset", "speed", "step", "step-frame"]) $(id).disabled = !loaded;
+  for (const id of ["pause", "reset", "speed", "rewind", "step", "step-frame"]) {
+    $(id).disabled = !loaded;
+  }
+  showRewind();
   const battery = Boolean(emu?.has_battery());
   for (const id of ["export-save", "import-save"]) $(id).disabled = !battery;
   $("sound").textContent = !audio.running ? "🔇 Sound off" : audio.muted ? "🔇 Muted" : "🔈 Sound";
@@ -402,6 +452,7 @@ addEventListener("blur", () => {
   keyMask = 0;
   syncButtons();
   setTurbo(false);
+  setRewinding(false);
 });
 
 // Emulator controls: P pause, R reset, F cycle speed, hold Space to fast-forward.
@@ -417,6 +468,12 @@ addEventListener("keydown", (e) => {
     setTurbo(true);
     return;
   }
+  if (e.code === "Backspace") {
+    e.preventDefault();
+    if (paused) rewindOnce(); // key repeat keeps stepping back
+    else setRewinding(true);
+    return;
+  }
   if (e.repeat) return;
   if (e.code === "KeyP") setPaused(!paused);
   else if (e.code === "KeyR") reset();
@@ -429,7 +486,24 @@ addEventListener("keydown", (e) => {
 });
 addEventListener("keyup", (e) => {
   if (e.code === "Space") setTurbo(false);
+  if (e.code === "Backspace") setRewinding(false);
 });
+// The ⏪ button rewinds while held (mouse, pen or finger).
+const rewindButton = $("rewind");
+rewindButton.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  try {
+    rewindButton.setPointerCapture(e.pointerId);
+  } catch {
+    // Synthetic pointers can't be captured; pointerup still arrives.
+  }
+  if (paused) rewindOnce();
+  else setRewinding(true);
+});
+for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) {
+  rewindButton.addEventListener(type, () => setRewinding(false));
+}
+rewindButton.addEventListener("contextmenu", (e) => e.preventDefault());
 // Drop focus after a click: a focused button would also be "clicked" by
 // Enter (Start) or Space (fast-forward) during play.
 const toolbar = [
