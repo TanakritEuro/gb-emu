@@ -1,5 +1,5 @@
-// Keyboard and gamepad → Game Boy buttons. Pure functions, no DOM, so they
-// can be tested with `node --test web/input.test.js`.
+// Keyboard, gamepad and touch → Game Boy buttons. Pure functions, no DOM, so they
+// can be tested with `node --test "web/*.test.js"`.
 //
 // Buttons are a bitmask indexed like gb_core::Button (and Emulator.set_button):
 // 0 Right, 1 Left, 2 Up, 3 Down, 4 A, 5 B, 6 Select, 7 Start.

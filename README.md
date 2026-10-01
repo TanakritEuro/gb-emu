@@ -42,6 +42,9 @@ bottom face button = B, Start, Select (Back). Press a button once so the browser
 On phones and tablets, on-screen controls appear under the screen (multi-touch, slide between
 buttons). Add `?touch` to the URL to show them on a desktop.
 
+Pause, Reset and a speed button (1×/2×/4×) sit under the screen. Keys: P pause, R reset,
+F speed, hold Space to fast-forward at 8×.
+
 ## Working with Claude Code
 
 `CLAUDE.md` describes the project for Claude Code. Some good ways to start:

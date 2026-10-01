@@ -14,7 +14,7 @@ A Game Boy (DMG) emulator in Rust that runs in the browser via WebAssembly.
   - `tests/smoke.rs` end-to-end tests through the public `GameBoy` API
 - `crates/gb-cli/` — headless runner for test ROMs; `--doctor` writes Gameboy Doctor traces
 - `crates/gb-wasm/` — wasm-bindgen wrapper (`Emulator` class) used by `web/`
-- `web/` — static frontend (`index.html`, `main.js`, `style.css`; `input.js` maps keyboard/gamepad/touch to buttons); `web/pkg/` is generated
+- `web/` — static frontend (`index.html`, `main.js`, `style.css`; `input.js` maps keyboard/gamepad/touch to buttons, `timing.js` paces frames); `web/pkg/` is generated
 - `scripts/build-web.ps1` / `build-web.sh` — build `web/pkg`
 - `scripts/serve.js` — zero-dependency Node dev server for `web/` (port 8765)
 - `roms/` — test ROMs, git-ignored. Never commit ROM files.
@@ -25,7 +25,7 @@ A Game Boy (DMG) emulator in Rust that runs in the browser via WebAssembly.
 ```sh
 cargo test --workspace                                  # all tests; must pass before any commit
 cargo clippy --workspace --all-targets -- -D warnings  # lint; keep it clean
-node --test web/input.test.js                           # frontend input tests
+node --test "web/*.test.js"                             # frontend tests (input, timing)
 cargo run --release -p gb-cli -- <rom.gb>              # run a test ROM headlessly
 cargo run --release -p gb-cli -- <rom.gb> --doctor trace.log   # CPU trace for Gameboy Doctor
 ./scripts/build-web.ps1                                 # build the browser version (Windows)

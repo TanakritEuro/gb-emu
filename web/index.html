@@ -17,7 +17,14 @@
     <div id="drop" class="screen-wrap">
       <canvas id="screen" width="160" height="144"></canvas>
       <div id="hint" class="hint">Drop a <code>.gb</code> file here<br>or <label class="link">choose one<input id="file" type="file" accept=".gb,.gbc"></label></div>
+      <div id="paused" class="paused" hidden>Paused</div>
       <pre id="error" class="error" hidden></pre>
+    </div>
+
+    <div class="toolbar">
+      <button id="pause" type="button" aria-pressed="false" disabled>Pause</button>
+      <button id="reset" type="button" disabled>Reset</button>
+      <button id="speed" type="button" title="Speed (hold Space to fast-forward)" disabled>1×</button>
     </div>
 
     <!-- On-screen controls: shown on touch screens, or anywhere with ?touch -->
@@ -42,6 +49,10 @@
       <span><kbd>Z</kbd> B</span>
       <span><kbd>Enter</kbd> Start</span>
       <span><kbd>Shift</kbd> Select</span>
+      <span><kbd>P</kbd> pause</span>
+      <span><kbd>R</kbd> reset</span>
+      <span><kbd>F</kbd> speed</span>
+      <span>hold <kbd>Space</kbd> fast-forward</span>
       <span id="pad"></span>
     </section>
 
