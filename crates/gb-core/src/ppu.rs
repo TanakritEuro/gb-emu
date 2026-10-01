@@ -38,6 +38,10 @@ pub struct Ppu {
     pub wx: u8,
     /// Position within the current scanline, 0..456.
     dot: u32,
+    /// Set once WY == LY at the start of a line; cleared at VBlank.
+    wy_triggered: bool,
+    /// Which window row the next window line draws; reset at VBlank.
+    window_line: u8,
     framebuffer: Vec<u8>,
 }
 
@@ -66,6 +70,8 @@ impl Ppu {
             wy: 0,
             wx: 0,
             dot: 0,
+            wy_triggered: false,
+            window_line: 0,
             framebuffer: DMG_PALETTE[0].repeat(SCREEN_WIDTH * SCREEN_HEIGHT),
         }
     }
@@ -140,6 +146,8 @@ impl Ppu {
             self.ly = (self.ly + 1) % LINES_PER_FRAME;
             if self.ly == VBLANK_LINE {
                 irq |= interrupt::VBLANK;
+                self.wy_triggered = false;
+                self.window_line = 0;
             }
             let coincide = self.ly == self.lyc;
             self.stat = (self.stat & !0x04) | if coincide { 0x04 } else { 0 };
@@ -167,39 +175,59 @@ impl Ppu {
         self.stat = (self.stat & !0x03) | mode;
     }
 
-    /// Draws line LY into the framebuffer, all at once at the end of the line.
+    /// Draws line LY into the framebuffer, all at once at the end of the line:
+    /// the background, with the window over it from WX-7 rightward.
     /// TODO(accuracy): hardware pushes pixels through a FIFO during mode 3, so
     /// register writes in the middle of a line (e.g. SCX) take effect mid-line.
-    /// TODO(milestone 3): the window, then sprites.
+    /// TODO(milestone 3): sprites.
     fn render_scanline(&mut self) {
+        // The window's "Y condition": once WY == LY at the start of a line, it
+        // holds for the rest of the frame. https://gbdev.io/pandocs/Window.html
+        if self.ly == self.wy {
+            self.wy_triggered = true;
+        }
+        // LCDC bit 0 off blanks the background and the window on DMG.
+        let bg_on = self.lcdc & 0x01 != 0;
+        let window_on = bg_on && self.lcdc & 0x20 != 0 && self.wy_triggered && self.wx <= 166;
+        // Screen column where the window starts. TODO(accuracy): WX 0 also
+        // shifts it left by SCX % 8, and WX 166 has a DMG-only glitch.
+        let window_x = i16::from(self.wx) - 7;
+
         let row = usize::from(self.ly) * SCREEN_WIDTH;
         for x in 0..SCREEN_WIDTH as u8 {
-            // LCDC bit 0 off blanks the background (and window) on DMG.
-            let shade = if self.lcdc & 0x01 == 0 {
+            let shade = if !bg_on {
                 0
             } else {
-                let index = self.bg_color_index(x);
+                let index = if window_on && i16::from(x) >= window_x {
+                    // The window doesn't scroll: its own map, from its (0,0).
+                    let wx = (i16::from(x) - window_x) as u8;
+                    self.map_pixel(self.lcdc & 0x40 != 0, wx, self.window_line)
+                } else {
+                    let map_x = x.wrapping_add(self.scx);
+                    let map_y = self.ly.wrapping_add(self.scy);
+                    self.map_pixel(self.lcdc & 0x08 != 0, map_x, map_y)
+                };
                 (self.bgp >> (index * 2)) & 0x03
             };
             let i = (row + usize::from(x)) * 4;
             self.framebuffer[i..i + 4].copy_from_slice(&DMG_PALETTE[usize::from(shade)]);
         }
+
+        // The window's own line counter only advances on lines it was drawn,
+        // so hiding it for a few lines doesn't skip any of its rows.
+        if window_on {
+            self.window_line = self.window_line.wrapping_add(1);
+        }
     }
 
-    /// Color index (0-3, before BGP) of the background pixel at screen column
-    /// `x` on line LY. SCX/SCY move the screen over the 256x256 map, wrapping.
-    /// https://gbdev.io/pandocs/Scrolling.html
-    fn bg_color_index(&self, x: u8) -> u8 {
-        let map_x = x.wrapping_add(self.scx);
-        let map_y = self.ly.wrapping_add(self.scy);
-        // LCDC bit 3: tile map at $9800 or $9C00 (offsets into VRAM).
-        let map = if self.lcdc & 0x08 != 0 {
-            0x1C00
-        } else {
-            0x1800
-        };
-        let tile = self.vram[map + usize::from(map_y / 8) * 32 + usize::from(map_x / 8)];
-        self.tile_pixel(tile, map_x % 8, map_y % 8)
+    /// Color index (0-3, before BGP) at pixel (`x`, `y`) of a 256x256 tile map:
+    /// $9C00 if `high_map`, else $9800. The background picks its map with LCDC
+    /// bit 3 and scrolls over it with SCX/SCY (wrapping); the window uses LCDC
+    /// bit 6. https://gbdev.io/pandocs/Scrolling.html
+    fn map_pixel(&self, high_map: bool, x: u8, y: u8) -> u8 {
+        let map = if high_map { 0x1C00 } else { 0x1800 };
+        let tile = self.vram[map + usize::from(y / 8) * 32 + usize::from(x / 8)];
+        self.tile_pixel(tile, x % 8, y % 8)
     }
 
     /// Color index of pixel (`col`, `row`) in background/window tile `tile`.
@@ -376,6 +404,102 @@ mod tests {
         p.lcdc &= !0x01;
         p.render_scanline();
         assert_eq!(shade_at(&p, 0, 0), 0);
+    }
+
+    /// Background all blank (tile 0). Window on, using the $9C00 map, whose
+    /// first tile row is tile 1 (color 1) and second is tile 2 (color 2): the
+    /// shade on screen says which window row was drawn.
+    fn window_ppu(wx: u8, wy: u8) -> Ppu {
+        let mut p = bg_ppu();
+        p.lcdc |= 0x20 | 0x40;
+        p.wx = wx;
+        p.wy = wy;
+        put_tile(&mut p, 0x8010, striped(0xFF, 0x00));
+        put_tile(&mut p, 0x8020, striped(0x00, 0xFF));
+        for col in 0..32 {
+            p.write_vram(0x9C00 + col, 1);
+            p.write_vram(0x9C20 + col, 2);
+        }
+        p
+    }
+
+    /// Runs whole scanlines (each is drawn as it finishes).
+    fn lines(p: &mut Ppu, n: u32) {
+        p.tick(456 * n);
+    }
+
+    #[test]
+    fn window_starts_at_wx_minus_7_and_wy() {
+        let mut p = window_ppu(27, 16);
+        lines(&mut p, 17);
+        assert_eq!(shade_at(&p, 30, 15), 0, "above WY");
+        assert_eq!(shade_at(&p, 19, 16), 0, "left of WX-7");
+        assert_eq!(shade_at(&p, 20, 16), 1, "window row 0");
+        assert_eq!(shade_at(&p, 159, 16), 1);
+    }
+
+    #[test]
+    fn window_does_not_scroll() {
+        let mut p = window_ppu(7, 0);
+        p.scx = 100;
+        p.scy = 100;
+        lines(&mut p, 9);
+        assert_eq!(shade_at(&p, 0, 0), 1);
+        assert_eq!(shade_at(&p, 0, 8), 2, "window row 8, whatever SCY says");
+    }
+
+    #[test]
+    fn window_line_counter_only_counts_drawn_lines() {
+        let mut p = window_ppu(7, 0);
+        lines(&mut p, 5); // lines 0-4 draw window rows 0-4
+        p.lcdc &= !0x20;
+        lines(&mut p, 5); // lines 5-9: window hidden
+        assert_eq!(shade_at(&p, 0, 7), 0, "background while hidden");
+        p.lcdc |= 0x20;
+        lines(&mut p, 4); // lines 10-13 draw window rows 5-8
+        assert_eq!(shade_at(&p, 0, 10), 1, "row 5, not row 10");
+        assert_eq!(shade_at(&p, 0, 12), 1, "row 7");
+        assert_eq!(shade_at(&p, 0, 13), 2, "row 8");
+    }
+
+    #[test]
+    fn wy_match_is_latched_for_the_rest_of_the_frame() {
+        let mut p = window_ppu(7, 5);
+        lines(&mut p, 6); // lines 0-5
+        assert_eq!(shade_at(&p, 0, 4), 0);
+        assert_eq!(shade_at(&p, 0, 5), 1, "LY == WY: window starts");
+        p.wy = 200;
+        lines(&mut p, 1);
+        assert_eq!(shade_at(&p, 0, 6), 1, "still on after WY changes");
+
+        // A WY that LY never reaches means no window this frame.
+        let mut p = window_ppu(7, 200);
+        lines(&mut p, 144);
+        assert!((0..144).all(|y| shade_at(&p, 0, y) == 0));
+    }
+
+    #[test]
+    fn window_restarts_from_row_0_each_frame() {
+        let mut p = window_ppu(7, 0);
+        lines(&mut p, 154 + 9); // a whole frame, then lines 0-8 of the next
+        assert_eq!(shade_at(&p, 0, 0), 1);
+        assert_eq!(shade_at(&p, 0, 8), 2);
+    }
+
+    #[test]
+    fn window_hidden_by_lcdc_bit_0_or_wx_past_166() {
+        let mut p = window_ppu(7, 0);
+        p.lcdc &= !0x01;
+        lines(&mut p, 1);
+        assert_eq!(shade_at(&p, 0, 0), 0, "LCDC bit 0 blanks the window too");
+
+        let mut p = window_ppu(167, 0);
+        lines(&mut p, 3);
+        p.wx = 7;
+        lines(&mut p, 1);
+        assert_eq!(shade_at(&p, 0, 2), 0, "off-screen at WX 167");
+        assert_eq!(shade_at(&p, 0, 3), 1, "and its rows weren't used up");
+        assert_eq!(p.window_line, 1);
     }
 
     #[test]

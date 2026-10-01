@@ -50,7 +50,7 @@ The big one: all 256 base opcodes and 256 `CB`-prefixed opcodes (minus 11 illega
 ## Milestone 3 — Pixels
 
 - [x] Background: tile data, tile maps, SCX/SCY scrolling, BGP palette
-- [ ] Window layer (WX/WY, its own line counter)
+- [x] Window layer (WX/WY, its own line counter)
 - [ ] Sprites: OAM scan (10 per line), 8×8 and 8×16, flips, OBP0/OBP1, priority
 - [ ] STAT interrupts on mode changes; LCD off/on behavior
 
