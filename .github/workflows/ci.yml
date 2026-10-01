@@ -1,0 +1,73 @@
+# Tests every push and pull request; pushes to main also build the browser
+# version and publish it to GitHub Pages.
+#
+# One-time setup on GitHub: Settings → Pages → Build and deployment →
+# Source: "GitHub Actions".
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: node --test "web/*.test.js"
+
+  pages:
+    needs: test
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write # publish the site
+      id-token: write # prove to Pages that this workflow made it
+    concurrency:
+      group: pages
+      cancel-in-progress: false # let a running deploy finish
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      # wasm-bindgen-cli must be exactly the version gb-wasm pins, so read it
+      # from there rather than repeating it here.
+      - name: Find the wasm-bindgen version
+        id: wasm-bindgen
+        run: |
+          version=$(sed -n 's/^wasm-bindgen = "=\(.*\)"/\1/p' crates/gb-wasm/Cargo.toml)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ steps.wasm-bindgen.outputs.version }}
+      - run: ./scripts/build-web.sh
+      - name: Collect the site
+        run: |
+          mkdir _site
+          cp -r web/. _site/
+          rm _site/*.test.js
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+      - id: deploy
+        uses: actions/deploy-pages@v5

@@ -23,6 +23,8 @@ A Game Boy (DMG) emulator in Rust that runs in the browser via WebAssembly.
 - `web/` — static frontend (`index.html`, `main.js`, `style.css`; `input.js` maps keyboard/gamepad/touch to buttons, `timing.js` paces frames, `saves.js` keeps battery saves in localStorage, `states.js` save state slots in IndexedDB, `audio.js` + `audio-worklet.js` + `audio-queue.js` play sound, `debugger.js` + `memview.js` + `vramview.js` + `breakpoints.js` are the debugger panel); `web/pkg/` is generated
 - `scripts/build-web.ps1` / `build-web.sh` — build `web/pkg`
 - `scripts/serve.js` — zero-dependency Node dev server for `web/` (port 8765)
+- `.github/workflows/ci.yml` — tests every push; pushes to `main` also deploy `web/` to GitHub Pages
+  (https://tanakriteuro.github.io/gb-emu/)
 - `roms/` — test ROMs, git-ignored. Never commit ROM files.
 - `docs/ROADMAP.md` — milestones and where we are
 

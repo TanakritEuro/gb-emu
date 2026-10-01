@@ -2,8 +2,11 @@
 
 A Game Boy emulator written in Rust, running in the browser through WebAssembly.
 
-Status: plays original Game Boy (DMG) games with sound, battery saves and a debugger, in the
-browser or headless. Next up: [docs/ROADMAP.md](docs/ROADMAP.md).
+**[▶ Play it](https://tanakriteuro.github.io/gb-emu/)** in your browser: drop in a `.gb` file (free,
+legal homebrew games are on [Homebrew Hub](https://hh.gbdev.io/), e.g. Tobu Tobu Girl).
+
+Status: plays original Game Boy (DMG) games with sound, battery saves, save states, rewind and a
+debugger, in the browser or headless. Next up: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Setup (once)
 
@@ -34,6 +37,9 @@ node scripts/serve.js
 macOS / Linux: `./scripts/build-web.sh`, then `node scripts/serve.js`.
 
 Open http://localhost:8765 and drop a `.gb` file onto the screen.
+
+Every push runs the tests on GitHub Actions (`.github/workflows/ci.yml`); pushes to `main` also
+build the browser version and publish it to GitHub Pages, which is where the Play it link points.
 (`serve.js` needs only Node. Any static server works, e.g. `python -m http.server 8765 -d web`;
 avoid port 8080 on Windows, which is often reserved.)
 
