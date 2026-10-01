@@ -470,17 +470,41 @@ impl Cpu {
         }
     }
 
-    /// Executes one instruction and returns the T-cycles it took.
+    /// Serves the highest-priority pending interrupt: clears its IF bit and
+    /// IME, pushes PC and jumps to its vector ($40 VBlank, $48 STAT, $50
+    /// Timer, $58 Serial, $60 Joypad). Returns the 20 T-cycles it takes:
+    /// 2 internal M-cycles, 2 for the push, 1 to load PC.
+    /// https://gbdev.io/pandocs/Interrupts.html
+    ///
+    /// TODO(accuracy): the IE/IF check happens on real hardware between the
+    /// two pushes. If the high byte of PC lands on $FFFF (IE) and disables the
+    /// interrupt, the CPU jumps to $0000 instead (Mooneye's ie_push test).
+    fn dispatch_interrupt(&mut self, bus: &mut Bus, pending: u8) -> u32 {
+        // Lowest bit wins: VBlank (bit 0) has the highest priority.
+        let bit = pending.trailing_zeros() as u8;
+        bus.if_reg &= !(1 << bit);
+        self.ime = false;
+        self.push16(bus, self.regs.pc);
+        self.regs.pc = 0x40 + 8 * u16::from(bit);
+        20
+    }
+
+    /// Executes one instruction, or dispatches an interrupt, and returns the
+    /// T-cycles it took.
     pub fn step(&mut self, bus: &mut Bus) -> Result<u32, CpuError> {
-        // TODO(milestone 2): if IME is set and (IE & IF) != 0, dispatch the
-        // highest-priority interrupt here: clear its IF bit, clear IME, push PC,
-        // jump to $40/$48/$50/$58/$60. 20 T-cycles.
         if self.halted {
             if bus.pending_interrupts() != 0 {
                 self.halted = false;
             } else {
                 return Ok(4);
             }
+        }
+
+        // Interrupts are checked between instructions. EI's one-instruction
+        // delay works because IME only turns on at the end of the next step.
+        let pending = bus.pending_interrupts();
+        if self.ime && pending != 0 {
+            return Ok(self.dispatch_interrupt(bus, pending));
         }
 
         let enable_ime_after = std::mem::take(&mut self.ime_pending);
@@ -846,6 +870,7 @@ impl Cpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bus::interrupt;
     use crate::cartridge::tests::rom_with_program;
     use crate::cartridge::Cartridge;
 
@@ -1948,5 +1973,113 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A CPU running from WRAM with IME on and IE/IF set to `ie`/`if_`.
+    fn setup_irq(program: &[u8], ie: u8, if_: u8) -> (Cpu, Bus) {
+        let (mut cpu, mut bus) = setup_wram(program);
+        cpu.ime = true;
+        bus.ie_reg = ie;
+        bus.if_reg = if_;
+        (cpu, bus)
+    }
+
+    #[test]
+    fn interrupt_dispatch_pushes_pc_and_jumps_to_the_vector() {
+        let (mut cpu, mut bus) = setup_irq(&[0x00], interrupt::VBLANK, interrupt::VBLANK);
+        assert_eq!(cpu.step(&mut bus), Ok(20));
+        assert_eq!(cpu.regs.pc, 0x0040);
+        assert_eq!(cpu.regs.sp, 0xCFFE);
+        assert_eq!(
+            bus.read16(0xCFFE),
+            0xC000,
+            "the interrupted instruction's address"
+        );
+        assert!(!cpu.ime, "IME is cleared so the handler isn't interrupted");
+        assert_eq!(bus.if_reg & interrupt::VBLANK, 0, "IF bit acknowledged");
+    }
+
+    #[test]
+    fn each_interrupt_has_its_own_vector() {
+        let sources = [
+            (interrupt::VBLANK, 0x40),
+            (interrupt::STAT, 0x48),
+            (interrupt::TIMER, 0x50),
+            (interrupt::SERIAL, 0x58),
+            (interrupt::JOYPAD, 0x60),
+        ];
+        for (bit, vector) in sources {
+            let (mut cpu, mut bus) = setup_irq(&[0x00], 0x1F, bit);
+            cpu.step(&mut bus).unwrap();
+            assert_eq!(cpu.regs.pc, vector, "IF bit {bit:02X}");
+        }
+    }
+
+    #[test]
+    fn lower_bits_win_and_only_one_is_acknowledged() {
+        let (mut cpu, mut bus) = setup_irq(&[0x00], 0x1F, interrupt::TIMER | interrupt::STAT);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.regs.pc, 0x48, "STAT beats Timer");
+        assert_eq!(bus.if_reg & 0x1F, interrupt::TIMER, "Timer still pending");
+        cpu.ime = true;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.regs.pc, 0x50);
+        assert_eq!(bus.if_reg & 0x1F, 0);
+    }
+
+    #[test]
+    fn no_dispatch_without_ime_or_ie() {
+        // Requested but not enabled in IE
+        let (mut cpu, mut bus) = setup_irq(&[0x00], interrupt::VBLANK, interrupt::TIMER);
+        assert_eq!(cpu.step(&mut bus), Ok(4));
+        assert_eq!(cpu.regs.pc, 0xC001);
+        assert_eq!(
+            bus.if_reg & interrupt::TIMER,
+            interrupt::TIMER,
+            "stays requested"
+        );
+
+        // Enabled and requested, but IME is off
+        let (mut cpu, mut bus) = setup_irq(&[0x00], interrupt::TIMER, interrupt::TIMER);
+        cpu.ime = false;
+        assert_eq!(cpu.step(&mut bus), Ok(4));
+        assert_eq!(cpu.regs.pc, 0xC001);
+        assert_eq!(bus.if_reg & interrupt::TIMER, interrupt::TIMER);
+    }
+
+    #[test]
+    fn ei_lets_one_more_instruction_run_before_dispatch() {
+        // EI ; NOP ; NOP with an interrupt already pending
+        let (mut cpu, mut bus) = setup_irq(&[0xFB, 0x00, 0x00], interrupt::TIMER, interrupt::TIMER);
+        cpu.ime = false;
+        assert_eq!(cpu.step(&mut bus), Ok(4)); // EI
+        assert_eq!(cpu.step(&mut bus), Ok(4)); // NOP still runs
+        assert_eq!(cpu.step(&mut bus), Ok(20)); // then the interrupt
+        assert_eq!(bus.read16(cpu.regs.sp), 0xC002, "returns to the second NOP");
+    }
+
+    #[test]
+    fn reti_after_dispatch_resumes_with_interrupts_on() {
+        let (mut cpu, mut bus) = setup_irq(&[0x00], interrupt::VBLANK, interrupt::VBLANK);
+        cpu.step(&mut bus).unwrap();
+        // The vector is in ROM, so run RETI from WRAM by hand.
+        bus.write(0xC100, 0xD9);
+        cpu.regs.pc = 0xC100;
+        assert_eq!(cpu.step(&mut bus), Ok(16));
+        assert_eq!(cpu.regs.pc, 0xC000);
+        assert_eq!(cpu.regs.sp, 0xD000);
+        assert!(cpu.ime);
+    }
+
+    #[test]
+    fn halt_wakes_into_the_interrupt_handler() {
+        let (mut cpu, mut bus) = setup_irq(&[0x76, 0x00], interrupt::TIMER, 0);
+        cpu.step(&mut bus).unwrap(); // HALT
+        assert_eq!(cpu.step(&mut bus), Ok(4), "still halted");
+        bus.if_reg |= interrupt::TIMER;
+        assert_eq!(cpu.step(&mut bus), Ok(20));
+        assert!(!cpu.halted);
+        assert_eq!(cpu.regs.pc, 0x50);
+        assert_eq!(bus.read16(cpu.regs.sp), 0xC001, "returns after the HALT");
     }
 }

@@ -38,7 +38,7 @@ The big one: all 256 base opcodes and 256 `CB`-prefixed opcodes (minus 11 illega
 
 ## Milestone 2 — Interrupts and timing
 
-- [ ] Interrupt dispatch in `Cpu::step` (see the TODO there): priority order, push PC,
+- [x] Interrupt dispatch in `Cpu::step`: priority order, push PC,
       clear IF bit and IME, 20 T-cycles
 - [ ] `HALT` wake-up rules, the HALT bug (IME=0 with a pending interrupt). (`RETI` itself landed in milestone 1: `cpu_instrs` 07 needs it.)
 - [ ] Timer edge cases marked `TODO(accuracy)`
