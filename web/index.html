@@ -73,13 +73,43 @@
 
     <details id="link-panel" class="link-panel">
       <summary>Link cable <span id="link-status" class="muted">unplugged</span></summary>
+      <p class="muted link-help">Two-player games talk over the link cable. Both players load
+        the game, then link up one of these ways.</p>
+
+      <h3 class="link-heading">Over the internet</h3>
+      <div class="toolbar">
+        <button id="link-invite" type="button">Invite a friend</button>
+        <button id="link-join" type="button">Join with a code</button>
+        <button id="link-hangup" type="button" hidden>Hang up</button>
+      </div>
+      <div id="link-steps" class="link-steps" hidden>
+        <div id="link-out-step">
+          <label for="link-out" id="link-out-label"></label>
+          <div class="link-code">
+            <textarea id="link-out" rows="3" readonly spellcheck="false"></textarea>
+            <button id="link-copy" type="button">Copy</button>
+          </div>
+        </div>
+        <div id="link-in-step">
+          <label for="link-in" id="link-in-label"></label>
+          <div class="link-code">
+            <textarea id="link-in" rows="3" spellcheck="false" placeholder="Paste the code here"></textarea>
+            <button id="link-in-go" type="button"></button>
+          </div>
+        </div>
+      </div>
+      <p class="muted link-help">The codes connect your two browsers directly, with no server in
+        between, so they include your network address: share them only with the person you're
+        playing with. Some strict networks (offices, some mobile data) block direct connections.
+        Each byte waits for a round trip, so link-heavy games run slower than side by side.</p>
+
+      <h3 class="link-heading">On this computer</h3>
       <div class="toolbar">
         <button id="link-tab" type="button" aria-pressed="false">Link with another tab</button>
       </div>
-      <p class="muted link-help">Two-player games talk over the link cable. To try it on one
-        computer, open this page in a second window, load a game in both, and press
-        <b>Link with another tab</b> in each. Keep both windows visible side by side:
-        browsers pause pages in background tabs, and a paused partner can't answer.</p>
+      <p class="muted link-help">Open this page in a second window, load a game in both, and press
+        <b>Link with another tab</b> in each. Keep both windows visible side by side: browsers
+        pause pages in background tabs, and a paused partner can't answer.</p>
     </details>
 
     <details id="debug-panel">

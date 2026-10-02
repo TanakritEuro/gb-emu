@@ -13,6 +13,7 @@ import { VramView } from "./vramview.js";
 import { BreakpointList } from "./breakpoints.js";
 import { hex } from "./format.js";
 import { LinkSession, TabLink, FRAME_BREAKPOINT, FRAME_LINK_WAIT, PING_MS } from "./link.js";
+import { RtcLink } from "./rtc.js";
 import {
   StateStore,
   SlotsPanel,
@@ -574,29 +575,48 @@ addEventListener("visibilitychange", () => {
 });
 addEventListener("pagehide", persistSave);
 
-// Link cable. A LinkSession carries bytes between this tab's Game Boy and a
-// partner's; for now the partner is another tab of this site in the same
-// browser, found over a BroadcastChannel.
-const link = new LinkSession((msg) => tabLink.send(msg));
-const tabLink = new TabLink(
-  typeof BroadcastChannel === "function" ? new BroadcastChannel("gb-emu-link") : fakeChannel(),
-  {
+// Link cable. A LinkSession carries bytes between this page's Game Boy and
+// a partner's, over whichever connection is linked: WebRTC straight to
+// another browser (rtc.js), or a BroadcastChannel to another tab of this
+// browser (TabLink). Only one at a time: starting one stops the other.
+let transport = null; // the connection that's linked, if any
+const link = new LinkSession((msg) => transport?.send(msg));
+
+/** Events for a connection; `get` names it, so only the linked one counts. */
+function linkEvents(get) {
+  return {
     paired: () => {
+      transport = get();
       link.connect();
+      netNote = "";
       showLink();
     },
     unpaired: () => {
-      link.disconnect();
+      if (transport === get()) {
+        transport = null;
+        link.disconnect();
+      }
+      if (get() === rtcLink) netMode = null;
       showLink();
     },
     message: (msg) => {
-      if (link.receive(msg)) continueAfterLink();
+      if (transport === get() && link.receive(msg)) continueAfterLink();
     },
-  },
+  };
+}
+
+const tabLink = new TabLink(
+  typeof BroadcastChannel === "function" ? new BroadcastChannel("gb-emu-link") : fakeChannel(),
+  linkEvents(() => tabLink),
 );
-// Closing the tab tells the partner, which unplugs its cable; if that
-// message never gets out, the partner notices the silence (TIMEOUT_MS).
-addEventListener("pagehide", () => tabLink.stop());
+const rtcLink = new RtcLink(linkEvents(() => rtcLink));
+// Closing the page tells the partner, which unplugs its cable; if that
+// message never gets out, a tab partner notices the silence (TIMEOUT_MS)
+// and a WebRTC one sees the connection drop.
+addEventListener("pagehide", () => {
+  tabLink.stop();
+  rtcLink.close();
+});
 setInterval(() => tabLink.tick(), PING_MS / 2);
 
 /** A channel that goes nowhere, where BroadcastChannel isn't available. */
@@ -605,31 +625,134 @@ function fakeChannel() {
 }
 
 function toggleTabLink() {
-  if (tabLink.partner || tabLink.looking) tabLink.stop();
-  else tabLink.start();
+  if (tabLink.partner || tabLink.looking) {
+    tabLink.stop();
+  } else {
+    hangUp();
+    tabLink.start();
+  }
   showLink();
 }
 
-function showLink() {
-  const button = $("link-tab");
-  let status;
-  if (tabLink.partner) {
-    status = `🔗 linked to another tab · ${link.bytes.toLocaleString("en")} bytes swapped`;
-    button.textContent = "Unplug";
-  } else if (tabLink.looking) {
-    status = "looking for another tab… press Link in it too";
-    button.textContent = "Stop looking";
-  } else {
-    status = "unplugged";
-    button.textContent = "Link with another tab";
+// Over the internet: the host invites, the guest joins; each pastes the
+// other's code. `netMode` is "host" or "guest" while that's under way.
+let netMode = null;
+let netNote = ""; // what's happening, or what went wrong
+
+async function startInvite() {
+  tabLink.stop();
+  netMode = "host";
+  netNote = "finding your network address…";
+  $("link-out").value = "";
+  $("link-in").value = "";
+  showLink();
+  try {
+    $("link-out").value = await rtcLink.invite();
+    netNote = "send the invite, then paste their reply";
+  } catch (e) {
+    netNote = `couldn't make an invite: ${e.message ?? e}`;
   }
-  $("link-status").textContent = status;
-  button.setAttribute("aria-pressed", String(Boolean(tabLink.partner || tabLink.looking)));
+  showLink();
 }
-$("link-tab").addEventListener("click", (e) => {
-  toggleTabLink();
-  e.currentTarget.blur(); // like the toolbar: Enter and Space belong to the game
-});
+
+function startJoin() {
+  tabLink.stop();
+  rtcLink.close();
+  netMode = "guest";
+  netNote = "paste the invite code you were sent";
+  $("link-out").value = "";
+  $("link-in").value = "";
+  showLink();
+}
+
+/** The Connect / Make a reply code button. */
+async function useCode() {
+  const code = $("link-in").value;
+  try {
+    if (netMode === "host") {
+      netNote = "connecting…";
+      showLink();
+      await rtcLink.finish(code);
+    } else {
+      netNote = "finding your network address…";
+      showLink();
+      $("link-out").value = await rtcLink.join(code);
+      netNote = "send the reply back; you'll be linked when they paste it";
+    }
+  } catch (e) {
+    netNote = e.message ?? String(e);
+  }
+  showLink();
+}
+
+function hangUp() {
+  rtcLink.close();
+  netMode = null;
+  netNote = "";
+  showLink();
+}
+
+async function copyCode() {
+  const out = $("link-out");
+  try {
+    await navigator.clipboard.writeText(out.value);
+    $("link-copy").textContent = "Copied ✓";
+    setTimeout(() => ($("link-copy").textContent = "Copy"), 1500);
+  } catch {
+    out.select(); // no clipboard access: select it for Ctrl+C
+  }
+}
+
+function showLink() {
+  const bytes = `${link.bytes.toLocaleString("en")} bytes swapped`;
+  let status;
+  if (transport === rtcLink) status = `🔗 linked over the internet · ${bytes}`;
+  else if (transport === tabLink) status = `🔗 linked to another tab · ${bytes}`;
+  else if (netMode) status = netNote;
+  else if (tabLink.looking) status = "looking for another tab… press Link in it too";
+  else status = "unplugged";
+  $("link-status").textContent = status;
+
+  // The tab button.
+  const tab = $("link-tab");
+  tab.textContent = tabLink.partner ? "Unplug" : tabLink.looking ? "Stop looking" : "Link with another tab";
+  tab.setAttribute("aria-pressed", String(Boolean(tabLink.partner || tabLink.looking)));
+
+  // The internet steps: what to send, and what to paste.
+  const linked = transport === rtcLink;
+  const busy = linked || netMode !== null;
+  $("link-invite").hidden = busy;
+  $("link-join").hidden = busy;
+  $("link-hangup").hidden = !busy;
+  $("link-steps").hidden = linked || netMode === null;
+  const hasOut = $("link-out").value !== "";
+  $("link-out-step").hidden = netMode === "guest" ? !hasOut : false;
+  $("link-in-step").hidden = netMode === "guest" && hasOut;
+  if (netMode === "host") {
+    $("link-out-label").textContent = "1. Send this invite code to your friend:";
+    $("link-in-label").textContent = "2. Paste the reply code they send back:";
+    $("link-in-go").textContent = "Connect";
+  } else if (netMode === "guest") {
+    $("link-in-label").textContent = "1. Paste the invite code your friend sent:";
+    $("link-out-label").textContent = "2. Send this reply code back to your friend:";
+    $("link-in-go").textContent = "Make a reply code";
+  }
+  $("link-copy").disabled = !hasOut;
+}
+
+for (const [id, action] of [
+  ["link-tab", toggleTabLink],
+  ["link-invite", startInvite],
+  ["link-join", startJoin],
+  ["link-in-go", useCode],
+  ["link-hangup", hangUp],
+  ["link-copy", copyCode],
+]) {
+  $(id).addEventListener("click", (e) => {
+    action();
+    e.currentTarget.blur(); // like the toolbar: Enter and Space belong to the game
+  });
+}
 showLink();
 
 // Save states: four slots per game in IndexedDB, each with a picture of

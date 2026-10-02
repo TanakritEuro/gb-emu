@@ -123,7 +123,8 @@ Pick whichever sound most fun:
         when clocked; two Game Boys linked in a test swap bytes
   - [x] Two browser tabs linked on one computer, to get the browser side right without a network
         (about 1000 bytes a second, as fast as the real cable)
-  - [ ] WebRTC between two browsers, connected by copying a code each way (no server)
+  - [x] WebRTC between two browsers, connected by copying a code each way (no server; STUN, no
+        TURN relay, so the strictest networks can't link)
   - [ ] A two-player homebrew game plays over the link
 
 ---

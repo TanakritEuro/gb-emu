@@ -67,10 +67,19 @@ kept in the browser (IndexedDB) between visits. Keys: 1-4 pick a slot, S saves, 
 is the whole machine, so loading one also puts the battery save (and the MBC3 clock) back to how
 they were then.
 
-Link cable: two-player games can link two copies of the emulator. For now that means two windows
-of the same browser on one computer: load a game in each, open **Link cable** and press **Link
-with another tab** in both. Keep both windows visible (browsers pause background tabs). Bytes
-cross at the real link speed, about 1 KB/s; closing either window unplugs the other.
+Link cable: two-player games can link two copies of the emulator. Both players load the game and
+open **Link cable**, then:
+
+- **Over the internet** (WebRTC, browser to browser, no server): one player presses **Invite a
+  friend** and sends the code it shows (by chat, email, anything); the other presses **Join with
+  a code**, pastes it, and sends back the reply code; the first pastes that and presses
+  **Connect**. The codes include your network address, so share them only with the person you're
+  playing with. Each byte waits for a network round trip, so link-heavy games run slower than
+  on one computer, and some strict networks (offices, some mobile data) block the direct
+  connection altogether (there's no relay server).
+- **On one computer:** two windows of the same browser, each pressing **Link with another tab**.
+  Keep both visible (browsers pause background tabs). Bytes cross at the real link speed, about
+  1 KB/s; closing either window unplugs the other.
 
 Sound starts with your first click, tap or key press (browsers require one). The Sound button
 or M mutes it. Fast-forward is silent.

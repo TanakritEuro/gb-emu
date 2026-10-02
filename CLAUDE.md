@@ -24,7 +24,7 @@ A Game Boy (DMG) and Game Boy Color (CGB) emulator in Rust that runs in the brow
   - `tests/smoke.rs` end-to-end tests through the public `GameBoy` API
 - `crates/gb-cli/` — headless runner for test ROMs; `--doctor` writes Gameboy Doctor traces, `--wav` records audio
 - `crates/gb-wasm/` — wasm-bindgen wrapper (`Emulator` class) used by `web/`
-- `web/` — static frontend (`index.html`, `main.js`, `style.css`; `input.js` maps keyboard/gamepad/touch to buttons, `timing.js` paces frames, `saves.js` keeps battery saves in localStorage, `states.js` save state slots in IndexedDB, `link.js` the link cable (carries bytes to a partner tab), `audio.js` + `audio-worklet.js` + `audio-queue.js` play sound, `debugger.js` + `memview.js` + `vramview.js` + `breakpoints.js` are the debugger panel); `web/pkg/` is generated
+- `web/` — static frontend (`index.html`, `main.js`, `style.css`; `input.js` maps keyboard/gamepad/touch to buttons, `timing.js` paces frames, `saves.js` keeps battery saves in localStorage, `states.js` save state slots in IndexedDB, `link.js` the link cable (carries bytes to a partner), `rtc.js` its WebRTC connection (invite/reply codes), `audio.js` + `audio-worklet.js` + `audio-queue.js` play sound, `debugger.js` + `memview.js` + `vramview.js` + `breakpoints.js` are the debugger panel); `web/pkg/` is generated
 - `scripts/build-web.ps1` / `build-web.sh` — build `web/pkg`
 - `.cargo/config.toml` — on Windows (GNU) link with Rust's bundled MinGW linker; MSYS2's ld
   crashes on Rust DLLs
@@ -39,7 +39,7 @@ A Game Boy (DMG) and Game Boy Color (CGB) emulator in Rust that runs in the brow
 ```sh
 cargo test --workspace                                  # all tests; must pass before any commit
 cargo clippy --workspace --all-targets -- -D warnings  # lint; keep it clean
-node --test "web/*.test.js"                             # frontend tests (input, timing, saves, states, link, audio, debugger)
+node --test "web/*.test.js"                             # frontend tests (input, timing, saves, states, link, rtc codes, audio, debugger)
 cargo run --release -p gb-cli -- <rom.gb>              # run a test ROM headlessly
 cargo run --release -p gb-cli -- <rom.gb> --doctor trace.log   # CPU trace for Gameboy Doctor
 cargo run --release -p gb-cli -- <rom.gb> --wav out.wav        # record the sound (48 kHz WAV)

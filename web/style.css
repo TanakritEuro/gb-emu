@@ -410,3 +410,31 @@ main > * { min-width: 0; }
 .link-panel summary .muted { margin-left: 8px; font-size: 13px; }
 .link-panel .toolbar { margin-top: 10px; }
 .link-help { margin: 8px 0 0; font-size: 13px; }
+.link-heading { margin: 16px 0 0; font-size: 14px; font-weight: 600; color: var(--text); }
+.link-steps { display: grid; gap: 10px; margin-top: 10px; }
+.link-steps label { display: block; font-size: 13px; margin-bottom: 4px; }
+.link-code { display: flex; gap: 8px; align-items: stretch; }
+.link-code textarea {
+  flex: 1;
+  min-width: 0;
+  font: 12px/1.4 ui-monospace, monospace;
+  padding: 6px 8px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid #3a444e;
+  border-radius: 6px;
+  resize: vertical;
+  word-break: break-all;
+}
+.link-code button {
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 12px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid #3a444e;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.link-code button:hover:not(:disabled) { border-color: var(--accent); }
+.link-code button:disabled { opacity: 0.4; cursor: default; }
