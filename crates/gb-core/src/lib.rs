@@ -19,6 +19,7 @@ pub mod state;
 pub mod timer;
 
 use bus::{interrupt, Bus};
+use compat::CompatPalettes;
 use cpu::{Cpu, CpuError};
 use state::{StateReader, StateWriter};
 use std::collections::BTreeSet;
@@ -50,6 +51,9 @@ pub struct GameBoy {
     /// How far into the current frame [`run_frame`](Self::run_frame) has
     /// got, in normal-speed T-cycles: nonzero after it stopped early.
     frame_elapsed: u32,
+    /// Compatibility mode palettes the host picked over the boot ROM's
+    /// (see [`set_compat_palettes`](Self::set_compat_palettes)).
+    chosen_palettes: Option<CompatPalettes>,
 }
 
 /// Which console to be.
@@ -57,8 +61,9 @@ pub struct GameBoy {
 pub enum Model {
     /// The original Game Boy (DMG).
     Dmg,
-    /// The Game Boy Color, running a game in Color mode: double speed, color
-    /// palettes, banked VRAM and WRAM.
+    /// The Game Boy Color: in Color mode for Color cartridges (double speed,
+    /// color palettes, banked VRAM and WRAM), in its compatibility mode for
+    /// original ones ([`compat`]).
     Cgb,
 }
 
@@ -114,11 +119,41 @@ impl GameBoy {
             breakpoints: BTreeSet::new(),
             resume_here: false,
             frame_elapsed: 0,
+            chosen_palettes: None,
         })
     }
 
     pub fn model(&self) -> Model {
         self.bus.model
+    }
+
+    /// A Game Boy Color running an original cartridge, in its
+    /// compatibility mode ([`compat`]).
+    pub fn is_compat(&self) -> bool {
+        self.bus.compat
+    }
+
+    /// The palettes the Color's boot ROM picks for this cartridge (what
+    /// [`set_compat_palettes`](Self::set_compat_palettes)`(None)` shows).
+    pub fn boot_palettes(&self) -> CompatPalettes {
+        compat::boot_palettes(&self.bus.cart)
+    }
+
+    /// In compatibility mode, shows the game in `palettes` instead of the
+    /// ones the boot ROM picked (`None` goes back to those), as holding a
+    /// button combination at boot would ([`compat::BUTTON_PALETTES`]). The
+    /// choice sticks through loading save states and rewinding: it belongs
+    /// to whoever is playing, not to the game. Returns false, changing
+    /// nothing, outside compatibility mode.
+    pub fn set_compat_palettes(&mut self, palettes: Option<CompatPalettes>) -> bool {
+        if !self.bus.compat {
+            return false;
+        }
+        self.chosen_palettes = palettes;
+        self.bus
+            .ppu
+            .set_compat_palettes(palettes.unwrap_or_else(|| self.boot_palettes()));
+        true
     }
 
     /// Executes one instruction and advances the rest of the hardware by the
@@ -218,6 +253,10 @@ impl GameBoy {
         r.finish()?;
         next.bus.ppu.keep_framebuffer_of(&mut self.bus.ppu);
         next.resume_here = false; // a fresh start here: breakpoints apply
+        if self.bus.compat {
+            let palettes = self.chosen_palettes.unwrap_or_else(|| self.boot_palettes());
+            next.bus.ppu.set_compat_palettes(palettes);
+        }
         *self = next;
         Ok(())
     }

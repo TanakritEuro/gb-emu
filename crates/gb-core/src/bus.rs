@@ -175,8 +175,13 @@ impl Bus {
 
     pub(crate) fn load_state(&mut self, r: &mut StateReader) -> Result<(), StateError> {
         r.tag(b"BUS ")?;
-        if r.u8()? != self.model as u8 {
-            return Err(StateError::Corrupt("made on a different model"));
+        let made_on = r.u8()?;
+        if made_on != self.model as u8 {
+            return Err(match made_on {
+                m if m == Model::Dmg as u8 => StateError::WrongModel(Model::Dmg),
+                m if m == Model::Cgb as u8 => StateError::WrongModel(Model::Cgb),
+                _ => StateError::Corrupt("console"),
+            });
         }
         let size = self.wram_size();
         r.sized_bytes(&mut self.wram[..size])?;

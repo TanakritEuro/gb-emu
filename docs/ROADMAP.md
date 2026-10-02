@@ -154,7 +154,7 @@ this is where the hardware gets interesting.
 (Done: 12/12. Mooneye overall 96/100 here; the other 4 are unused I/O bits, boot I/O
 values, the serial clock's boot alignment and an MBC1 multicart.)
 
-## Milestone 9 — Original games in color
+## Milestone 9 — Original games in color ✅
 
 A Game Boy Color plays original Game Boy cartridges in its "DMG compatibility mode": the boot
 ROM loads a few palettes (per game, for Nintendo's) and the original's palette registers pick
@@ -169,10 +169,12 @@ from them. On a real Color you could also hold a button combination at boot to c
 - [x] The boot ROM's palette for each of Nintendo's games: a checksum of the title, and its 4th
       letter where checksums collide (94 titles, 51 palette combinations; tables from SameBoy's
       boot ROM, which match Pokémon Red's, Blue's and others' title checksums)
-- [ ] In the browser: play original games on a Game Boy or a Game Boy Color, and pick one of
-      the 12 palettes a real Color offers for button combinations at boot
+- [x] In the browser: play original games on a Game Boy or a Game Boy Color, and pick one of
+      the 12 palettes a real Color offers for button combinations at boot (the Console panel;
+      both choices remembered, the palette per game, and kept through save states and rewind)
 
 **Done when:** an original game plays in color in the browser, in a palette you picked.
+(Done: Tobu Tobu Girl plays in the Color's automatic palette and in any of the 12.)
 
 ---
 

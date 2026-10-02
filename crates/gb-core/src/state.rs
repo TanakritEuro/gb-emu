@@ -22,6 +22,7 @@
 //! `load_state` next to its fields), in the order `GameBoy::save_state`
 //! calls them. Any change to what a section holds must bump [`VERSION`].
 
+use crate::Model;
 use std::fmt;
 
 const MAGIC: &[u8; 4] = b"GBST";
@@ -48,6 +49,8 @@ pub enum StateError {
     WrongGame,
     /// Damaged: cut short, a bad checksum, or values that don't fit.
     Corrupt(&'static str),
+    /// Made on the other console (the one given), for the same game.
+    WrongModel(Model),
 }
 
 impl fmt::Display for StateError {
@@ -60,6 +63,14 @@ impl fmt::Display for StateError {
             ),
             Self::WrongGame => write!(f, "this save state is for a different game"),
             Self::Corrupt(what) => write!(f, "damaged save state: {what}"),
+            Self::WrongModel(model) => write!(
+                f,
+                "this save state was made on the {}",
+                match model {
+                    Model::Dmg => "Game Boy",
+                    Model::Cgb => "Game Boy Color",
+                }
+            ),
         }
     }
 }

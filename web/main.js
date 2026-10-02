@@ -15,6 +15,14 @@ import { hex } from "./format.js";
 import { LinkSession, TabLink, FRAME_BREAKPOINT, FRAME_LINK_WAIT, PING_MS } from "./link.js";
 import { RtcLink } from "./rtc.js";
 import {
+  AUTO_PALETTE,
+  PalettePicker,
+  readConsole,
+  readPalette,
+  writeConsole,
+  writePalette,
+} from "./console.js";
+import {
   StateStore,
   SlotsPanel,
   indexedDbBackend,
@@ -114,6 +122,7 @@ async function loadRom(file) {
   }
   rom = bytes;
   romSaveKey = key;
+  showConsole();
   $("title").textContent = emu.title() || file.name;
   $("hint").hidden = true;
   restoreStoredSave();
@@ -132,7 +141,7 @@ async function loadRom(file) {
 function boot(bytes, what, save = null) {
   let next = null;
   try {
-    next = new Emulator(bytes);
+    next = new Emulator(bytes, consoleChoice === "cgb");
     if (save) next.load_save(save, nowSeconds());
   } catch (e) {
     next?.free();
@@ -160,9 +169,62 @@ function reset() {
   if (!rom) return;
   const save = emu?.save_data(nowSeconds()) ?? null;
   if (!boot(rom, $("title").textContent, save)) return;
+  showConsole();
   draw();
   if (!paused) start();
 }
+
+// The Console panel: which console original games run on (remembered for
+// every game), and on the Color which palette (remembered per game).
+let consoleChoice = readConsole(storage);
+const paletteNames = Emulator.button_palette_names();
+const palettes = new PalettePicker($("palettes"), (choice) => {
+  if (!emu?.is_compat()) return;
+  writePalette(storage, romSaveKey, choice);
+  showConsole();
+});
+
+/** Picks the console for original games; restarts one that's running (with
+ * its battery save) on the new console. */
+function setConsole(choice) {
+  if (choice === consoleChoice) return;
+  consoleChoice = choice;
+  writeConsole(storage, choice);
+  if (emu && (emu.is_compat() || !emu.is_color())) reset();
+  else showConsole();
+}
+
+/** Shows what the game runs on, and applies and shows its palette. */
+function showConsole() {
+  $("console-dmg").setAttribute("aria-pressed", String(consoleChoice === "dmg"));
+  $("console-cgb").setAttribute("aria-pressed", String(consoleChoice === "cgb"));
+  const compat = !!emu?.is_compat();
+  $("console-status").textContent = !emu
+    ? ""
+    : compat
+      ? "Game Boy Color, original game"
+      : emu.is_color()
+        ? "Game Boy Color"
+        : "Game Boy";
+  $("palette-section").hidden = !compat;
+  if (!compat) return;
+  const selected = readPalette(storage, romSaveKey, paletteNames.length);
+  emu.set_palette(selected);
+  palettes.render(
+    [
+      { choice: AUTO_PALETTE, label: "Automatic", colors: emu.palette_colors(AUTO_PALETTE) },
+      ...paletteNames.map((label, choice) => ({
+        choice,
+        label,
+        colors: emu.palette_colors(choice),
+      })),
+    ],
+    selected,
+  );
+}
+$("console-dmg").addEventListener("click", () => setConsole("dmg"));
+$("console-cgb").addEventListener("click", () => setConsole("cgb"));
+showConsole();
 
 // Battery saves: stored per ROM in localStorage shortly after the game
 // writes one, and whenever the page is hidden or closed.
@@ -208,6 +270,7 @@ async function importSave(file) {
   if (!rom) return;
   const data = new Uint8Array(await file.arrayBuffer());
   if (!boot(rom, file.name, data)) return;
+  showConsole();
   persistSave();
   setSaveStatus(`💾 imported ${file.name}`);
   draw();

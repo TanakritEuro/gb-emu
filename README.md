@@ -8,7 +8,8 @@ or its Color edition, Tobu Tobu Girl Deluxe).
 
 Status: plays original Game Boy (DMG) and Game Boy Color games with sound, battery saves, save
 states, rewind and a debugger, in the browser or headless. Games that support the Color run in
-color; the rest run as on the original. Next up: [docs/ROADMAP.md](docs/ROADMAP.md).
+color; original games run as on the original Game Boy, or in color on a Game Boy Color with the
+palette of your choice. Next up: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Setup (once)
 
@@ -61,6 +62,11 @@ emulators (BGB/VBA-M format, including the MBC3 clock, which catches up on time 
 Rewind: hold Backspace (or the ⏪ button) to run time backwards at double speed, up to 30 seconds;
 let go and play on from there. While paused, each press steps back two frames. The button shows
 how much history there is.
+
+Console: original Game Boy games run as on the original (green screen) unless you pick Game Boy
+Color in the Console panel. The Color colors them with the palette its startup ROM picks for the
+game, or one of the 12 it offers for button combinations held at startup, which you can choose
+there too. Both choices are remembered in the browser, the palette per game.
 
 Save states: four slots per game under the screen, each with a picture and when it was saved,
 kept in the browser (IndexedDB) between visits. Keys: 1-4 pick a slot, S saves, L loads. A state

@@ -406,6 +406,36 @@ main > * { min-width: 0; }
 .slot button:hover:not(:disabled) { border-color: var(--accent); }
 .slot button:disabled { opacity: 0.4; cursor: default; }
 
+/* Console and palettes */
+.console-panel summary .muted { margin-left: 8px; font-size: 13px; }
+.console-panel .toolbar { margin-top: 10px; }
+.panel-help { margin: 8px 0 0; font-size: 13px; }
+.panel-heading { margin: 16px 0 0; font-size: 14px; font-weight: 600; color: var(--text); }
+.palettes {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+.palettes button {
+  display: grid;
+  gap: 6px;
+  padding: 6px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid #3a444e;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.palettes button:hover { border-color: var(--accent); }
+.palettes button[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+/* The background's 4 colors as a row of tall swatches, the sprites' 8 below. */
+.swatches { display: grid; grid-template-columns: repeat(8, 1fr); border-radius: 3px; overflow: hidden; }
+.swatches i { height: 18px; grid-column: span 2; }
+.swatches i.obj { height: 8px; grid-column: span 1; }
+
 /* Link cable */
 .link-panel summary .muted { margin-left: 8px; font-size: 13px; }
 .link-panel .toolbar { margin-top: 10px; }

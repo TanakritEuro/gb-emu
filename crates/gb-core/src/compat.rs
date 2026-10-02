@@ -72,6 +72,32 @@ pub fn boot_palettes(cart: &Cartridge) -> CompatPalettes {
     combination(boot_combination(cart))
 }
 
+/// The palettes a real Color lets you pick for an original game by holding
+/// a direction, maybe with A or B, during its boot animation: (the buttons,
+/// which of the [`COMBINATIONS`]). Holding one overrides the boot ROM's
+/// own choice. https://tcrf.net/Game_Boy_Color_Bootstrap_ROM
+pub const BUTTON_PALETTES: [(&str, u8); 12] = [
+    ("Up", 5),
+    ("Up + A", 43),
+    ("Up + B", 28),
+    ("Down", 8),
+    ("Down + A", 3),
+    ("Down + B", 49),
+    ("Left", 48),
+    ("Left + A", 40),
+    ("Left + B", 7),
+    ("Right", 1),
+    ("Right + A", 0),
+    ("Right + B", 6),
+];
+
+/// The palettes for [`BUTTON_PALETTES`] entry `i`.
+pub fn button_palettes(i: usize) -> Option<CompatPalettes> {
+    BUTTON_PALETTES
+        .get(i)
+        .map(|&(_, combo)| combination(usize::from(combo)))
+}
+
 /// Which of the [`COMBINATIONS`] the boot ROM picks for `cart`.
 fn boot_combination(cart: &Cartridge) -> usize {
     let Some(checksum) = title_checksum(cart) else {
@@ -484,6 +510,24 @@ mod tests {
         rom[0x144..0x146].copy_from_slice(b"01");
         rom[0x14D] = header_checksum(&rom);
         assert_eq!(boot_palettes(&Cartridge::from_rom(rom).unwrap()), red);
+    }
+
+    #[test]
+    fn button_combinations_pick_the_known_palettes() {
+        let named = |name| {
+            let i = BUTTON_PALETTES
+                .iter()
+                .position(|&(n, _)| n == name)
+                .unwrap();
+            button_palettes(i).unwrap()
+        };
+        // Up is the brown one; Left + B grey all over.
+        assert_eq!(named("Up").bg, [0x7FFF, 0x32BF, 0x00D0, 0x0000]);
+        let grey = [0x7FFF, 0x5294, 0x294A, 0x0000];
+        let left_b = named("Left + B");
+        assert_eq!((left_b.bg, left_b.obj), (grey, [grey, grey]));
+        assert_eq!(named("Right + A"), DEFAULT_PALETTES, "same as the default");
+        assert_eq!(button_palettes(BUTTON_PALETTES.len()), None);
     }
 
     #[test]

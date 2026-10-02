@@ -69,6 +69,25 @@
       <span id="pad"></span>
     </section>
 
+    <details id="console-panel" class="console-panel">
+      <summary>Console <span id="console-status" class="muted"></span></summary>
+      <p class="muted panel-help">Original Game Boy games can run on a Game Boy, or on a Game Boy
+        Color, which colors them with palettes from its startup ROM. Color games always run on a
+        Game Boy Color.</p>
+      <div class="toolbar" role="group" aria-label="Console for original Game Boy games">
+        <button id="console-dmg" type="button" aria-pressed="true">Game Boy</button>
+        <button id="console-cgb" type="button" aria-pressed="false">Game Boy Color</button>
+      </div>
+      <p class="muted panel-help">Switching restarts the game; its battery save carries over.
+        Save states belong to the console they were made on.</p>
+      <div id="palette-section" hidden>
+        <h3 class="panel-heading">Palette</h3>
+        <p class="muted panel-help">On a real Game Boy Color you pick one by holding these buttons
+          while it starts up. Automatic is what it picks for this game by itself.</p>
+        <div id="palettes" class="palettes"></div>
+      </div>
+    </details>
+
     <details id="states-panel" class="states-panel" open>
       <summary>Save states <span id="state-status" class="muted"></span></summary>
       <div id="slots" class="slots"></div>

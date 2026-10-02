@@ -3,6 +3,7 @@
 //! Errors become thrown JS `Error`s, so web/main.js can show messages like
 //! "illegal opcode DD at $0150" right on the page.
 
+use gb_core::compat::{self, CompatPalettes};
 use gb_core::{Button, FrameEnd, GameBoy, Model, Rewind, CPU_HZ, CYCLES_PER_FRAME};
 use wasm_bindgen::prelude::*;
 
@@ -24,10 +25,12 @@ pub struct Emulator {
 
 #[wasm_bindgen]
 impl Emulator {
+    /// Color games always run on a Game Boy Color; original games run on the
+    /// original, or with `color` on a Color in its compatibility mode.
     #[wasm_bindgen(constructor)]
-    pub fn new(rom: Vec<u8>) -> Result<Emulator, JsError> {
+    pub fn new(rom: Vec<u8>, color: bool) -> Result<Emulator, JsError> {
         let snapshots = (REWIND_SECONDS as f64 * FPS) as usize / REWIND_EVERY as usize;
-        GameBoy::new(rom)
+        GameBoy::with_model(rom, color.then_some(Model::Cgb))
             .map(|gb| Emulator {
                 gb,
                 rewind: Rewind::new(REWIND_EVERY, snapshots, REWIND_BYTES),
@@ -256,6 +259,51 @@ impl Emulator {
     /// Whether this is running as a Game Boy Color.
     pub fn is_color(&self) -> bool {
         self.gb.model() == Model::Cgb
+    }
+
+    /// An original game on the Color, in its compatibility mode: the one
+    /// case where `set_palette` does something.
+    pub fn is_compat(&self) -> bool {
+        self.gb.is_compat()
+    }
+
+    /// The button combinations a real Color offers palettes for at boot,
+    /// e.g. "Up + A"; `set_palette` and `palette_colors` number them from 0.
+    pub fn button_palette_names() -> Vec<String> {
+        compat::BUTTON_PALETTES
+            .iter()
+            .map(|&(name, _)| name.to_string())
+            .collect()
+    }
+
+    /// Shows an original game on the Color in palette `choice`: one of
+    /// `button_palette_names`, or -1 for the one the boot ROM picks for
+    /// this game. Returns false outside compatibility mode or for a choice
+    /// that doesn't exist.
+    pub fn set_palette(&mut self, choice: i32) -> bool {
+        match Self::palettes_for(choice, &self.gb) {
+            Some(palettes) => self
+                .gb
+                .set_compat_palettes((choice >= 0).then_some(palettes)),
+            None => false,
+        }
+    }
+
+    /// The 12 colors (RGB555) of palette `choice` (see `set_palette`), for
+    /// a preview: the background's 4, then OBP0's, then OBP1's. Empty for a
+    /// choice that doesn't exist.
+    pub fn palette_colors(&self, choice: i32) -> Vec<u16> {
+        Self::palettes_for(choice, &self.gb)
+            .map(|p| [p.bg, p.obj[0], p.obj[1]].concat())
+            .unwrap_or_default()
+    }
+
+    fn palettes_for(choice: i32, gb: &GameBoy) -> Option<CompatPalettes> {
+        match usize::try_from(choice) {
+            Ok(i) => compat::button_palettes(i),
+            Err(_) if choice == -1 => Some(gb.boot_palettes()),
+            Err(_) => None,
+        }
     }
 
     /// A tile map as RGBA, 256 × 256: $9C00 if `high_map`, else $9800.

@@ -353,12 +353,15 @@ fn a_color_state_carries_on_exactly_like_the_original() {
         fresh.save_state() == original,
         "loaded into a fresh Game Boy Color"
     );
-    // Same ROM run as the other model: refused rather than half-loaded.
+    // Same ROM run as the other model: refused rather than half-loaded, and
+    // the error says which console the state is for.
     let mut dmg = GameBoy::with_model(color_busy_rom(), Some(Model::Dmg)).unwrap();
-    assert!(matches!(
-        dmg.load_state(&saved),
-        Err(StateError::Corrupt(_))
-    ));
+    let err = dmg.load_state(&saved).unwrap_err();
+    assert_eq!(err, StateError::WrongModel(Model::Cgb));
+    assert_eq!(
+        err.to_string(),
+        "this save state was made on the Game Boy Color"
+    );
 }
 
 #[test]
@@ -381,6 +384,44 @@ fn an_original_cartridge_on_the_color_runs_in_compatibility_mode() {
     // The same cartridge on the original isn't in color.
     let gb = GameBoy::new(rom(&code)).unwrap();
     assert_eq!((gb.cpu().regs.a, gb.model()), (0x01, Model::Dmg));
+}
+
+#[test]
+fn a_chosen_palette_sticks_through_save_states_and_rewind() {
+    // An empty screen: everything is BGP color 0, shade 0. That's white in
+    // the boot ROM's palette, and $639F (cream) in Up + B's.
+    let up_b = gb_core::compat::BUTTON_PALETTES
+        .iter()
+        .position(|&(name, _)| name == "Up + B")
+        .and_then(gb_core::compat::button_palettes);
+    let cream = [0xFF, 0xE7, 0xC6, 0xFF];
+    let white = [0xFF, 0xFF, 0xFF, 0xFF];
+    let corner = |gb: &GameBoy| <[u8; 4]>::try_from(&gb.framebuffer()[..4]).unwrap();
+
+    let mut gb = GameBoy::with_model(rom(&[0x18, 0xFE]), Some(Model::Cgb)).unwrap();
+    let mut rewind = Rewind::new(1, 100, 1 << 20);
+    run_frames(&mut gb, 2);
+    assert_eq!(corner(&gb), white);
+    let saved = gb.save_state();
+    rewind.record(&gb);
+
+    assert!(gb.set_compat_palettes(up_b));
+    run_frames(&mut gb, 1);
+    assert_eq!(corner(&gb), cream);
+    // A state and a rewind snapshot from before the choice keep it.
+    gb.load_state(&saved).unwrap();
+    run_frames(&mut gb, 1);
+    assert_eq!(corner(&gb), cream, "after loading a state");
+    assert!(rewind.step_back(&mut gb));
+    run_frames(&mut gb, 1);
+    assert_eq!(corner(&gb), cream, "after rewinding");
+    // Back to the boot ROM's choice.
+    gb.set_compat_palettes(None);
+    run_frames(&mut gb, 1);
+    assert_eq!(corner(&gb), white);
+    // Not in compatibility mode: nothing to choose.
+    let mut dmg = GameBoy::new(rom(&[0x18, 0xFE])).unwrap();
+    assert!(!dmg.is_compat() && !dmg.set_compat_palettes(up_b));
 }
 
 #[test]

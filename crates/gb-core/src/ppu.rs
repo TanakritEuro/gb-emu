@@ -289,6 +289,17 @@ impl Ppu {
     pub fn enter_compat_mode(&mut self, palettes: CompatPalettes) {
         self.compat = true;
         self.opri = 1;
+        self.set_compat_palettes(palettes);
+        // Where the boot ROM's auto-incrementing writes left the indexes:
+        // 8 bytes of background colors, 16 of sprite colors.
+        self.bcps = 0x88;
+        self.ocps = 0x90;
+    }
+
+    /// Puts `palettes` where compatibility mode takes its colors from:
+    /// background palette 0 and sprite palettes 0 and 1. The game can't
+    /// reach palette memory in that mode, so only the host changes these.
+    pub fn set_compat_palettes(&mut self, palettes: CompatPalettes) {
         let put = |ram: &mut [u8; 64], palette: usize, colors: [u16; 4]| {
             for (i, c) in colors.into_iter().enumerate() {
                 ram[palette * 8 + i * 2..][..2].copy_from_slice(&c.to_le_bytes());
@@ -297,10 +308,6 @@ impl Ppu {
         put(&mut self.bg_palettes, 0, palettes.bg);
         put(&mut self.obj_palettes, 0, palettes.obj[0]);
         put(&mut self.obj_palettes, 1, palettes.obj[1]);
-        // Where the boot ROM's auto-incrementing writes left the indexes:
-        // 8 bytes of background colors, 16 of sprite colors.
-        self.bcps = 0x88;
-        self.ocps = 0x90;
     }
 
     /// The Color's palette registers, $FF68-$FF6B, and OPRI, $FF6C. Unused
