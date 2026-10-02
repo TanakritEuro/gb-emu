@@ -35,15 +35,52 @@ impl Emulator {
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
-    /// Runs one frame, and keeps a rewind snapshot when one is due.
-    /// Returns true if it stopped early at a breakpoint (see `set_breakpoint`).
-    pub fn run_frame(&mut self) -> Result<bool, JsError> {
+    /// Runs one frame, and keeps a rewind snapshot when one is due. Returns
+    /// how it ended: 0 a whole frame ran, 1 it stopped early at a breakpoint
+    /// (see `set_breakpoint`), 2 it stopped to wait for the link cable
+    /// partner's byte (see `link_answer`).
+    pub fn run_frame(&mut self) -> Result<u8, JsError> {
         let end = self
             .gb
             .run_frame()
             .map_err(|e| JsError::new(&e.to_string()))?;
-        self.rewind.record(&self.gb);
-        Ok(end == FrameEnd::Breakpoint)
+        Ok(match end {
+            FrameEnd::Done => {
+                self.rewind.record(&self.gb);
+                0
+            }
+            FrameEnd::Breakpoint => {
+                self.rewind.record(&self.gb);
+                1
+            }
+            // Cut short: no snapshot, or heavy link traffic would crowd
+            // the rewind history.
+            FrameEnd::LinkWait => 2,
+        })
+    }
+
+    // The link cable: the page carries bytes to the partner (see web/link.js).
+
+    /// Plugs the link cable in, or pulls it out.
+    pub fn plug_link(&mut self, plugged: bool) {
+        self.gb.plug_link(plugged);
+    }
+
+    /// A byte this side clocked out as master, for the partner; undefined
+    /// if there's none.
+    pub fn take_link_out(&mut self) -> Option<u8> {
+        self.gb.take_link_out()
+    }
+
+    /// The partner's byte for this side's transfer.
+    pub fn link_answer(&mut self, byte: u8) {
+        self.gb.link_answer(byte);
+    }
+
+    /// The partner, as master, clocked `byte` in; returns the byte that goes
+    /// back.
+    pub fn link_clocked(&mut self, byte: u8) -> u8 {
+        self.gb.link_clocked(byte)
     }
 
     /// Goes back to the newest rewind snapshot (2 frames apart), forgetting

@@ -447,6 +447,23 @@ fn a_master_reads_ff_with_no_cable_or_nobody_listening() {
 }
 
 #[test]
+fn a_frame_cut_short_finishes_its_own_time_instead_of_starting_over() {
+    // The master waits for its answer about 4100 T-cycles into the frame.
+    let mut master = GameBoy::new(link_program(0x42, 0x81)).unwrap();
+    master.plug_link(true);
+    let div = |gb: &GameBoy| gb.peek(0xFF04); // +1 every 256 T-cycles
+    let before = div(&master);
+    assert_eq!(master.run_frame(), Ok(FrameEnd::LinkWait));
+    master.take_link_out();
+    master.link_answer(0x99);
+    assert_eq!(master.run_frame(), Ok(FrameEnd::Done));
+    // One frame in all (70224 / 256 = 274.3 DIV ticks), not one and a bit.
+    let ticks = u32::from(div(&master).wrapping_sub(before));
+    assert!((274 % 256..=275 % 256).contains(&ticks), "{ticks}");
+    assert_eq!(master.peek(0xC000), 0x99);
+}
+
+#[test]
 fn pulling_the_cable_frees_a_waiting_master() {
     let mut master = GameBoy::new(link_program(0x42, 0x81)).unwrap();
     master.plug_link(true);

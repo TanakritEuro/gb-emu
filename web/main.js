@@ -12,6 +12,7 @@ import { MemoryView } from "./memview.js";
 import { VramView } from "./vramview.js";
 import { BreakpointList } from "./breakpoints.js";
 import { hex } from "./format.js";
+import { LinkSession, TabLink, FRAME_BREAKPOINT, FRAME_LINK_WAIT, PING_MS } from "./link.js";
 import {
   StateStore,
   SlotsPanel,
@@ -141,6 +142,7 @@ function boot(bytes, what, save = null) {
   emu?.free();
   emu = next;
   breakpoints.applyTo(emu);
+  link.attach(emu); // plugged in if linked
   $("error").hidden = true;
   $("serial").textContent = "";
   emu.set_sample_rate(audio.sampleRate);
@@ -275,23 +277,48 @@ function loop(now) {
   }
   lastTime = now;
   syncButtons(); // gamepads have no events: poll them every frame
+  linkOwed = 0;
+  if (!runAndShow(frames, audioPaced, now)) return;
+  rafId = requestAnimationFrame(loop);
+}
+
+/** Frames that were due but are held up waiting for the link partner. */
+let linkOwed = 0;
+
+/**
+ * Runs up to `frames` frames, then draws and counts them. A frame stops
+ * early at a breakpoint, or to wait for the link partner's byte; then the
+ * frames still due are left in `linkOwed` for when it arrives. Returns false
+ * if running should stop (a breakpoint or an error).
+ */
+function runAndShow(frames, audioPaced, now) {
   let ran = 0;
   let hit = false; // stopped at a breakpoint
   try {
-    while (ran < frames && !hit) {
-      hit = emu.run_frame();
-      ran++;
+    while (ran < frames) {
+      const end = emu.run_frame();
+      link.pump(); // send the partner anything the game clocked out
       const sound = emu.take_audio(); // always drain; only play it when paced
       if (audioPaced) audio.push(sound);
+      if (end === FRAME_LINK_WAIT) {
+        // The rest of this frame runs when the partner's byte arrives.
+        linkOwed = frames - ran;
+        break;
+      }
+      ran++;
+      if (end === FRAME_BREAKPOINT) {
+        hit = true;
+        break;
+      }
     }
   } catch (e) {
     stop();
     draw();
     debug.update(emu);
     showError(String(e.message ?? e));
-    return;
+    return false;
   }
-  if (ran) {
+  if (ran || linkOwed) {
     draw();
     debug.update(emu);
   }
@@ -299,9 +326,21 @@ function loop(now) {
   countFps(now, ran);
   if (hit) {
     showBreakpointHit();
-    return;
+    return false;
   }
-  rafId = requestAnimationFrame(loop);
+  return true;
+}
+
+/** The partner's byte arrived: carry on with the frames it held up now,
+ * rather than at the next animation frame, so a game can swap many bytes
+ * a frame (each costs a message round trip, not a screen refresh). */
+function continueAfterLink() {
+  if (!linkOwed || !emu || paused || rewinding || !rafId) return;
+  const frames = linkOwed;
+  linkOwed = 0;
+  if (!runAndShow(frames, audio.running && !turbo && speed === 1, performance.now())) {
+    linkOwed = 0;
+  }
 }
 
 /** Pauses at a breakpoint and opens the debugger there. */
@@ -393,6 +432,7 @@ function countFps(now, ran) {
     // Once a second, store the save if the game changed it.
     if (emu.take_save_dirty()) persistSave();
     showRewind();
+    showLink();
   }
 }
 
@@ -534,6 +574,64 @@ addEventListener("visibilitychange", () => {
 });
 addEventListener("pagehide", persistSave);
 
+// Link cable. A LinkSession carries bytes between this tab's Game Boy and a
+// partner's; for now the partner is another tab of this site in the same
+// browser, found over a BroadcastChannel.
+const link = new LinkSession((msg) => tabLink.send(msg));
+const tabLink = new TabLink(
+  typeof BroadcastChannel === "function" ? new BroadcastChannel("gb-emu-link") : fakeChannel(),
+  {
+    paired: () => {
+      link.connect();
+      showLink();
+    },
+    unpaired: () => {
+      link.disconnect();
+      showLink();
+    },
+    message: (msg) => {
+      if (link.receive(msg)) continueAfterLink();
+    },
+  },
+);
+// Closing the tab tells the partner, which unplugs its cable; if that
+// message never gets out, the partner notices the silence (TIMEOUT_MS).
+addEventListener("pagehide", () => tabLink.stop());
+setInterval(() => tabLink.tick(), PING_MS / 2);
+
+/** A channel that goes nowhere, where BroadcastChannel isn't available. */
+function fakeChannel() {
+  return { postMessage() {}, onmessage: null };
+}
+
+function toggleTabLink() {
+  if (tabLink.partner || tabLink.looking) tabLink.stop();
+  else tabLink.start();
+  showLink();
+}
+
+function showLink() {
+  const button = $("link-tab");
+  let status;
+  if (tabLink.partner) {
+    status = `🔗 linked to another tab · ${link.bytes.toLocaleString("en")} bytes swapped`;
+    button.textContent = "Unplug";
+  } else if (tabLink.looking) {
+    status = "looking for another tab… press Link in it too";
+    button.textContent = "Stop looking";
+  } else {
+    status = "unplugged";
+    button.textContent = "Link with another tab";
+  }
+  $("link-status").textContent = status;
+  button.setAttribute("aria-pressed", String(Boolean(tabLink.partner || tabLink.looking)));
+}
+$("link-tab").addEventListener("click", (e) => {
+  toggleTabLink();
+  e.currentTarget.blur(); // like the toolbar: Enter and Space belong to the game
+});
+showLink();
+
 // Save states: four slots per game in IndexedDB, each with a picture of
 // the screen. Loading one also puts the battery save back to how it was
 // then (it's part of the state); that gets stored like any other change.
@@ -621,7 +719,10 @@ function stepInstruction() {
 function stepFrame() {
   debugRun(() => {
     emu.resume_past_breakpoint();
-    return emu.run_frame() ? `stopped at the breakpoint at $${hex(pcNow(), 4)}` : "1 frame";
+    const end = emu.run_frame();
+    if (end === FRAME_BREAKPOINT) return `stopped at the breakpoint at $${hex(pcNow(), 4)}`;
+    if (end === FRAME_LINK_WAIT) return "stopped partway: waiting for the link partner's byte";
+    return "1 frame";
   });
 }
 
@@ -636,6 +737,7 @@ function debugRun(run) {
     showError(String(e.message ?? e));
   }
   emu.take_audio(); // nothing plays while paused
+  link.pump(); // a step can start a link transfer too
   draw();
   collectSerial();
   debug.update(emu);

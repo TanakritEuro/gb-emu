@@ -121,7 +121,8 @@ Pick whichever sound most fun:
   - [x] Serial port with a partner in the core: transfers take their real time, a master's byte
         goes to the partner and comes back with theirs (or $FF with no cable), a slave answers
         when clocked; two Game Boys linked in a test swap bytes
-  - [ ] Two browser tabs linked on one computer, to get the browser side right without a network
+  - [x] Two browser tabs linked on one computer, to get the browser side right without a network
+        (about 1000 bytes a second, as fast as the real cable)
   - [ ] WebRTC between two browsers, connected by copying a code each way (no server)
   - [ ] A two-player homebrew game plays over the link
 

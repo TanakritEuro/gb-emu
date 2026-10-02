@@ -46,6 +46,9 @@ pub struct GameBoy {
     /// The debugger stopped the CPU here (a breakpoint, or a step), so the
     /// next run starts by running this instruction instead of stopping on it.
     resume_here: bool,
+    /// How far into the current frame [`run_frame`](Self::run_frame) has
+    /// got, in normal-speed T-cycles: nonzero after it stopped early.
+    frame_elapsed: u32,
 }
 
 /// Which console to be.
@@ -104,6 +107,7 @@ impl GameBoy {
             bus: Bus::new(cart, model),
             breakpoints: BTreeSet::new(),
             resume_here: false,
+            frame_elapsed: 0,
         })
     }
 
@@ -146,10 +150,11 @@ impl GameBoy {
 
     /// Runs until one frame's worth of time has passed (70224 T-cycles at
     /// normal speed, twice as many CPU cycles in double speed), or until PC
-    /// reaches a breakpoint.
+    /// reaches a breakpoint or a link transfer has to wait. A frame that
+    /// stopped early carries on from where it was on the next call, so
+    /// stopping never adds time: [`FrameEnd::Done`] comes once per 70224.
     pub fn run_frame(&mut self) -> Result<FrameEnd, CpuError> {
-        let mut elapsed = 0;
-        while elapsed < CYCLES_PER_FRAME {
+        while self.frame_elapsed < CYCLES_PER_FRAME {
             if self.bus.serial.waiting() {
                 return Ok(FrameEnd::LinkWait);
             }
@@ -158,8 +163,9 @@ impl GameBoy {
                 return Ok(FrameEnd::Breakpoint);
             }
             let cycles = self.step()?;
-            elapsed += self.bus.real_cycles(cycles);
+            self.frame_elapsed += self.bus.real_cycles(cycles);
         }
+        self.frame_elapsed = 0;
         Ok(FrameEnd::Done)
     }
 

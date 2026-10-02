@@ -405,3 +405,8 @@ main > * { min-width: 0; }
 }
 .slot button:hover:not(:disabled) { border-color: var(--accent); }
 .slot button:disabled { opacity: 0.4; cursor: default; }
+
+/* Link cable */
+.link-panel summary .muted { margin-left: 8px; font-size: 13px; }
+.link-panel .toolbar { margin-top: 10px; }
+.link-help { margin: 8px 0 0; font-size: 13px; }
