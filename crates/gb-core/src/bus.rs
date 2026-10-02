@@ -136,7 +136,7 @@ pub struct Bus {
 impl Bus {
     pub fn new(cart: Cartridge, model: Model) -> Self {
         let compat = model == Model::Cgb && !cart.header.cgb;
-        let mut ppu = Ppu::with_model(model);
+        let mut ppu = Ppu::post_boot(model);
         if compat {
             ppu.enter_compat_mode(compat::boot_palettes(&cart));
         }

@@ -157,6 +157,9 @@ pub struct Cpu {
     /// write that lands late, see [`WriteTiming`]); the next M-cycle runs
     /// that many fewer.
     ahead: u32,
+    /// HALT just put the CPU to sleep: its first halted M-cycle doesn't
+    /// look for interrupts (see `halted_m_cycle`).
+    just_halted: bool,
 }
 
 impl Cpu {
@@ -198,6 +201,7 @@ impl Cpu {
         self.ime_pending = false;
         self.halted = false;
         self.halt_bug = false;
+        self.just_halted = false;
     }
 
     pub(crate) fn save_state(&self, w: &mut StateWriter) {
@@ -210,6 +214,7 @@ impl Cpu {
         w.bool(self.ime_pending);
         w.bool(self.halted);
         w.bool(self.halt_bug);
+        w.bool(self.just_halted);
     }
 
     pub(crate) fn load_state(&mut self, r: &mut StateReader) -> Result<(), StateError> {
@@ -233,6 +238,7 @@ impl Cpu {
         self.ime_pending = r.bool()?;
         self.halted = r.bool()?;
         self.halt_bug = r.bool()?;
+        self.just_halted = r.bool()?;
         Ok(())
     }
 
@@ -634,6 +640,31 @@ impl Cpu {
         };
     }
 
+    /// One M-cycle asleep in HALT. Returns whether an interrupt is pending,
+    /// waking the CPU: this M-cycle then serves as the next one's opcode
+    /// fetch. A halted CPU looks for interrupts at a different point than a
+    /// running one, which samples as the fetch ends: the original looks 2
+    /// dots into each halted M-cycle (one arriving later waits for the
+    /// next), the Color as each begins. Neither looks in the first, right
+    /// after HALT checked. As in SameBoy (Core/sm83_cpu.c, GB_cpu_run).
+    fn halted_m_cycle(&mut self, bus: &mut Bus) -> bool {
+        if std::mem::take(&mut self.just_halted) {
+            self.idle(bus);
+            return false;
+        }
+        if bus.model == Model::Dmg {
+            bus.tick(2 - std::mem::take(&mut self.ahead));
+            let woke = bus.pending_interrupts() != 0;
+            bus.tick(2);
+            self.ticked += 4;
+            woke
+        } else {
+            let woke = bus.pending_interrupts() != 0;
+            self.idle(bus);
+            woke
+        }
+    }
+
     /// Executes one instruction, or dispatches an interrupt, running the rest
     /// of the hardware along with it M-cycle by M-cycle. Returns the T-cycles
     /// it took.
@@ -650,13 +681,14 @@ impl Cpu {
         // delay works because IME only turns on at the end of the next step.
         // In HALT the CPU spends M-cycles like this one until an interrupt is
         // pending; the one in which it arrives carries on as the fetch.
-        self.idle(bus);
         if self.halted {
-            if bus.pending_interrupts() == 0 {
+            if !self.halted_m_cycle(bus) {
                 return Ok(self.ticked);
             }
             self.halted = false;
             bus.cpu_halted = false;
+        } else {
+            self.idle(bus);
         }
         let pc = self.regs.pc;
         let opcode = bus.cpu_read(pc);
@@ -846,6 +878,7 @@ impl Cpu {
                     self.halt_bug = true;
                 } else {
                     self.halted = true;
+                    self.just_halted = true;
                 }
                 Ok(4)
             }
@@ -2305,13 +2338,37 @@ mod tests {
     #[test]
     fn each_access_sees_the_hardware_at_its_own_m_cycle() {
         // LDH A,($44) reads LY in its third M-cycle, 12 T-cycles in, and LY
-        // reads 1 from dot 452 of line 0.
-        for (head_start, ly) in [(452 - 12, 1), (452 - 13, 0)] {
+        // reads 1 from dot 452 of line 0. The boot ROM leaves the PPU 3 dots
+        // into line 0.
+        for (head_start, ly) in [(452 - 3 - 12, 1), (452 - 3 - 13, 0)] {
             let (mut cpu, mut bus) = setup_wram(&[0xF0, 0x44]);
             bus.tick(head_start);
             cpu.step(&mut bus).unwrap();
             assert_eq!(cpu.regs.a, ly, "{head_start} dots in");
         }
+    }
+
+    #[test]
+    fn a_halted_cpu_looks_for_interrupts_2_dots_in_on_the_original_at_once_on_the_color() {
+        // HBlank's interrupt comes at dot 253 of line 0. The boot ROM leaves
+        // the PPU 3 dots in, so halted M-cycles span dots 3+4k to 7+4k, and
+        // the one from 251 to 255 has it 2 dots in.
+        let wake_dot = |model| {
+            let cart = Cartridge::from_rom(rom_with_program(&[])).unwrap();
+            let mut bus = Bus::new(cart, model);
+            bus.write(0xFF41, 0x08);
+            bus.ie_reg = interrupt::STAT;
+            bus.if_reg = 0xE0;
+            let mut cpu = Cpu::new();
+            cpu.halted = true;
+            let mut dots = 3;
+            while cpu.halted {
+                dots += cpu.step(&mut bus).unwrap();
+            }
+            dots
+        };
+        assert_eq!(wake_dot(Model::Dmg), 255, "seen 2 dots into 251-255");
+        assert_eq!(wake_dot(Model::Cgb), 259, "251-255 looked at dot 251");
     }
 
     #[test]

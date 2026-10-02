@@ -143,6 +143,19 @@ impl Ppu {
         Self::with_model(Model::Dmg)
     }
 
+    /// As the boot ROM leaves it when the game starts at $0100: on line 0,
+    /// 3 dots in. That phase between the PPU and the CPU is pinned by
+    /// Mooneye's tests that run from boot without switching the LCD off
+    /// (hblank_ly_scx_timing, di_timing, halt_ime1_timing2, intr_1_2_timing:
+    /// starting at dot 0, 1 or 2 fails some of them).
+    /// TODO(accuracy): the Color's boot ROM takes another time; it's given
+    /// the original's phase here.
+    pub fn post_boot(model: Model) -> Self {
+        let mut p = Self::with_model(model);
+        p.dot = 3;
+        p
+    }
+
     pub fn with_model(model: Model) -> Self {
         Self {
             model,
@@ -619,13 +632,12 @@ impl Ppu {
     /// scan: with VBlank on the original, an M-cycle before it on the Color
     /// (Mooneye's vblank_stat_intr-GS and -C).
     ///
-    /// On the Color the mode 2 source also comes on a dot before STAT shows
-    /// mode 2 (except into line 0), as in SameBoy's PPU (Core/display.c);
-    /// that puts 12 more of Mealybug Tearoom's Color pictures in place.
-    /// TODO(accuracy): SameBoy has the original do it too, which puts its
-    /// Mealybug pictures in place as well, but here it makes Mooneye's
-    /// intr_2_mode0_timing_sprites fail: something else in our line timing
-    /// differs from SameBoy's on the original.
+    /// The sources don't quite follow STAT's mode bits: the mode 2 source
+    /// comes on a dot before STAT shows mode 2 (except into line 0), and the
+    /// HBlank source a dot after STAT shows mode 0, as in SameBoy's PPU
+    /// (Core/display.c). Mealybug Tearoom's pictures depend on it (its
+    /// tests sync to lines with the mode 2 interrupt while running), and so
+    /// does Mooneye's timing with the CPU halted (see `Cpu::halted_m_cycle`).
     fn check_stat_line(&mut self) {
         if !self.lcd_on() {
             return;
@@ -635,12 +647,13 @@ impl Ppu {
             Model::Dmg => self.ly == VBLANK_LINE && self.dot == 0,
             Model::Cgb => self.ly == VBLANK_LINE - 1 && self.dot == DOTS_PER_LINE - 4,
         };
-        let early_mode2 =
-            self.model == Model::Cgb && self.ly < VBLANK_LINE - 1 && self.dot == DOTS_PER_LINE - 1;
+        let early_mode2 = self.ly < VBLANK_LINE - 1 && self.dot == DOTS_PER_LINE - 1;
         let line = (self.stat & 0x40 != 0 && self.stat & 0x04 != 0)
             || (self.stat & 0x20 != 0 && (mode == 2 || line_144 || early_mode2))
             || (self.stat & 0x10 != 0 && mode == 1)
-            || (self.stat & 0x08 != 0 && mode == 0);
+            || (self.stat & 0x08 != 0
+                && mode == 0
+                && !(self.ly < VBLANK_LINE && self.dot == self.hblank_dot));
         if line && !self.stat_line {
             self.pending_irq |= interrupt::STAT;
         }
@@ -877,16 +890,20 @@ mod tests {
     }
 
     #[test]
-    fn the_colors_mode_2_interrupt_comes_a_dot_early() {
-        // The last dot of line 0: on the Color the mode 2 interrupt for line
-        // 1 is already there; on the original it waits for the line.
-        for (model, early) in [(Model::Cgb, true), (Model::Dmg, false)] {
+    fn the_mode_2_interrupt_comes_a_dot_early_and_hblank_a_dot_late() {
+        for model in [Model::Dmg, Model::Cgb] {
+            // The last dot of line 0 already has line 1's mode 2 interrupt.
             let mut p = Ppu::with_model(model);
             p.write_reg(0xFF41, 0x20);
             p.tick(454);
-            assert_eq!(p.tick(1) & interrupt::STAT != 0, early, "{model:?}");
-            assert_eq!(p.tick(1) & interrupt::STAT != 0, !early, "{model:?}");
-            assert_eq!(p.ly, 1);
+            assert_eq!(p.tick(1) & interrupt::STAT, interrupt::STAT, "{model:?}");
+            assert_eq!(p.stat & 0x03, 0, "while STAT still shows HBlank");
+            // HBlank's interrupt waits a dot after STAT shows mode 0.
+            let mut p = Ppu::with_model(model);
+            p.write_reg(0xFF41, 0x08);
+            assert_eq!(p.tick(252) & interrupt::STAT, 0, "{model:?}");
+            assert_eq!(p.stat & 0x03, 0, "{model:?}");
+            assert_eq!(p.tick(1) & interrupt::STAT, interrupt::STAT, "{model:?}");
         }
     }
 
