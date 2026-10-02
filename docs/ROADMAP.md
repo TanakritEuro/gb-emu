@@ -58,7 +58,7 @@ The big one: all 256 base opcodes and 256 `CB`-prefixed opcodes (minus 11 illega
 First homebrew title screen shows up in the browser. 🎉
 (Both done: dmg-acid2 matches exactly; Tobu Tobu Girl from Homebrew Hub reaches its title screen.)
 
-## Milestone 4 — Playable in the browser
+## Milestone 4 — Playable in the browser ✅
 
 - [x] Gamepad API support alongside the keyboard
 - [x] Touch controls for phones
@@ -67,8 +67,7 @@ First homebrew title screen shows up in the browser. 🎉
 
 **Done when:** you can play a homebrew game from [Homebrew Hub](https://hh.gbdev.io/)
 start to finish on your phone.
-(Pending: all four steps are in, but the phone playthrough hasn't been done yet. The page is
-now reachable from a phone at https://tanakriteuro.github.io/gb-emu/.)
+(Done: played start to finish on a phone at https://tanakriteuro.github.io/gb-emu/.)
 
 ## Milestone 5 — More cartridges and saves
 
