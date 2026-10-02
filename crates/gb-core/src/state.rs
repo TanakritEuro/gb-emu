@@ -34,7 +34,9 @@ const MAGIC: &[u8; 4] = b"GBST";
 /// 6: the serial port in its own section, with transfer progress.
 /// 7: OAM DMA in progress (it now takes its real 160 M-cycles); where the
 /// line's mode 3 ends.
-pub const VERSION: u16 = 7;
+/// 8: the pixel FIFO mid-line (fetcher, both FIFOs, the line's sprites),
+/// and the window's line counter counting from $FF.
+pub const VERSION: u16 = 8;
 /// Bytes before the payload: magic, version, fingerprint, length.
 const HEADER_LEN: usize = 4 + 2 + 8 + 4;
 

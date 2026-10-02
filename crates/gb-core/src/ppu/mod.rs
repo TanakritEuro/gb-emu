@@ -1,10 +1,12 @@
 //! The pixel processing unit.
 //!
-//! Timing is in place: LY advances every 456 dots, VBlank fires at line 144,
-//! and the LYC=LY comparison sets STAT. Each finished line is drawn into the
-//! framebuffer: background, window, then sprites.
+//! Each line: mode 2 (the OAM scan), mode 3 (drawing, pixel by pixel through
+//! a FIFO: see [`fifo`]), mode 0 (HBlank); lines 144-153 are VBlank. LY,
+//! STAT and their interrupts follow it dot by dot.
 //!
 //! Reference: https://gbdev.io/pandocs/Rendering.html
+
+mod fifo;
 
 use crate::bus::interrupt;
 use crate::compat::CompatPalettes;
@@ -58,7 +60,7 @@ const DOTS_PER_LINE: u32 = 456;
 /// Where mode 3 (drawing) starts on lines 0-143, after the OAM scan.
 const MODE3_DOT: u32 = 80;
 /// The earliest mode 3 ends and mode 0 (HBlank) begins: 172 dots of drawing.
-/// Each line works out its own end, [`Ppu::mode3_end`].
+/// A line ends it when its FIFO has drawn 160 pixels (see [`fifo`]).
 const HBLANK_DOT: u32 = MODE3_DOT + 172;
 const LINES_PER_FRAME: u8 = 154;
 const VBLANK_LINE: u8 = 144;
@@ -111,8 +113,12 @@ pub struct Ppu {
     /// The LCD was just switched on and line 0 hasn't finished: a line with
     /// no OAM scan. See [`Ppu::turn_on`].
     first_line: bool,
-    /// Which window row the next window line draws; reset at VBlank.
-    window_line: u8,
+    /// The window's own line counter: the row it last drew, $FF before
+    /// its first line of the frame. It counts only lines it shows on, so
+    /// hiding it for a while doesn't skip any of its rows.
+    window_y: u8,
+    /// Mode 3's fetcher and FIFOs, mid-line.
+    m3: fifo::Mode3,
     /// The STAT interrupt line as of the last check, for edge detection.
     stat_line: bool,
     /// IF bits raised by register writes, handed over on the next `tick`.
@@ -167,7 +173,8 @@ impl Ppu {
             wy_triggered: false,
             hblank_dot: HBLANK_DOT,
             first_line: false,
-            window_line: 0,
+            window_y: 0xFF,
+            m3: fifo::Mode3::default(),
             stat_line: false,
             pending_irq: 0,
             hblanks: 0,
@@ -194,12 +201,13 @@ impl Ppu {
         w.bool(self.wy_triggered);
         w.u16(self.hblank_dot as u16);
         w.bool(self.first_line);
-        w.u8(self.window_line);
+        w.u8(self.window_y);
         w.bool(self.stat_line);
         w.u8(self.pending_irq);
         w.bytes(&self.bg_palettes);
         w.bytes(&self.obj_palettes);
         w.bytes(&[self.bcps, self.ocps, self.opri]);
+        self.save_mode3(w);
         // The picture, so a loaded state shows its own frame straight away.
         // On the original every pixel is one of four shades: 2 bits each, 4
         // per byte. On the Color it's any RGB555 color: 2 bytes each.
@@ -237,11 +245,11 @@ impl Ppu {
         }
         self.wy_triggered = r.bool()?;
         self.hblank_dot = u32::from(r.u16()?);
-        if !(HBLANK_DOT..DOTS_PER_LINE).contains(&self.hblank_dot) {
+        if !(HBLANK_DOT..=DOTS_PER_LINE).contains(&self.hblank_dot) {
             return Err(StateError::Corrupt("PPU mode 3 length"));
         }
         self.first_line = r.bool()?;
-        self.window_line = r.u8()?;
+        self.window_y = r.u8()?;
         self.stat_line = r.bool()?;
         self.pending_irq = r.u8()?;
         r.bytes(&mut self.bg_palettes)?;
@@ -249,6 +257,7 @@ impl Ppu {
         self.bcps = r.u8()?;
         self.ocps = r.u8()?;
         self.opri = r.u8()? & 1;
+        self.load_mode3(r)?;
         let pixels = self.framebuffer.as_chunks_mut::<4>().0;
         if self.model == Model::Cgb {
             let mut colors = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 2];
@@ -504,6 +513,9 @@ impl Ppu {
         self.ly = 0;
         self.dot = 0;
         self.stat &= !0x03;
+        self.m3 = fifo::Mode3::default(); // a line cut short
+        self.wy_triggered = false;
+        self.window_y = 0xFF;
         // Blank it in place: the buffer's address must not change.
         for px in self.framebuffer.as_chunks_mut::<4>().0 {
             *px = DMG_PALETTE[0];
@@ -533,15 +545,16 @@ impl Ppu {
         }
         for _ in 0..cycles {
             self.dot += 1;
-            // The line is drawn as mode 3 ends and HBlank begins, so what a
-            // game changes during HBlank (scroll registers, an HBlank DMA
-            // block) shows from the next line on, as on hardware.
-            if self.dot == MODE3_DOT && self.ly < VBLANK_LINE {
-                self.hblank_dot = self.mode3_end();
-            }
-            if self.dot == self.hblank_dot && self.ly < VBLANK_LINE {
-                self.render_scanline();
-                self.hblanks += 1;
+            // Mode 3 draws the line pixel by pixel and lasts as long as that
+            // takes; HBlank (and a Color's HBlank DMA block) follows.
+            if self.ly < VBLANK_LINE {
+                if self.dot == MODE3_DOT {
+                    self.hblank_dot = DOTS_PER_LINE; // until the line is done
+                    self.start_mode3();
+                } else if self.mode3_dot() {
+                    self.hblank_dot = self.dot;
+                    self.hblanks += 1;
+                }
             }
             if self.dot == DOTS_PER_LINE {
                 self.dot = 0;
@@ -550,7 +563,7 @@ impl Ppu {
                 if self.ly == VBLANK_LINE {
                     irq |= interrupt::VBLANK;
                     self.wy_triggered = false;
-                    self.window_line = 0;
+                    self.window_y = 0xFF;
                 }
             }
             self.update_stat_bits();
@@ -560,7 +573,7 @@ impl Ppu {
     }
 
     /// Sets STAT's mode bits and LY == LYC flag. Each line is mode 2 (OAM
-    /// scan), 3 (drawing, as long as [`Ppu::mode3_end`] says), then 0 (HBlank);
+    /// scan), 3 (drawing, until the FIFO has put out 160 pixels), then 0 (HBlank);
     /// lines 144-153 are mode 1 (VBlank).
     fn update_stat_bits(&mut self) {
         let mode = if !self.lcd_on() {
@@ -617,140 +630,6 @@ impl Ppu {
         self.stat_line = line;
     }
 
-    /// The dot where this line's mode 3 ends, worked out as it begins. The
-    /// PPU fetches tiles into a pixel FIFO and pushes one pixel per dot, so
-    /// 160 pixels take at least 172 dots, and the line pauses for:
-    /// - SCX % 8 dots at the start, while the pixels scrolled off the left
-    ///   edge are thrown away;
-    /// - 6 dots where the window starts, to restart the fetcher on its map;
-    /// - each sprite: 6 dots to fetch it, plus waiting for the background
-    ///   fetch under it to finish: as many dots as that tile has pixels right
-    ///   of the sprite's leftmost, minus 2. Only the first sprite on a tile
-    ///   waits.
-    ///
-    /// https://gbdev.io/pandocs/Rendering.html#mode-3-length
-    /// TODO(accuracy): this uses SCX, the window and the sprites as mode 3
-    /// starts; hardware reads them as it gets there.
-    fn mode3_end(&mut self) -> u32 {
-        // The window's "Y condition": once WY == LY at the start of a line, it
-        // holds for the rest of the frame. https://gbdev.io/pandocs/Window.html
-        if self.ly == self.wy {
-            self.wy_triggered = true;
-        }
-        let mut dots = HBLANK_DOT + u32::from(self.scx & 7);
-        let window = self.window_start();
-        if window.is_some() {
-            dots += 6;
-        }
-        let (mut sprites, count) = self.sprites_on_line();
-        let sprites = &mut sprites[..count];
-        sprites.sort_by_key(|s| s.x); // the fetcher meets them left to right
-        let mut waited_on: Vec<i16> = Vec::with_capacity(count);
-        let mut sprite_dots = 0;
-        // Past X = 167 a sprite is never reached.
-        for s in sprites.iter().filter(|s| s.x < 168) {
-            let pixel = i16::from(s.x) - 8;
-            // The background or window tile under the sprite's leftmost
-            // pixel (window tiles counted from 1000, to keep them apart), and
-            // where in it that pixel is. A sprite at X = 0 waits as if at the
-            // start of a tile of its own, whatever SCX is.
-            let (tile, offset) = match window {
-                _ if s.x == 0 => (-1000, 0),
-                Some(start) if pixel >= start => (1000 + (pixel - start) / 8, (pixel - start) % 8),
-                _ => {
-                    let x = pixel + i16::from(self.scx & 7);
-                    (x.div_euclid(8), x.rem_euclid(8))
-                }
-            };
-            if !waited_on.contains(&tile) {
-                waited_on.push(tile);
-                sprite_dots += (7 - offset - 2).max(0) as u32;
-            }
-            sprite_dots += 6;
-        }
-        // Measured against Pan Docs' figures, a line's sprites take 3 dots
-        // less in all: that's what makes all 105 cases of Mooneye's
-        // intr_2_mode0_timing_sprites (timed on hardware) come out right.
-        dots + sprite_dots.saturating_sub(3)
-    }
-
-    /// The screen column where the window starts on this line, if it shows:
-    /// LCDC bit 5 on (and bit 0 on the original), WY reached, WX at most 166.
-    /// TODO(accuracy): WX 0 also shifts it left by SCX % 8, and WX 166 has a
-    /// DMG-only glitch.
-    fn window_start(&self) -> Option<i16> {
-        let bg_on = self.cgb() || self.lcdc & 0x01 != 0;
-        let on = bg_on && self.lcdc & 0x20 != 0 && self.wy_triggered && self.wx <= 166;
-        on.then(|| i16::from(self.wx) - 7)
-    }
-
-    /// Draws line LY into the framebuffer, all at once at the end of the line:
-    /// the background, the window over it from WX-7 rightward, then sprites.
-    /// TODO(accuracy): hardware pushes pixels through a FIFO during mode 3, so
-    /// register writes in the middle of a line (e.g. SCX) take effect mid-line.
-    fn render_scanline(&mut self) {
-        let (sprites, count) = self.sprites_on_line();
-        let sprites = &sprites[..count];
-        // The window's "Y condition": once WY == LY at the start of a line, it
-        // holds for the rest of the frame. https://gbdev.io/pandocs/Window.html
-        if self.ly == self.wy {
-            self.wy_triggered = true;
-        }
-        // LCDC bit 0 off blanks the background and the window on DMG: they
-        // count as color 0 (for sprite priority too), shown through BGP. On
-        // the Color it hides nothing; it's a sprite priority switch there.
-        let bg_on = self.cgb() || self.lcdc & 0x01 != 0;
-        let window = self.window_start();
-        let window_on = window.is_some();
-        let window_x = window.unwrap_or(0);
-
-        let row = usize::from(self.ly) * SCREEN_WIDTH;
-        for x in 0..SCREEN_WIDTH as u8 {
-            // Background/window color index and (on the Color) the tile's
-            // attributes; a blanked background counts as color 0.
-            let (bg_index, bg_attrs) = if !bg_on {
-                (0, 0)
-            } else if window_on && i16::from(x) >= window_x {
-                // The window doesn't scroll: its own map, from its (0,0).
-                let wx = (i16::from(x) - window_x) as u8;
-                self.map_pixel(self.lcdc & 0x40 != 0, wx, self.window_line)
-            } else {
-                let map_x = x.wrapping_add(self.scx);
-                let map_y = self.ly.wrapping_add(self.scy);
-                self.map_pixel(self.lcdc & 0x08 != 0, map_x, map_y)
-            };
-            // A blanked background shows BGP's color 0 (usually white).
-            let mut color = self.bg_color(bg_attrs & 0x07, bg_index);
-
-            // The winning sprite pixel is picked first; only then is it
-            // decided whether the background covers it.
-            if let Some((sprite_index, attrs)) = self.sprite_pixel(sprites, x) {
-                let sprite_on_top = if self.cgb() {
-                    // BG color 0 never covers a sprite; with LCDC bit 0 off
-                    // nothing does; otherwise bit 7 of the tile's attributes
-                    // or of the sprite's lets BG colors 1-3 cover it.
-                    // https://gbdev.io/pandocs/Tile_Maps.html#bg-to-obj-priority-in-cgb-mode
-                    bg_index == 0 || self.lcdc & 0x01 == 0 || (bg_attrs | attrs) & 0x80 == 0
-                } else {
-                    // The sprite's "BG over OBJ" bit lets BG colors 1-3 cover it.
-                    attrs & 0x80 == 0 || bg_index == 0
-                };
-                if sprite_on_top {
-                    color = self.obj_color(attrs, sprite_index);
-                }
-            }
-
-            let i = (row + usize::from(x)) * 4;
-            self.framebuffer[i..i + 4].copy_from_slice(&color);
-        }
-
-        // The window's own line counter only advances on lines it was drawn,
-        // so hiding it for a few lines doesn't skip any of its rows.
-        if window_on {
-            self.window_line = self.window_line.wrapping_add(1);
-        }
-    }
-
     /// Color index (0-3, before the palette) at pixel (`x`, `y`) of a 256x256
     /// tile map, and that tile's attributes (always 0 on the original).
     /// $9C00 if `high_map`, else $9800. The background picks its map with
@@ -792,19 +671,18 @@ impl Ppu {
         self.tile_data_pixel(usize::from(bank) * 0x2000 + usize::from(base), col, row)
     }
 
-    /// RGBA for sprite color `index` (1-3) of a sprite with attributes
-    /// `attrs`: through OBP0/OBP1 (bit 4) on the original, from sprite
-    /// palette bits 0-2 on the Color.
-    /// In compatibility mode, OBP0/OBP1's shade picks a color from sprite
-    /// palette 0 or 1.
-    fn obj_color(&self, attrs: u8, index: u8) -> [u8; 4] {
+    /// RGBA for sprite color `index` (1-3) in `palette`: on the original 0
+    /// is OBP0 and 1 OBP1 (attribute bit 4); on the Color, sprite palettes
+    /// 0-7 (attribute bits 0-2). In compatibility mode, OBP0/OBP1's shade
+    /// picks a color from sprite palette 0 or 1.
+    fn obj_color(&self, palette: u8, index: u8) -> [u8; 4] {
         if self.cgb() {
-            return palette_color(&self.obj_palettes, attrs & 0x07, index);
+            return palette_color(&self.obj_palettes, palette, index);
         }
-        let obp1 = attrs & 0x10 != 0;
-        let shade = ((if obp1 { self.obp1 } else { self.obp0 }) >> (index * 2)) & 0x03;
+        let obp = if palette == 1 { self.obp1 } else { self.obp0 };
+        let shade = (obp >> (index * 2)) & 0x03;
         if self.compat {
-            palette_color(&self.obj_palettes, u8::from(obp1), shade)
+            palette_color(&self.obj_palettes, palette, shade)
         } else {
             DMG_PALETTE[usize::from(shade)]
         }
@@ -883,69 +761,6 @@ impl Ppu {
             8
         }
     }
-
-    /// The sprites on line LY, in drawing-priority order (first wins), and how
-    /// many there are. Like the hardware: walk OAM in order, keep the first 10
-    /// whose rows cover LY (X doesn't matter, so off-screen ones still use up
-    /// slots), then on DMG the smaller X wins, and OAM order breaks ties. On
-    /// the Color, OAM order alone decides (unless OPRI asks for the DMG way).
-    /// Empty when LCDC bit 1 turns sprites off. https://gbdev.io/pandocs/OAM.html
-    fn sprites_on_line(&self) -> ([Sprite; 10], usize) {
-        let mut found = [Sprite::default(); 10];
-        let mut count = 0;
-        if self.lcdc & 0x02 != 0 {
-            let height = self.sprite_height();
-            for &[y, x, tile, attrs] in self.oam.as_chunks::<4>().0 {
-                let top = i16::from(y) - 16;
-                if (top..top + height).contains(&i16::from(self.ly)) {
-                    found[count] = Sprite { y, x, tile, attrs };
-                    count += 1;
-                    if count == found.len() {
-                        break;
-                    }
-                }
-            }
-        }
-        // A stable sort, so equal X keeps OAM order.
-        if !self.cgb() || self.opri & 1 != 0 {
-            found[..count].sort_by_key(|s| s.x);
-        }
-        (found, count)
-    }
-
-    /// The color index (1-3) and attributes of the highest-priority sprite
-    /// with a visible pixel at screen column `x`. Color 0 is transparent, so a
-    /// lower sprite can show through it.
-    fn sprite_pixel(&self, sprites: &[Sprite], x: u8) -> Option<(u8, u8)> {
-        let height = self.sprite_height();
-        sprites.iter().find_map(|s| {
-            let col = i16::from(x) - (i16::from(s.x) - 8);
-            if !(0..8).contains(&col) {
-                return None;
-            }
-            let mut row = i16::from(self.ly) - (i16::from(s.y) - 16);
-            if s.attrs & 0x40 != 0 {
-                row = height - 1 - row; // Y flip, over all 16 rows in 8x16
-            }
-            let col = if s.attrs & 0x20 != 0 { 7 - col } else { col }; // X flip
-                                                                       // Sprites always use $8000 addressing. In 8x16 mode the tile
-                                                                       // number's low bit is ignored: top half even, bottom half odd.
-            let tile = if height == 16 {
-                (s.tile & 0xFE) | u8::from(row >= 8)
-            } else {
-                s.tile
-            };
-            // On the Color, attribute bit 3 picks the VRAM bank.
-            let bank = if self.cgb() && s.attrs & 0x08 != 0 {
-                0x2000
-            } else {
-                0
-            };
-            let color =
-                self.tile_data_pixel(bank + usize::from(tile) * 16, col as u8, (row % 8) as u8);
-            (color != 0).then_some((color, s.attrs))
-        })
-    }
 }
 
 /// One OAM entry: Y+16, X+8, tile number, attributes (bit 7 BG over OBJ,
@@ -957,11 +772,28 @@ struct Sprite {
     x: u8,
     tile: u8,
     attrs: u8,
+    /// Its place in OAM, 0-39.
+    index: u8,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl Ppu {
+        /// Draws line LY the way the hardware does: from the start of the
+        /// line through its OAM scan and mode 3, leaving it at the start of
+        /// HBlank.
+        fn render_scanline(&mut self) {
+            self.dot = 0;
+            for _ in 0..DOTS_PER_LINE - 1 {
+                self.tick(1);
+                if self.dot > MODE3_DOT && self.m3.step == fifo::Step::Idle {
+                    break;
+                }
+            }
+        }
+    }
 
     #[test]
     fn ly_advances_every_456_dots() {
@@ -1633,7 +1465,7 @@ mod tests {
         lines(&mut p, 1);
         assert_eq!(shade_at(&p, 0, 2), 0, "off-screen at WX 167");
         assert_eq!(shade_at(&p, 0, 3), 1, "and its rows weren't used up");
-        assert_eq!(p.window_line, 1);
+        assert_eq!(p.window_y, 0, "row 0 was the one it drew");
     }
 
     #[test]
@@ -1975,16 +1807,16 @@ mod tests {
     fn sprites_add_6_dots_each_plus_a_wait_for_the_tile_under_them() {
         // OAM X positions, and the dots they add: Pan Docs' figures (6 a
         // sprite, plus the pixels of its tile right of it, less 2, for the
-        // first on a tile), less 3 for the line.
+        // first on a tile). They come out of the FIFO's fetches.
         let cases: &[(&[u8], u32)] = &[
-            (&[8], 6 + 5 - 3),             // at a tile's left edge: waits 5
-            (&[12], 6 + 1 - 3),            // halfway: waits 1
-            (&[15], 6 - 3),                // at its right end: no wait
-            (&[8, 8], 6 + 5 + 6 - 3),      // a second on the tile doesn't wait
-            (&[8, 16], 6 + 5 + 6 + 5 - 3), // the next tile waits again
-            (&[16, 8], 6 + 5 + 6 + 5 - 3), // whatever the OAM order
-            (&[0, 0], 6 + 5 + 6 - 3),      // X = 0 waits as at a tile's start
-            (&[168], 0),                   // never reached
+            (&[8], 6 + 5),             // at a tile's left edge: waits 5
+            (&[12], 6 + 1),            // halfway: waits 1
+            (&[15], 6),                // at its right end: no wait
+            (&[8, 8], 6 + 5 + 6),      // a second on the tile doesn't wait
+            (&[8, 16], 6 + 5 + 6 + 5), // the next tile waits again
+            (&[16, 8], 6 + 5 + 6 + 5), // whatever the OAM order
+            (&[0, 0], 6 + 5 + 6),      // X = 0 waits as at a tile's start
+            (&[168], 0),               // never reached
         ];
         for &(xs, dots) in cases {
             let mut p = sprite_ppu();
@@ -1997,7 +1829,7 @@ mod tests {
         let mut p = sprite_ppu();
         p.scx = 4;
         put_sprite(&mut p, 0, 0, 0, 1, 0);
-        assert_eq!(hblank_start(&mut p), 252 + 4 + (6 + 1 - 3));
+        assert_eq!(hblank_start(&mut p), 252 + 4 + (6 + 1));
     }
 
     #[test]

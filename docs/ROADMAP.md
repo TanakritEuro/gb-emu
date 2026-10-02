@@ -176,6 +176,23 @@ from them. On a real Color you could also hold a button combination at boot to c
 **Done when:** an original game plays in color in the browser, in a palette you picked.
 (Done: Tobu Tobu Girl plays in the Color's automatic palette and in any of the 12.)
 
+## Milestone 10 — Pixel by pixel
+
+The PPU doesn't draw a line at once: in mode 3 a fetcher reads tiles into a pixel FIFO and one
+pixel leaves it per dot, through the palette registers as they are at that moment. Games (and
+Mealybug Tearoom's tests, `roms/mealybug-tearoom-tests/ppu`) change registers mid-line and expect
+to see it land on the exact pixel.
+
+- [ ] A pixel FIFO renderer: the background/window fetcher and the sprite fetches, dot by dot;
+      mode 3's length comes out of it instead of a formula (Mooneye, dmg-acid2 and cgb-acid2
+      keep passing)
+- [ ] The original's mid-line quirks: the window starting again, WX changes, the tile-select
+      glitch, sprite fetches cut short (Mealybug on the original: 24/24)
+- [ ] The Color's own fetcher timings (Mealybug on the Color, against its CGB-C pictures)
+
+**Done when:** every Mealybug Tearoom PPU test matches its picture on the original.
+(Before: 1/24 on the original, 1/27 on the Color.)
+
 ---
 
 ## References
