@@ -520,6 +520,12 @@ impl Ppu {
         match addr {
             0xFF40 => {
                 let was_on = self.lcd_on();
+                if self.lcdc & !val & 0x02 != 0 {
+                    self.sprites_turned_off();
+                }
+                if self.lcdc & !val & 0x20 != 0 {
+                    self.window_turned_off();
+                }
                 self.lcdc = val;
                 if was_on && !self.lcd_on() {
                     self.turn_off();
@@ -549,7 +555,10 @@ impl Ppu {
             0xFF48 => self.obp0 = val,
             0xFF49 => self.obp1 = val,
             0xFF4A => self.wy = val,
-            0xFF4B => self.wx = val,
+            0xFF4B => {
+                self.wx = val;
+                self.wx_written();
+            }
             _ => {}
         }
     }
@@ -601,6 +610,7 @@ impl Ppu {
     pub fn tick(&mut self, cycles: u32) -> u8 {
         let mut irq = std::mem::take(&mut self.pending_irq);
         if !self.lcd_on() {
+            self.end_dot();
             return irq;
         }
         for _ in 0..cycles {
@@ -616,6 +626,7 @@ impl Ppu {
                     self.hblanks += 1;
                 }
             }
+            self.end_dot();
             if self.dot == DOTS_PER_LINE {
                 self.dot = 0;
                 self.ly = (self.ly + 1) % LINES_PER_FRAME;
@@ -1939,6 +1950,104 @@ mod tests {
         p.scx = 4;
         put_sprite(&mut p, 0, 0, 0, 1, 0);
         assert_eq!(hblank_start(&mut p), 252 + 4 + (6 + 1));
+    }
+
+    /// Runs a PPU on to its line's HBlank; returns that dot.
+    fn run_to_hblank(p: &mut Ppu) -> u32 {
+        while p.dot <= MODE3_DOT || p.stat & 0x03 != 0 {
+            p.tick(1);
+        }
+        p.dot
+    }
+
+    #[test]
+    fn sprites_off_mid_fetch_cut_the_fetch_short_on_the_original() {
+        // A sprite at the line's start costs 11 dots. Turning sprites off a
+        // dot into its fetch: the original drops the rest of it (2 dots
+        // spent); the Color, which fetches sprites whether they're on or
+        // not, carries on.
+        for (mut p, saved) in [(sprite_ppu(), 9), (cgb_sprite_ppu(), 0)] {
+            put_sprite(&mut p, 0, 0, 0, 1, 0);
+            let full = run_to_hblank(&mut p.clone());
+            while !p.fetching_sprite() {
+                p.tick(1);
+            }
+            p.tick(1);
+            p.write_reg(0xFF40, p.lcdc & !0x02);
+            assert_eq!(run_to_hblank(&mut p), full - saved, "{:?}", p.model);
+        }
+    }
+
+    /// `window_ppu`, but with the window off and the background color 1.
+    fn hidden_window_ppu(wx: u8, wy: u8) -> Ppu {
+        let mut p = window_ppu(wx, wy);
+        p.lcdc &= !0x20;
+        for col in 0..32 {
+            p.write_vram(0x9800 + col, 1);
+        }
+        p
+    }
+
+    #[test]
+    fn the_originals_hidden_window_leaves_a_blank_pixel_where_it_would_start() {
+        // Window off, but WY reached: where the window would start (pixel
+        // 16, at a tile's edge) the fetcher pushes a blank pixel first.
+        let mut p = hidden_window_ppu(7 + 16, 0);
+        lines(&mut p, 1);
+        assert_eq!(shades(&p, 0, 14..19), [1, 1, 0, 1, 1]);
+        // Not before WY is reached.
+        let mut p = hidden_window_ppu(7 + 16, 1);
+        lines(&mut p, 1);
+        assert_eq!(shades(&p, 0, 14..19), [1; 5]);
+        // Not on the Color.
+        let mut p = cgb_ppu();
+        p.wx = 7 + 16;
+        put_tile(&mut p, 0x8010, striped(0xFF, 0x00));
+        for col in 0..32 {
+            p.write_vram(0x9800 + col, 1);
+        }
+        set_bg_color(&mut p, 0, 1, RED);
+        lines(&mut p, 1);
+        assert_eq!(rgba_at(&p, 16, 0), rgba(RED));
+    }
+
+    #[test]
+    fn turning_the_window_off_as_it_starts_leaves_no_blank_pixel() {
+        // The window starts at pixel 16 and is turned off while its first
+        // tile is fetched: the background goes on, with no blank pixel.
+        let mut p = hidden_window_ppu(7 + 16, 0);
+        p.lcdc |= 0x20;
+        while !p.fetching_window() {
+            p.tick(1);
+        }
+        p.write_reg(0xFF40, p.lcdc & !0x20);
+        lines(&mut p, 1);
+        assert_eq!(shades(&p, 0, 14..19), [1; 5]);
+    }
+
+    #[test]
+    fn the_originals_window_starts_a_pixel_late_if_turned_on_just_after_its_spot() {
+        // WX 7 + 16: the window's spot is pixel 16, which is next out after
+        // dot 108. The original's window logic sees LCDC a dot late.
+        let window_from = |on_after_dot: u32, wx_after_dot: Option<u32>| {
+            let mut p = window_ppu(7 + 16, 0);
+            p.lcdc &= !0x20;
+            for dot in 0..DOTS_PER_LINE {
+                if dot == on_after_dot {
+                    p.write_reg(0xFF40, p.lcdc | 0x20);
+                }
+                if Some(dot) == wx_after_dot {
+                    p.write_reg(0xFF4B, p.wx);
+                }
+                p.tick(1);
+            }
+            (0..SCREEN_WIDTH).position(|x| shade_at(&p, x, 0) == 1)
+        };
+        assert_eq!(window_from(107, None), Some(16), "in time");
+        assert_eq!(window_from(108, None), Some(17), "a pixel late");
+        assert_eq!(window_from(109, None), None, "too late");
+        // Not if WX was written just then.
+        assert_eq!(window_from(108, Some(109)), None);
     }
 
     #[test]

@@ -37,7 +37,8 @@ const MAGIC: &[u8; 4] = b"GBST";
 /// 8: the pixel FIFO mid-line (fetcher, both FIFOs, the line's sprites),
 /// and the window's line counter counting from $FF.
 /// 9: whether the CPU has only just halted.
-pub const VERSION: u16 = 9;
+/// 10: whether the window's blank-pixel glitch is off for the rest of the line.
+pub const VERSION: u16 = 10;
 /// Bytes before the payload: magic, version, fingerprint, length.
 const HEADER_LEN: usize = 4 + 2 + 8 + 4;
 

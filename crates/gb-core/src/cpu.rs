@@ -292,7 +292,8 @@ impl Cpu {
             WriteTiming::Staged { first, early, then } => {
                 let old = bus.read(addr);
                 bus.tick(4 - ahead - early);
-                bus.cpu_write(addr, first(old, val));
+                let first = first(bus, old, val);
+                bus.cpu_write(addr, first);
                 bus.tick(then);
                 bus.cpu_write(addr, val);
                 if early > then {

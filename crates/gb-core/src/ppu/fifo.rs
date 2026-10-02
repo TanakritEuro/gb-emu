@@ -85,6 +85,13 @@ impl Fifo {
         }
     }
 
+    /// One blank pixel, into an empty FIFO.
+    fn push_blank(&mut self) {
+        self.head = 0;
+        self.len = 1;
+        self.pixels[0] = Pixel::default();
+    }
+
     /// Mixes a sprite's row into the sprite FIFO: padded with transparent
     /// pixels to 8, each opaque sprite pixel goes where the FIFO's is
     /// transparent, or where it has lower priority (a higher `priority`).
@@ -195,6 +202,18 @@ pub(super) struct Mode3 {
     sprite_data: [u8; 2],
     /// A pixel to push ahead of the FIFO (the window restart glitch).
     insert_pixel: bool,
+    /// The window was turned off while it was being fetched: no blank
+    /// pixels from it for the rest of the line (see `push_row`).
+    no_window_glitch: bool,
+    /// LCDC bit 5 as the original's window start check sees it: as of the
+    /// last dot, so a write reaches it a dot after it reaches the fetcher.
+    window_enable_seen: bool,
+    /// The original's LCDC bit 5 went off just now: whether that was while
+    /// the window was being fetched is looked at after the next dot (when
+    /// the write's last stage lands).
+    window_off_check: bool,
+    /// The original's WX was written just now (for the next dot).
+    wx_just_written: bool,
 }
 
 /// Pixel position -16, where every line starts.
@@ -204,6 +223,60 @@ impl Ppu {
     /// The hardware is a Color (its fetcher timing), whatever mode it's in.
     fn color_hw(&self) -> bool {
         self.model == Model::Cgb
+    }
+
+    /// In mode 3, with the line's first pixel the next to go out.
+    pub(crate) fn first_pixel_next(&self) -> bool {
+        self.m3.step != Step::Idle && self.m3.position == 0
+    }
+
+    /// In mode 3, in the middle of fetching a sprite.
+    pub(crate) fn fetching_sprite(&self) -> bool {
+        self.m3.step != Step::Idle && self.m3.sprite_fetching
+    }
+
+    /// In mode 3, with the window just started (its first tile being
+    /// fetched).
+    #[cfg(test)]
+    pub(super) fn fetching_window(&self) -> bool {
+        self.m3.step != Step::Idle && self.m3.window_fetching
+    }
+
+    /// LCDC bit 1 went off. On the original, a sprite fetch under way is
+    /// dropped: once its current wait runs out, drawing goes on as if the
+    /// sprite weren't there (it's skipped, as sprites are with bit 1 off).
+    pub(super) fn sprites_turned_off(&mut self) {
+        if !self.color_hw() && self.fetching_sprite() {
+            self.m3.sprite_fetching = false;
+            self.m3.step = Step::Output;
+        }
+    }
+
+    /// LCDC bit 5 went off. On the original, if that's while the window's
+    /// first tile is being fetched, the window leaves no blank pixels (see
+    /// [`push_row`](Self::push_row)) for the rest of the line.
+    pub(super) fn window_turned_off(&mut self) {
+        self.m3.window_off_check = !self.color_hw();
+    }
+
+    /// WX was written. On the original, the window's late start (see
+    /// [`window_check`](Self::window_check)) can't happen in the next dot.
+    pub(super) fn wx_written(&mut self) {
+        self.m3.wx_just_written = !self.color_hw();
+    }
+
+    /// After each dot: what the original's window logic sees a dot late
+    /// catches up. The CPU's writes to LCDC and WX on the original always
+    /// run one more dot before it goes on (`bus::WriteTiming`), so the
+    /// one-dot flags are never left set between instructions and save
+    /// states needn't hold them.
+    pub(super) fn end_dot(&mut self) {
+        let m = &mut self.m3;
+        m.wx_just_written = false;
+        if std::mem::take(&mut m.window_off_check) && m.step != Step::Idle && m.window_fetching {
+            m.no_window_glitch = true;
+        }
+        m.window_enable_seen = self.lcdc & 0x20 != 0;
     }
 
     /// Mode 3 begins: the FIFOs are emptied (the background one primed with
@@ -226,6 +299,7 @@ impl Ppu {
         m.window_active = false;
         m.window_fetching = false;
         m.insert_pixel = false;
+        m.no_window_glitch = false;
         m.sprite_fetching = false;
         m.sprites = sprites;
         m.sprite_count = count;
@@ -391,22 +465,39 @@ impl Ppu {
     }
 
     /// Starts the window if this is where it begins: WY reached, LCDC bit 5
-    /// on, and WX - 7 is the pixel position (WX 0 is special). The
-    /// background FIFO is emptied and the fetcher starts over on the
-    /// window's map. Returns true if that costs a dot (WX 0 with a fine
-    /// scroll, on the original).
+    /// on (a dot late, on the original), and WX - 7 is the pixel position
+    /// (WX 0 is special). The background FIFO is emptied and the fetcher
+    /// starts over on the window's map. Returns true if that costs a dot
+    /// (WX 0 with a fine scroll, on the original).
     fn window_check(&mut self) -> bool {
         let color = self.color_hw();
         let m = &mut self.m3;
         let mut extra_dot = false;
-        if !m.window_active && self.wy_triggered && self.lcdc & 0x20 != 0 {
+        let enabled = if color {
+            self.lcdc & 0x20 != 0
+        } else {
+            m.window_enable_seen
+        };
+        if !m.window_active && self.wy_triggered && enabled {
             let pos = m.position;
             let activate = if self.wx == 0 {
                 pos == 0u8.wrapping_sub(7)
                     || (pos == START && self.scx & 7 != 0)
                     || (0u8.wrapping_sub(15)..=0u8.wrapping_sub(8)).contains(&pos)
+            } else if self.wx >= 166 + u8::from(color) {
+                false
+            } else if self.wx == pos.wrapping_add(7) {
+                true
+            } else if !color && self.wx == pos.wrapping_add(6) && !m.wx_just_written {
+                // The original also starts it a pixel late, if it missed
+                // its spot (switched on just after), unless WX was written
+                // right then.
+                // TODO(accuracy): SameBoy has some DMGs' LCD fall a column
+                // behind here (the window's first pixel lands on the last
+                // one drawn); Mealybug's DMG-blob pictures show no such shift.
+                true
             } else {
-                self.wx < 166 + u8::from(color) && self.wx == pos.wrapping_add(7)
+                false
             };
             if activate {
                 self.window_y = self.window_y.wrapping_add(1);
@@ -501,11 +592,27 @@ impl Ppu {
     }
 
     /// The fetcher's last step: the row goes into the background FIFO once
-    /// it's empty.
+    /// it's empty. On the original, with the window off (LCDC bit 5, as the
+    /// window logic sees it, a dot late) but its Y reached, a push where
+    /// the window would start (WX - 7 the pixel position; past the line's
+    /// end, WX 0) puts a single blank pixel in instead, and the row waits
+    /// for the next try: the window comparison still happens, and glitches
+    /// the FIFO (SameBoy, https://github.com/LIJI32/SameBoy/issues/278).
     fn push_row(&mut self) {
+        let color = self.color_hw();
         let m = &mut self.m3;
         if m.bg.len > 0 {
             return;
+        }
+        if !color && self.wy_triggered && !m.window_enable_seen && !m.no_window_glitch {
+            let at = match m.position.wrapping_add(7) {
+                x @ 0..=167 => x,
+                _ => 0,
+            };
+            if self.wx == at {
+                m.bg.push_blank();
+                return;
+            }
         }
         let attrs = m.tile_attrs;
         m.bg.push_row(
@@ -686,6 +793,8 @@ impl Ppu {
             m.sprite_data[0],
             m.sprite_data[1],
             u8::from(m.insert_pixel),
+            u8::from(m.no_window_glitch),
+            u8::from(m.window_enable_seen),
         ]);
         w.u16(m.tile_map_addr);
         w.u16(m.tile_data_addr);
@@ -697,7 +806,7 @@ impl Ppu {
     }
 
     pub(super) fn load_mode3(&mut self, r: &mut StateReader) -> Result<(), StateError> {
-        let mut b = [0u8; 20];
+        let mut b = [0u8; 22];
         r.bytes(&mut b)?;
         let step = match b[0] {
             0 => Step::Idle,
@@ -744,6 +853,10 @@ impl Ppu {
         m.sprite_attrs = b[16];
         m.sprite_data = [b[17], b[18]];
         m.insert_pixel = b[19] != 0;
+        m.no_window_glitch = b[20] != 0;
+        m.window_enable_seen = b[21] != 0;
+        m.window_off_check = false;
+        m.wx_just_written = false;
         // Addresses into VRAM (both banks): masked to stay inside it.
         m.tile_map_addr = r.u16()? & 0x1FFF;
         m.tile_data_addr = r.u16()? & 0x3FFF;

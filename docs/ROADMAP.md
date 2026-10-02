@@ -188,8 +188,10 @@ to see it land on the exact pixel.
       keep passing). With it, writes to the PPU's registers land at their own dot of the
       M-cycle (the original's palettes old OR new for a dot, its STAT write bug), and the line
       after switching the LCD on is short. Mealybug: 4/24 on the original, 13/27 on the Color
-- [ ] The original's mid-line quirks: the window starting again, WX changes, the tile-select
-      glitch, sprite fetches cut short (Mealybug on the original: 24/24)
+- [x] The original's mid-line quirks: LCDC's bits reaching the fetcher a dot before the pixels
+      (and turning them off early at the line's first pixel), sprite fetches cut short by
+      switching sprites off, the hidden window's blank pixel, the window starting a pixel late,
+      SCY two dots early. Mealybug on the original: 24/24 (and still 20/27 on the Color)
 - [ ] The Color's own fetcher timings (Mealybug on the Color, against its CGB-C pictures)
 
 **Done when:** every Mealybug Tearoom PPU test matches its picture on the original.

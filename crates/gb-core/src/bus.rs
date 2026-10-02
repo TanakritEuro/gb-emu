@@ -60,7 +60,11 @@ struct OamDma {
 /// dot or two sooner, or in two stages, and a few registers a dot later.
 /// Which pixel a mid-line write shows from depends on it. The timings are
 /// SameBoy's (Core/sm83_cpu.c, https://github.com/LIJI32/SameBoy, MIT),
-/// which match Mealybug Tearoom's pictures of real hardware.
+/// which match Mealybug Tearoom's pictures of real hardware; except that on
+/// the original, what the fetcher reads (SCY, LCDC's bits 2-6) lands a dot
+/// sooner here, and the window logic sees LCDC a dot late instead (see
+/// `ppu::fifo`): the same pictures, from a fetcher whose steps fall a dot
+/// differently against the CPU's than SameBoy's.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum WriteTiming {
     /// As the M-cycle ends.
@@ -71,13 +75,34 @@ pub(crate) enum WriteTiming {
     Late,
     /// As the M-cycle ends, with one more dot run before the CPU goes on.
     EndThenDot,
-    /// `first(old, new)` lands `early` dots before the M-cycle ends, the
-    /// new value `then` dots after that.
+    /// `first(bus, old, new)` lands `early` dots before the M-cycle ends
+    /// (worked out then, from the hardware as it is), the new value `then`
+    /// dots after that.
     Staged {
-        first: fn(u8, u8) -> u8,
+        first: fn(&Bus, u8, u8) -> u8,
         early: u32,
         then: u32,
     },
+}
+
+/// The first stage of an LCDC write on the original, 2 dots before the
+/// M-cycle ends. The bits the fetcher reads as it fetches (maps, tile data,
+/// sprite size, window) are new already; the ones read as each pixel goes
+/// out (background and sprites on, bits 0 and 1) and the LCD's on switch
+/// keep their old value a dot longer. Except that turning the background or
+/// sprites off is early when the line's first pixel is next out, and
+/// sprites off is early in the middle of a sprite fetch too (SameBoy's
+/// `GB_CONFLICT_DMG_LCDC`; the first-pixel case for the background is
+/// Mealybug Tearoom's m3_lcdc_bg_en_change).
+fn dmg_lcdc_first(bus: &Bus, old: u8, new: u8) -> u8 {
+    let mut held = 0x83;
+    let turned_off = old & !new;
+    if bus.ppu.first_pixel_next() {
+        held &= !(turned_off & 0x03);
+    } else if bus.ppu.fetching_sprite() {
+        held &= !(turned_off & 0x02);
+    }
+    (old & held) | (new & !held)
 }
 
 /// M-cycles from a write to $FF46 until the copy starts.
@@ -382,7 +407,7 @@ impl Bus {
     /// Color in double speed.
     /// TODO(accuracy): the Color's palettes are CPU revision C's (revision D
     /// and later take writes a dot sooner); the Color's LCDC tile-select
-    /// glitch and the original's WX "just written" dot aren't modeled.
+    /// glitch isn't modeled.
     pub(crate) fn write_timing(&self, addr: u16) -> WriteTiming {
         use WriteTiming::*;
         if !(0xFF00..=0xFF7F).contains(&addr) {
@@ -392,41 +417,40 @@ impl Bus {
         let double = self.double_speed;
         match addr {
             0xFF0F => Late, // IF
-            // LCDC: the original's background-enable bit lands a dot early.
             0xFF40 if dmg => Staged {
-                first: |old, new| old | (new & 0x01),
+                first: dmg_lcdc_first,
                 early: 2,
                 then: 1,
             },
             0xFF40 if double => Staged {
-                first: |old, new| (new & !0x81) | (old & 0x81),
+                first: |_, old, new| (new & !0x81) | (old & 0x81),
                 early: 2,
                 then: 2,
             },
             // STAT: on the original it reads as all ones for a dot (the
             // STAT write bug: a spurious interrupt if any source is active).
             0xFF41 if dmg => Staged {
-                first: |_, _| 0xFF,
+                first: |_, _, _| 0xFF,
                 early: 0,
                 then: 1,
             },
             0xFF41 if double => Staged {
-                first: |old, new| (new & !0x08) | (old & 0x08),
+                first: |_, old, new| (new & !0x08) | (old & 0x08),
                 early: 0,
                 then: 1,
             },
             0xFF41 => Staged {
-                first: |old, new| (old & 0x40) | (new & !0x40),
+                first: |_, old, new| (old & 0x40) | (new & !0x40),
                 early: 0,
                 then: 1,
             },
-            0xFF42 if dmg => Early(1),           // SCY
+            0xFF42 if dmg => Early(2),           // SCY
             0xFF43 if dmg || double => Early(2), // SCX
             0xFF45 if !dmg && !double => Late,   // LYC
             // BGP, OBP0, OBP1: the original's are read by the LCD directly,
             // and for a dot hold the old and new values ORed together.
             0xFF47..=0xFF49 if dmg => Staged {
-                first: |old, new| old | new,
+                first: |_, old, new| old | new,
                 early: 2,
                 then: 1,
             },
@@ -1020,6 +1044,63 @@ mod tests {
         assert_eq!(b.ppu.ly, ly, "456 CPU cycles is half a line now");
         b.tick(456);
         assert_eq!(b.ppu.ly, ly + 1);
+    }
+
+    #[test]
+    fn the_originals_fetcher_registers_take_writes_2_dots_early() {
+        let b = bus();
+        assert!(
+            matches!(b.write_timing(0xFF42), WriteTiming::Early(2)),
+            "SCY"
+        );
+        assert!(
+            matches!(b.write_timing(0xFF43), WriteTiming::Early(2)),
+            "SCX"
+        );
+        let WriteTiming::Staged { first, early, then } = b.write_timing(0xFF40) else {
+            panic!("LCDC is written in two stages");
+        };
+        assert_eq!((early, then), (2, 1));
+        // Outside mode 3: the fetcher's bits (2-6) are new in the first
+        // stage; the LCD switch and the pixel bits (0, 1) are still old.
+        assert_eq!(first(&b, 0x81, 0x7E), 0xFD);
+        assert_eq!(first(&b, 0x02, 0x81), 0x02);
+        let c = cgb_bus();
+        assert!(matches!(c.write_timing(0xFF40), WriteTiming::End));
+        assert!(matches!(c.write_timing(0xFF42), WriteTiming::End));
+    }
+
+    #[test]
+    fn the_originals_lcdc_turns_pixels_off_early_at_the_first_pixel_or_mid_sprite() {
+        let WriteTiming::Staged { first, .. } = bus().write_timing(0xFF40) else {
+            panic!("LCDC is written in two stages");
+        };
+        // The line's first pixel next: background and sprites off at once
+        // (turning them on still waits).
+        let mut b = bus();
+        b.write(0xFF40, 0x93);
+        let mut dots = 0;
+        while !b.ppu.first_pixel_next() && dots < 456 {
+            b.tick(1);
+            dots += 1;
+        }
+        assert!(b.ppu.first_pixel_next());
+        assert_eq!(first(&b, 0x93, 0x90), 0x90);
+        assert_eq!(first(&b, 0x90, 0x93), 0x90);
+
+        // In the middle of a sprite fetch: sprites off at once, not the
+        // background.
+        let mut b = bus();
+        b.write(0xFF40, 0x93);
+        b.write(0xFE00, 16); // line 0
+        b.write(0xFE01, 8 + 20);
+        let mut dots = 0;
+        while !b.ppu.fetching_sprite() && dots < 456 {
+            b.tick(1);
+            dots += 1;
+        }
+        assert!(b.ppu.fetching_sprite());
+        assert_eq!(first(&b, 0x93, 0x90), 0x91);
     }
 
     #[test]
