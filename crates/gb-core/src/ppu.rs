@@ -105,6 +105,9 @@ pub struct Ppu {
     wy_triggered: bool,
     /// The dot where this line's mode 3 ends and HBlank begins.
     hblank_dot: u32,
+    /// The LCD was just switched on and line 0 hasn't finished: a line with
+    /// no OAM scan. See [`Ppu::turn_on`].
+    first_line: bool,
     /// Which window row the next window line draws; reset at VBlank.
     window_line: u8,
     /// The STAT interrupt line as of the last check, for edge detection.
@@ -159,6 +162,7 @@ impl Ppu {
             dot: 0,
             wy_triggered: false,
             hblank_dot: HBLANK_DOT,
+            first_line: false,
             window_line: 0,
             stat_line: false,
             pending_irq: 0,
@@ -185,6 +189,7 @@ impl Ppu {
         w.u32(self.dot);
         w.bool(self.wy_triggered);
         w.u16(self.hblank_dot as u16);
+        w.bool(self.first_line);
         w.u8(self.window_line);
         w.bool(self.stat_line);
         w.u8(self.pending_irq);
@@ -231,6 +236,7 @@ impl Ppu {
         if !(HBLANK_DOT..DOTS_PER_LINE).contains(&self.hblank_dot) {
             return Err(StateError::Corrupt("PPU mode 3 length"));
         }
+        self.first_line = r.bool()?;
         self.window_line = r.u8()?;
         self.stat_line = r.bool()?;
         self.pending_irq = r.u8()?;
@@ -307,15 +313,44 @@ impl Ppu {
         });
     }
 
-    /// Modes 2 and 3: the PPU is reading OAM (the OAM scan, then the sprites
-    /// it draws), so the CPU can't.
-    pub fn oam_busy(&self) -> bool {
-        self.lcd_on() && self.ly < VBLANK_LINE && self.dot < self.hblank_dot
+    /// Whether the PPU holds OAM, so a CPU access (a write if `write`) gets
+    /// no further. It reads OAM in modes 2 and 3: the OAM scan, then the
+    /// sprites it draws.
+    ///
+    /// The edges depend on the access: a read samples later in its M-cycle
+    /// than a write lands, so reads meet the hold 4 dots sooner. They find
+    /// OAM taken from 4 dots before a line begins (as LY moves on) through
+    /// mode 3; writes find it taken in mode 2 except its last 4 dots, and in
+    /// mode 3. The first line after the LCD comes on has no OAM scan.
+    /// (Mooneye's lcdon_timing and lcdon_write_timing, and
+    /// intr_2_oam_ok_timing for where the hold ends.)
+    pub fn oam_locked(&self, write: bool) -> bool {
+        if !self.lcd_on() {
+            return false;
+        }
+        let next_scans = self.ly + 1 < VBLANK_LINE || self.ly == LINES_PER_FRAME - 1;
+        if self.ly >= VBLANK_LINE || self.dot >= self.hblank_dot {
+            // Reads meet the next line's OAM scan before it starts.
+            return !write && next_scans && self.dot >= DOTS_PER_LINE - 4;
+        }
+        if self.first_line {
+            self.dot >= MODE3_DOT
+        } else {
+            !write || !(MODE3_DOT - 4..MODE3_DOT).contains(&self.dot)
+        }
     }
 
-    /// Mode 3: the PPU is reading VRAM (and on the Color, palette memory).
-    pub fn vram_busy(&self) -> bool {
-        self.oam_busy() && self.dot >= MODE3_DOT
+    /// Whether the PPU holds VRAM (and on the Color, palette memory): in
+    /// mode 3, where it fetches tiles. Reads find it taken from 4 dots before
+    /// mode 3, except on the first line after the LCD comes on. See
+    /// [`Ppu::oam_locked`].
+    pub fn vram_locked(&self, write: bool) -> bool {
+        let from = if write || self.first_line {
+            MODE3_DOT
+        } else {
+            MODE3_DOT - 4
+        };
+        self.lcd_on() && self.ly < VBLANK_LINE && (from..self.hblank_dot).contains(&self.dot)
     }
 
     /// How many HBlanks began since the last call.
@@ -390,6 +425,8 @@ impl Ppu {
                 self.lcdc = val;
                 if was_on && !self.lcd_on() {
                     self.turn_off();
+                } else if !was_on && self.lcd_on() {
+                    self.turn_on();
                 }
             }
             // Bits 0-2 (mode, LYC flag) are read-only. A new enable mask can
@@ -424,19 +461,31 @@ impl Ppu {
     }
 
     /// LCDC bit 7 cleared: the PPU stops, LY goes back to 0, STAT reports
-    /// mode 0, and the screen goes blank (white on DMG). When it's turned back
-    /// on, it starts over from the top of line 0.
-    /// TODO(accuracy): the first frame after turning it back on stays blank,
-    /// and line 0 of that frame skips mode 2.
+    /// mode 0, and the screen goes blank (white on DMG). The LY == LYC flag
+    /// and the STAT interrupt line keep their last values while it's off:
+    /// the comparison only runs with the PPU (Mooneye's stat_lyc_onoff).
     fn turn_off(&mut self) {
         self.ly = 0;
         self.dot = 0;
         self.stat &= !0x03;
-        self.stat_line = false;
         // Blank it in place: the buffer's address must not change.
         for px in self.framebuffer.as_chunks_mut::<4>().0 {
             *px = DMG_PALETTE[0];
         }
+    }
+
+    /// LCDC bit 7 set: the PPU starts over from the top of line 0, comparing
+    /// LY with LYC straight away (an interrupt if that turns the flag on).
+    /// That first line has no OAM scan: it starts in mode 0 and goes
+    /// straight to mode 3 at dot 80 (Mooneye's lcdon_timing).
+    /// TODO(accuracy): the first frame after turning it back on stays blank.
+    /// The Color's first line differs again (lcdon_timing fails on it); it's
+    /// treated like the original's here.
+    fn turn_on(&mut self) {
+        self.first_line = true;
+        self.hblank_dot = HBLANK_DOT;
+        self.update_stat_bits();
+        self.check_stat_line();
     }
 
     /// Advances by `cycles` dots, one at a time, so mode and LY == LYC change
@@ -461,6 +510,7 @@ impl Ppu {
             if self.dot == DOTS_PER_LINE {
                 self.dot = 0;
                 self.ly = (self.ly + 1) % LINES_PER_FRAME;
+                self.first_line = false;
                 if self.ly == VBLANK_LINE {
                     irq |= interrupt::VBLANK;
                     self.wy_triggered = false;
@@ -482,13 +532,25 @@ impl Ppu {
         } else if self.ly >= VBLANK_LINE {
             1
         } else if self.dot < MODE3_DOT {
-            2
+            if self.first_line {
+                0
+            } else {
+                2
+            }
         } else if self.dot < self.hblank_dot {
             3
         } else {
             0
         };
-        let coincide = if self.ly == self.lyc { 0x04 } else { 0 };
+        // While the LCD is off the flag keeps its value. In a line's last 4
+        // dots, where LY already reads the next line, it reads 0.
+        let coincide = if !self.lcd_on() {
+            self.stat & 0x04
+        } else if self.ly == self.lyc && self.dot < DOTS_PER_LINE - 4 {
+            0x04
+        } else {
+            0
+        };
         self.stat = (self.stat & !0x07) | coincide | mode;
     }
 
@@ -497,15 +559,16 @@ impl Ppu {
     /// interrupt fires only on that line's rising edge. So a source turning
     /// on while another already holds the line high fires nothing ("STAT
     /// blocking"). https://gbdev.io/pandocs/Interrupt_Sources.html
-    /// TODO(accuracy): on DMG the mode 2 source also fires at the start of
-    /// line 144.
+    /// On the original the mode 2 source also fires as line 144 begins, with
+    /// VBlank (Mooneye's vblank_stat_intr; the Color doesn't).
     fn check_stat_line(&mut self) {
         if !self.lcd_on() {
             return;
         }
         let mode = self.stat & 0x03;
+        let line_144 = !self.cgb() && self.ly == VBLANK_LINE && self.dot == 0;
         let line = (self.stat & 0x40 != 0 && self.stat & 0x04 != 0)
-            || (self.stat & 0x20 != 0 && mode == 2)
+            || (self.stat & 0x20 != 0 && (mode == 2 || line_144))
             || (self.stat & 0x10 != 0 && mode == 1)
             || (self.stat & 0x08 != 0 && mode == 0);
         if line && !self.stat_line {
@@ -910,10 +973,95 @@ mod tests {
     #[test]
     fn each_mode_source_fires_on_entry() {
         // 144 visible lines each enter mode 0 and mode 2 once (the mode 2
-        // count includes line 0 of the next frame); mode 1 once per frame.
+        // count includes line 0 of the next frame, and on the original line
+        // 144's as well); mode 1 once per frame.
         assert_eq!(count_stat(&mut stat_ppu(0x08), FRAME), 144, "HBlank");
-        assert_eq!(count_stat(&mut stat_ppu(0x20), FRAME), 144, "OAM scan");
+        assert_eq!(count_stat(&mut stat_ppu(0x20), FRAME), 145, "OAM scan");
         assert_eq!(count_stat(&mut stat_ppu(0x10), FRAME), 1, "VBlank");
+    }
+
+    #[test]
+    fn the_mode_2_source_fires_with_vblank_on_the_original_only() {
+        let mut p = stat_ppu(0x20);
+        p.tick(456 * 144 - 100 - 1); // a dot before line 144
+        assert_eq!(p.tick(1), interrupt::VBLANK | interrupt::STAT);
+        let mut p = Ppu::with_model(Model::Cgb);
+        p.write_reg(0xFF41, 0x20);
+        p.tick(456 * 144 - 1);
+        assert_eq!(p.tick(1), interrupt::VBLANK);
+    }
+
+    #[test]
+    fn the_lyc_flag_reads_0_while_ly_reads_the_next_line() {
+        let mut p = Ppu::new();
+        p.write_reg(0xFF45, 0);
+        p.tick(451);
+        assert_eq!(p.read_reg(0xFF41) & 0x04, 0x04, "LY 0 == LYC 0");
+        p.tick(1);
+        assert_eq!(p.read_reg(0xFF41) & 0x04, 0, "LY reads 1 now");
+    }
+
+    #[test]
+    fn the_lyc_flag_and_stat_line_hold_while_the_lcd_is_off() {
+        // LY == LYC as the LCD goes off: the flag stays, and a new LYC
+        // doesn't change it (the comparison doesn't run).
+        let mut p = stat_ppu(0x40);
+        p.write_reg(0xFF45, 0);
+        p.write_reg(0xFF40, 0x11);
+        p.write_reg(0xFF45, 1);
+        assert_eq!(p.read_reg(0xFF41) & 0x04, 0x04);
+        // On again, with LY 0 == LYC 0: the flag just stays set, so the
+        // line never fell and there's no interrupt.
+        p.write_reg(0xFF45, 0);
+        p.write_reg(0xFF40, 0x91);
+        assert_eq!(p.tick(1) & interrupt::STAT, 0);
+
+        // Off with the flag clear, on with LY == LYC: an interrupt.
+        let mut p = stat_ppu(0x40);
+        p.write_reg(0xFF45, 9);
+        p.write_reg(0xFF40, 0x11);
+        assert_eq!(p.read_reg(0xFF41) & 0x04, 0);
+        p.write_reg(0xFF45, 0);
+        assert_eq!(p.read_reg(0xFF41) & 0x04, 0, "not compared while off");
+        p.write_reg(0xFF40, 0x91);
+        assert_eq!(p.read_reg(0xFF41) & 0x04, 0x04, "compared as it comes on");
+        assert_eq!(p.tick(1) & interrupt::STAT, interrupt::STAT);
+    }
+
+    #[test]
+    fn the_first_line_after_switching_on_skips_the_oam_scan() {
+        let mut p = stat_ppu(0x20); // the mode 2 interrupt
+        p.write_reg(0xFF40, 0x11);
+        p.write_reg(0xFF40, 0x91);
+        assert_eq!(count_stat(&mut p, 79), 0, "no mode 2 on line 0");
+        assert_eq!((p.stat & 0x03, p.oam_locked(false)), (0, false));
+        p.tick(1);
+        assert_eq!((p.stat & 0x03, p.oam_locked(false)), (3, true), "dot 80");
+        assert_eq!(count_stat(&mut p, 456 - 80), 1, "line 1 scans OAM");
+        assert_eq!(p.stat & 0x03, 2);
+    }
+
+    #[test]
+    fn reads_meet_the_ppus_hold_on_oam_and_vram_4_dots_before_writes() {
+        // Line 1 of a frame (line 0 after switching on is different).
+        let mut p = Ppu::new();
+        let at = |p: &mut Ppu, dot: u32| {
+            let target = 456 + dot;
+            let now = u32::from(p.ly) * 456 + p.dot;
+            p.tick(target - now);
+            (
+                p.oam_locked(false),
+                p.oam_locked(true),
+                p.vram_locked(false),
+                p.vram_locked(true),
+            )
+        };
+        //        (OAM read, OAM write, VRAM read, VRAM write) locked?
+        assert_eq!(at(&mut p, 0), (true, true, false, false), "mode 2");
+        assert_eq!(at(&mut p, 76), (true, false, true, false), "end of mode 2");
+        assert_eq!(at(&mut p, 80), (true, true, true, true), "mode 3");
+        assert_eq!(at(&mut p, 252), (false, false, false, false), "HBlank");
+        assert_eq!(at(&mut p, 452), (true, false, false, false), "LY moved on");
     }
 
     #[test]
@@ -967,12 +1115,13 @@ mod tests {
         assert_eq!(p.tick(FRAME), 0, "no VBlank or STAT while off");
         assert_eq!(p.ly, 0);
 
-        // Back on: starts over from the top of line 0.
+        // Back on: starts over from the top of line 0 (in mode 0: that line
+        // has no OAM scan).
         p.write_reg(0xFF40, p.lcdc | 0x80);
         p.tick(10);
-        assert_eq!((p.ly, p.read_reg(0xFF41) & 0x03), (0, 2));
+        assert_eq!((p.ly, p.read_reg(0xFF41) & 0x03), (0, 0));
         p.tick(456 - 10);
-        assert_eq!(p.ly, 1);
+        assert_eq!((p.ly, p.read_reg(0xFF41) & 0x03), (1, 2));
     }
 
     /// Writes one 8x8 tile (16 bytes) at VRAM address `addr`.

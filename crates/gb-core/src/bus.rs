@@ -317,11 +317,13 @@ impl Bus {
     /// TODO(accuracy): during OAM DMA the DMG's CPU can't use the bus the copy
     /// reads from either (cartridge and WRAM, or VRAM): it gets the byte being
     /// copied. Code waiting for DMA runs from HRAM, so games don't notice.
-    fn cpu_locked_out(&self, addr: u16) -> bool {
+    /// The PPU's edges differ a little for reads and writes: see
+    /// [`Ppu::oam_locked`].
+    fn cpu_locked_out(&self, addr: u16, write: bool) -> bool {
         match addr {
-            0x8000..=0x9FFF => self.ppu.vram_busy(),
-            0xFE00..=0xFEFF => self.oam_dma.active || self.ppu.oam_busy(),
-            0xFF69 | 0xFF6B => self.cgb() && self.ppu.vram_busy(),
+            0x8000..=0x9FFF => self.ppu.vram_locked(write),
+            0xFE00..=0xFEFF => self.oam_dma.active || self.ppu.oam_locked(write),
+            0xFF69 | 0xFF6B => self.cgb() && self.ppu.vram_locked(write),
             _ => false,
         }
     }
@@ -329,7 +331,7 @@ impl Bus {
     /// A read by the CPU: like [`read`](Self::read), but memory the CPU is
     /// locked out of reads $FF.
     pub fn cpu_read(&self, addr: u16) -> u8 {
-        if self.cpu_locked_out(addr) {
+        if self.cpu_locked_out(addr, false) {
             return 0xFF;
         }
         self.read(addr)
@@ -338,7 +340,7 @@ impl Bus {
     /// A write by the CPU: lost where it's locked out (though a palette
     /// write still moves the palette index on).
     pub fn cpu_write(&mut self, addr: u16, val: u8) {
-        if self.cpu_locked_out(addr) {
+        if self.cpu_locked_out(addr, true) {
             if matches!(addr, 0xFF69 | 0xFF6B) {
                 self.ppu.lost_palette_write(addr);
             }
@@ -589,13 +591,14 @@ mod tests {
     }
 
     /// What the CPU gets reading VRAM and OAM, both holding $42, `dots` into
-    /// line 0 of a fresh frame.
+    /// line 1 of a fresh frame (line 0, just after the LCD comes on, has no
+    /// OAM scan).
     fn cpu_sees(b: &mut Bus, dots: u32) -> (u8, u8) {
         b.write(0xFF40, 0x00);
         b.write(0x8000, 0x42);
         b.write(0xFE00, 0x42);
         b.write(0xFF40, 0x91); // back on: line 0 starts over
-        b.tick(dots);
+        b.tick(456 + dots);
         (b.cpu_read(0x8000), b.cpu_read(0xFE00))
     }
 

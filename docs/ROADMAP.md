@@ -128,7 +128,7 @@ Pick whichever sound most fun:
         Link Pong (homebrew/link-pong, our own, in assembly with RGBDS), on the page as
         "try Link Pong"; two linked Game Boys play it in lockstep, byte for byte the same
 
-## Milestone 8 — Mooneye PPU timing
+## Milestone 8 — Mooneye PPU timing ✅
 
 Mooneye's `acceptance/ppu` tests time the PPU to the T-cycle. Games mostly don't care, but
 this is where the hardware gets interesting.
@@ -145,11 +145,14 @@ this is where the hardware gets interesting.
 - [x] OAM and VRAM closed to the CPU while the PPU reads them, in modes 2 and 3, and the
       Color's palette data in mode 3 (`intr_2_oam_ok_timing`. `acceptance/ppu`: 8/12; Mooneye
       overall 92/100 here; Tobu Tobu Girl, its Color edition and Link Pong draw the same)
-- [ ] Switching the LCD on, and line 144: the first line's quirks (`lcdon_timing`,
+- [x] Switching the LCD on, and line 144: the first line's quirks (`lcdon_timing`,
       `lcdon_write_timing`), LY == LYC as the LCD goes off and on (`stat_lyc_onoff`), the mode 2
-      interrupt at line 144 (`vblank_stat_intr`)
+      interrupt at line 144 (`vblank_stat_intr`). Reads meet the PPU's hold on OAM and VRAM
+      4 dots before writes do
 
 **Done when:** Mooneye `acceptance/ppu` passes 12/12.
+(Done: 12/12. Mooneye overall 96/100 here; the other 4 are unused I/O bits, boot I/O
+values, the serial clock's boot alignment and an MBC1 multicart.)
 
 ---
 
