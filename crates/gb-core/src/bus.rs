@@ -137,8 +137,13 @@ impl Bus {
     pub fn new(cart: Cartridge, model: Model) -> Self {
         let compat = model == Model::Cgb && !cart.header.cgb;
         let mut ppu = Ppu::post_boot(model);
+        if model == Model::Dmg {
+            let logo = std::array::from_fn(|i| cart.read_rom(0x0104 + i as u16));
+            ppu.leave_boot_logo(&logo);
+        }
         if compat {
             ppu.enter_compat_mode(compat::boot_palettes(&cart));
+            ppu.leave_trademark();
         }
         Self {
             cart,

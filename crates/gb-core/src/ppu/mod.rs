@@ -156,6 +156,46 @@ impl Ppu {
         p
     }
 
+    /// What the original's boot ROM leaves in VRAM after showing the logo:
+    /// the cartridge's Nintendo logo (header bytes $0104-$0133) as tiles 1
+    /// to 24, the ® as tile $19, and the tile map that placed them. Games
+    /// and test ROMs reuse them (Mealybug Tearoom's draw the ® from tile
+    /// $19). Each logo byte becomes 4 rows of a tile: its high nibble, then
+    /// its low nibble, each bit doubled across and each row twice down, in
+    /// one bitplane (color 1).
+    /// https://gbdev.io/pandocs/Power_Up_Sequence.html#logo-check
+    pub fn leave_boot_logo(&mut self, logo: &[u8; 48]) {
+        let double =
+            |nibble: u8| (0..4).fold(0u8, |acc, i| acc | (((nibble >> i) & 1) * 3) << (i * 2));
+        let mut addr = 0x0010;
+        for &byte in logo {
+            for nibble in [byte >> 4, byte & 0x0F] {
+                for _ in 0..2 {
+                    self.vram[addr] = double(nibble);
+                    addr += 2;
+                }
+            }
+        }
+        self.leave_trademark();
+        // The map: $9904-$990F tiles 1-12, $9924-$992F 13-24, the ® at $9910.
+        for i in 0..12u8 {
+            self.vram[0x1904 + usize::from(i)] = 1 + i;
+            self.vram[0x1924 + usize::from(i)] = 13 + i;
+        }
+        self.vram[0x1910] = 0x19;
+    }
+
+    /// The ® the boot ROM leaves as tile $19 (one bitplane: color 1).
+    /// TODO(accuracy): the Color's boot ROM shows its own logo, and only the
+    /// ® (which Mealybug Tearoom's Color pictures show) is left here when it
+    /// runs an original cartridge; what else it leaves in VRAM isn't.
+    pub fn leave_trademark(&mut self) {
+        const TRADEMARK: [u8; 8] = [0x3C, 0x42, 0xB9, 0xA5, 0xB9, 0xA5, 0x42, 0x3C];
+        for (row, &bits) in TRADEMARK.iter().enumerate() {
+            self.vram[0x0190 + row * 2] = bits;
+        }
+    }
+
     pub fn with_model(model: Model) -> Self {
         Self {
             model,
@@ -887,6 +927,27 @@ mod tests {
         assert_eq!(count_stat(&mut stat_ppu(0x08), FRAME), 144, "HBlank");
         assert_eq!(count_stat(&mut stat_ppu(0x20), FRAME), 145, "OAM scan");
         assert_eq!(count_stat(&mut stat_ppu(0x10), FRAME), 1, "VBlank");
+    }
+
+    #[test]
+    fn the_boot_rom_leaves_the_logo_and_the_trademark_in_vram() {
+        let mut logo = [0u8; 48];
+        logo[0] = 0xCE; // the real logo's first byte
+        let mut p = Ppu::new();
+        p.leave_boot_logo(&logo);
+        // $CE: nibble $C doubled is $F0, two rows; $E doubled is $FC, two
+        // rows; one bitplane.
+        let tile_1: Vec<u8> = (0..8).map(|r| p.vram[0x10 + r * 2]).collect();
+        assert_eq!(&tile_1[..4], &[0xF0, 0xF0, 0xFC, 0xFC]);
+        assert_eq!(p.vram[0x11], 0, "the other bitplane stays clear");
+        assert_eq!(p.vram[0x190], 0x3C, "tile $19: the ®'s top row");
+        assert_eq!(
+            (p.vram[0x1904], p.vram[0x190F]),
+            (1, 12),
+            "top row of the map"
+        );
+        assert_eq!((p.vram[0x1924], p.vram[0x192F]), (13, 24), "bottom row");
+        assert_eq!(p.vram[0x1910], 0x19, "the ® after the top row");
     }
 
     #[test]
