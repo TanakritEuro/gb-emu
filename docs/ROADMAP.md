@@ -166,8 +166,9 @@ from them. On a real Color you could also hold a button combination at boot to c
       reads $FF; the Color's undocumented $FF72-$FF77. (Mooneye: `boot_regs-cgb`,
       `boot_hwio-C`, `unused_hwio-C`, `vblank_stat_intr-C` pass, and so now do `boot_hwio` and
       `unused_hwio` on the original: 98/100 here)
-- [ ] The boot ROM's palette for each of Nintendo's games: a checksum of the title, and its 4th
-      letter where checksums collide
+- [x] The boot ROM's palette for each of Nintendo's games: a checksum of the title, and its 4th
+      letter where checksums collide (94 titles, 51 palette combinations; tables from SameBoy's
+      boot ROM, which match Pokémon Red's, Blue's and others' title checksums)
 - [ ] In the browser: play original games on a Game Boy or a Game Boy Color, and pick one of
       the 12 palettes a real Color offers for button combinations at boot
 

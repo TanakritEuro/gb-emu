@@ -113,3 +113,7 @@ it in the memory view.
 ## License
 
 MIT; see [LICENSE](LICENSE). Game ROMs are not included and are not covered by it.
+
+The Game Boy Color's palettes for original games (`crates/gb-core/src/compat.rs`) come from
+[SameBoy](https://github.com/LIJI32/SameBoy)'s open-source boot ROM, © Lior Halphon, under
+the MIT (Expat) license; its notice is next to the tables.
