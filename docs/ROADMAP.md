@@ -105,7 +105,7 @@ Pick whichever sound most fun:
   - [x] Save states in the core: the whole machine to bytes and back, refusing other games' states
   - [x] Save states in the browser: slots per game, kept between visits
   - [x] Rewind: keep recent states, hold a key to run backwards (30 s of history in ~350 KB)
-- [ ] Game Boy Color support (double-speed CPU, color palettes, VRAM banks)
+- [x] Game Boy Color support (double-speed CPU, color palettes, VRAM banks)
   - [x] Color mode: picked from the header, the Color's boot state, VRAM and WRAM banks, double
         speed (Blargg `cpu_instrs`/`instr_timing` pass in Color mode, `interrupt_time` passes;
         `cgb_sound` 8/12. Mooneye's Color tests need DMG compatibility mode, which isn't planned)
@@ -115,7 +115,8 @@ Pick whichever sound most fun:
         (`cgb-acid2` matches pixel for pixel)
   - [x] HDMA: copying to VRAM all at once, or a block per HBlank (and lines are now drawn as
         HBlank begins, so HBlank writes show from the next line)
-  - [ ] A Game Boy Color homebrew game plays in the browser
+  - [x] A Game Boy Color homebrew game plays in the browser (Tobu Tobu Girl Deluxe, at 60 fps,
+        with sound, battery saves, save states and rewind)
 - [ ] Link cable over WebRTC: two browsers, two-player games
 
 ---

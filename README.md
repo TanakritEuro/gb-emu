@@ -1,12 +1,14 @@
 # gb-emu
 
-A Game Boy emulator written in Rust, running in the browser through WebAssembly.
+A Game Boy and Game Boy Color emulator written in Rust, running in the browser through WebAssembly.
 
-**[▶ Play it](https://tanakriteuro.github.io/gb-emu/)** in your browser: drop in a `.gb` file (free,
-legal homebrew games are on [Homebrew Hub](https://hh.gbdev.io/), e.g. Tobu Tobu Girl).
+**[▶ Play it](https://tanakriteuro.github.io/gb-emu/)** in your browser: drop in a `.gb` or `.gbc`
+file (free, legal homebrew games are on [Homebrew Hub](https://hh.gbdev.io/), e.g. Tobu Tobu Girl,
+or its Color edition, Tobu Tobu Girl Deluxe).
 
-Status: plays original Game Boy (DMG) games with sound, battery saves, save states, rewind and a
-debugger, in the browser or headless. Next up: [docs/ROADMAP.md](docs/ROADMAP.md).
+Status: plays original Game Boy (DMG) and Game Boy Color games with sound, battery saves, save
+states, rewind and a debugger, in the browser or headless. Games that support the Color run in
+color; the rest run as on the original. Next up: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Setup (once)
 

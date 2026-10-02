@@ -176,11 +176,7 @@ export class VramView {
 
   hoverTile(e) {
     this.hovering = true;
-    const n = this.tileUnder(e);
-    const block = n < 256 ? `$${hex(n & 0xff, 2)}` : `$${hex(n - 256, 2)} (signed ${n - 256})`;
-    const bank = this.color ? ` in bank ${this.bank}` : "";
-    this.els.info.textContent =
-      `tile ${block} at ${hex(tileAddress(n), 4)}${bank}: ${tileUsers(n)}`;
+    this.els.info.textContent = describeSheetTile(this.tileUnder(e), this.color ? this.bank : null);
   }
 
   hoverMap(e) {
@@ -189,11 +185,27 @@ export class VramView {
     const entry = mapEntryAddress(this.highMap, x, y);
     const tile = this.mapEntries[entry - 0x9800];
     const attrs = this.mapAttrs?.[entry - 0x9800];
-    this.els.info.textContent =
-      `map (${x >> 3}, ${y >> 3}) at ${hex(entry, 4)} → tile ${hex(tile, 2)} ` +
-      `at ${hex(bgTileAddress(tile, this.lcdc), 4)}` +
-      (attrs === undefined ? "" : ` · ${describeAttrs(attrs)}`);
+    this.els.info.textContent = describeMapEntry(entry, tile, this.lcdc, attrs);
   }
+}
+
+/** The hover line for tile \`n\` (0-383) of the sheet; \`bank\` on the Color. */
+export function describeSheetTile(n, bank = null) {
+  const number = n < 256 ? `$${hex(n, 2)}` : `$${hex(n - 256, 2)} (signed ${n - 256})`;
+  const where = `$${hex(tileAddress(n), 4)}${bank === null ? "" : ` in bank ${bank}`}`;
+  return `tile ${number} at ${where}: ${tileUsers(n)}`;
+}
+
+/** The hover line for the map entry at \`entry\` holding \`tile\`, with its
+ * Color attributes if there are any. */
+export function describeMapEntry(entry, tile, lcdc, attrs) {
+  const col = (entry - 0x9800) & 31;
+  const row = ((entry - 0x9800) >> 5) & 31;
+  const color = attrs === undefined ? "" : ` · ${describeAttrs(attrs)}`; // names the bank
+  return (
+    `map (${col}, ${row}) at $${hex(entry, 4)} → tile $${hex(tile, 2)} ` +
+    `at $${hex(bgTileAddress(tile, lcdc), 4)}${color}`
+  );
 }
 
 /** Puts RGBA `bytes` on `canvas` (w × h) and returns its 2D context. */

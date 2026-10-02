@@ -1,6 +1,6 @@
 # gb-emu
 
-A Game Boy (DMG) emulator in Rust that runs in the browser via WebAssembly.
+A Game Boy (DMG) and Game Boy Color (CGB) emulator in Rust that runs in the browser via WebAssembly.
 
 ## Layout
 

@@ -12,6 +12,8 @@ import {
   windowRect,
   chosenMap,
   describeAttrs,
+  describeSheetTile,
+  describeMapEntry,
 } from "./vramview.js";
 
 test("the tile sheet is 16 tiles per row in address order", () => {
@@ -103,4 +105,26 @@ test("Color tile attributes read as words", () => {
   assert.equal(describeAttrs(0x20), "palette 0, bank 0, X flip");
   assert.equal(describeAttrs(0x60), "palette 0, bank 0, X+Y flip");
   assert.equal(describeAttrs(0xc7), "palette 7, bank 0, Y flip, over sprites");
+});
+
+test("hovering a tile names it, its address and who can use it", () => {
+  assert.equal(
+    describeSheetTile(0x81),
+    "tile $81 at $8810: sprites and BG/window",
+  );
+  assert.equal(
+    describeSheetTile(300, 1),
+    "tile $2C (signed 44) at $92C0 in bank 1: BG/window when LCDC bit 4 is clear",
+  );
+});
+
+test("hovering the map names the entry, its tile and on the Color its attributes", () => {
+  assert.equal(
+    describeMapEntry(0x9884, 0x0a, 0x81),
+    "map (4, 4) at $9884 → tile $0A at $90A0",
+  );
+  assert.equal(
+    describeMapEntry(0x9c21, 0x05, 0x91, 0x2d),
+    "map (1, 1) at $9C21 → tile $05 at $8050 · palette 5, bank 1, X flip",
+  );
 });
