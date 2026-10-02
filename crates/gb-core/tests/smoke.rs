@@ -293,6 +293,26 @@ fn the_header_picks_the_model_and_the_boot_state_says_which() {
 }
 
 #[test]
+fn the_cpu_waits_while_general_purpose_dma_copies() {
+    #[rustfmt::skip]
+    let code = [
+        0x3E, 0xC0, 0xE0, 0x51, // HDMA1: source $C000
+        0xAF, 0xE0, 0x52,       // HDMA2
+        0x3E, 0x80, 0xE0, 0x53, // HDMA3: destination $8000
+        0xAF, 0xE0, 0x54,       // HDMA4
+        0x3E, 0x03,             // 4 blocks, general purpose
+        0xE0, 0x55,             // $0160 LDH ($FF55),A: go
+        0x18, 0xFE,             // spin
+    ];
+    let mut gb = GameBoy::new(color(rom(&code))).unwrap();
+    while gb.cpu().regs.pc != 0x0160 {
+        gb.step().unwrap();
+    }
+    assert_eq!(gb.step(), Ok(12 + 4 * 32), "LDH, then 8 µs per block");
+    assert_eq!(gb.peek(0xFF55), 0xFF);
+}
+
+#[test]
 fn double_speed_fits_twice_the_cpu_work_in_a_frame() {
     #[rustfmt::skip]
     let code = [

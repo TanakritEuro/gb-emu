@@ -46,6 +46,9 @@ fn rgb555(px: &[u8; 4]) -> u16 {
 }
 
 const DOTS_PER_LINE: u32 = 456;
+/// Where mode 3 (drawing) ends and mode 0 (HBlank) begins on lines 0-143.
+/// TODO(accuracy): really 252-369, depending on sprites, SCX and the window.
+const HBLANK_DOT: u32 = 252;
 const LINES_PER_FRAME: u8 = 154;
 const VBLANK_LINE: u8 = 144;
 
@@ -96,6 +99,9 @@ pub struct Ppu {
     stat_line: bool,
     /// IF bits raised by register writes, handed over on the next `tick`.
     pending_irq: u8,
+    /// HBlanks (of lines 0-143) begun since the bus last asked: the Color's
+    /// HBlank DMA copies a block in each.
+    hblanks: u32,
     /// RGBA, allocated once and never replaced: frontends may keep a pointer
     /// to it (the browser draws straight from wasm memory).
     framebuffer: Box<[u8]>,
@@ -143,6 +149,7 @@ impl Ppu {
             window_line: 0,
             stat_line: false,
             pending_irq: 0,
+            hblanks: 0,
             framebuffer: DMG_PALETTE[0]
                 .repeat(SCREEN_WIDTH * SCREEN_HEIGHT)
                 .into_boxed_slice(),
@@ -274,6 +281,11 @@ impl Ppu {
         }
     }
 
+    /// How many HBlanks began since the last call.
+    pub fn take_hblanks(&mut self) -> u32 {
+        std::mem::take(&mut self.hblanks)
+    }
+
     /// The VRAM bank the CPU sees, 0 or 1 (always 0 on the original).
     pub fn vram_bank(&self) -> u8 {
         self.vram_bank
@@ -387,11 +399,15 @@ impl Ppu {
         }
         for _ in 0..cycles {
             self.dot += 1;
+            // The line is drawn as mode 3 ends and HBlank begins, so what a
+            // game changes during HBlank (scroll registers, an HBlank DMA
+            // block) shows from the next line on, as on hardware.
+            if self.dot == HBLANK_DOT && self.ly < VBLANK_LINE {
+                self.render_scanline();
+                self.hblanks += 1;
+            }
             if self.dot == DOTS_PER_LINE {
                 self.dot = 0;
-                if self.ly < VBLANK_LINE {
-                    self.render_scanline();
-                }
                 self.ly = (self.ly + 1) % LINES_PER_FRAME;
                 if self.ly == VBLANK_LINE {
                     irq |= interrupt::VBLANK;
@@ -416,7 +432,7 @@ impl Ppu {
             1
         } else if self.dot < 80 {
             2
-        } else if self.dot < 252 {
+        } else if self.dot < HBLANK_DOT {
             3
         } else {
             0
@@ -1136,6 +1152,26 @@ mod tests {
         p.lcdc |= 0x08;
         p.render_scanline();
         assert_eq!(shade_at(&p, 0, 0), 3, "$9C00 map points at tile 1");
+    }
+
+    #[test]
+    fn each_line_is_drawn_as_hblank_begins_so_hblank_writes_show_on_the_next() {
+        let mut p = bg_ppu();
+        put_tile(&mut p, 0x8010, striped(0xFF, 0xFF)); // tile 1: color 3
+        p.write_vram(0x9801, 1); // map column 1
+        p.tick(HBLANK_DOT); // line 0 drawn now
+        assert_eq!(p.take_hblanks(), 1);
+        p.scx = 8; // during line 0's HBlank
+        p.tick(DOTS_PER_LINE); // into line 1's HBlank
+        assert_eq!(shade_at(&p, 0, 0), 0, "line 0 was already drawn");
+        assert_eq!(shade_at(&p, 0, 1), 3, "line 1 scrolled");
+        p.take_hblanks();
+        p.tick(crate::CYCLES_PER_FRAME);
+        assert_eq!(
+            p.take_hblanks(),
+            144,
+            "one per visible line, none in VBlank"
+        );
     }
 
     #[test]

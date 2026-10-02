@@ -6,6 +6,30 @@
 use crate::state::{StateError, StateReader, StateWriter};
 use crate::{apu::Apu, cartridge::Cartridge, joypad::Joypad, ppu::Ppu, timer::Timer, Model};
 
+/// The Color's VRAM DMA, set up through HDMA1-5 ($FF51-$FF55).
+#[derive(Debug, Clone, Copy)]
+struct Hdma {
+    /// Where the next block comes from (low 4 bits 0).
+    src: u16,
+    /// Where it goes, as an offset into VRAM: $0000-$1FF0.
+    dst: u16,
+    /// An HBlank copy is running.
+    active: bool,
+    /// Blocks still to copy, minus 1 (HDMA5 bits 0-6); $7F when idle.
+    remaining: u8,
+}
+
+impl Default for Hdma {
+    fn default() -> Self {
+        Self {
+            src: 0,
+            dst: 0,
+            active: false,
+            remaining: 0x7F, // HDMA5 reads $FF
+        }
+    }
+}
+
 /// Bits of IF ($FF0F) and IE ($FFFF), in priority order.
 pub mod interrupt {
     pub const VBLANK: u8 = 0x01;
@@ -34,6 +58,12 @@ pub struct Bus {
     /// KEY1 bit 7: the CPU, timer, serial and OAM DMA run twice as fast; the
     /// PPU, sound and cartridge clock don't. Color only.
     pub double_speed: bool,
+    hdma: Hdma,
+    /// CPU T-cycles the CPU must wait for VRAM DMA; `GameBoy::step` runs
+    /// the rest of the hardware through them.
+    dma_stall: u32,
+    /// The CPU is asleep in HALT, which pauses HBlank DMA.
+    pub(crate) cpu_halted: bool,
     hram: [u8; 0x7F],
     /// Backing store for I/O registers nothing emulates yet.
     io: [u8; 0x80],
@@ -58,6 +88,9 @@ impl Bus {
             svbk: 0,
             speed_armed: false,
             double_speed: false,
+            hdma: Hdma::default(),
+            dma_stall: 0,
+            cpu_halted: false,
             hram: [0; 0x7F],
             io: [0; 0x80],
             if_reg: 0xE1,
@@ -79,6 +112,10 @@ impl Bus {
         w.u8(self.svbk);
         w.bool(self.speed_armed);
         w.bool(self.double_speed);
+        w.u16(self.hdma.src);
+        w.u16(self.hdma.dst);
+        w.bool(self.hdma.active);
+        w.u8(self.hdma.remaining);
         w.bytes(&self.hram);
         w.bytes(&self.io);
         w.bytes(&[self.if_reg, self.ie_reg, self.serial_data, self.serial_ctrl]);
@@ -99,6 +136,12 @@ impl Bus {
         self.svbk = r.u8()? & 7;
         self.speed_armed = r.bool()?;
         self.double_speed = r.bool()?;
+        self.hdma = Hdma {
+            src: r.u16()? & 0xFFF0,
+            dst: r.u16()? & 0x1FF0,
+            active: r.bool()?,
+            remaining: r.u8()? & 0x7F,
+        };
         self.timer.set_double_speed(self.double_speed);
         r.bytes(&mut self.hram)?;
         r.bytes(&mut self.io)?;
@@ -150,6 +193,63 @@ impl Bus {
         true
     }
 
+    /// VRAM DMA's registers, $FF51-$FF55 (Color only; HDMA1-4 can't be read).
+    fn read_hdma(&self, addr: u16) -> u8 {
+        match addr {
+            // Bit 7 is 0 while an HBlank copy is running.
+            0xFF55 => u8::from(!self.hdma.active) << 7 | self.hdma.remaining,
+            // TODO(accuracy): what HDMA1-4 read back varies; $FF is common.
+            _ => 0xFF,
+        }
+    }
+
+    /// https://gbdev.io/pandocs/CGB_Registers.html#lcd-vram-dma-transfers
+    fn write_hdma(&mut self, addr: u16, val: u8) {
+        let h = &mut self.hdma;
+        match addr {
+            // The source's and destination's low 4 bits are ignored, and the
+            // destination is always in VRAM ($8000-$9FF0).
+            0xFF51 => h.src = (h.src & 0x00FF) | (u16::from(val) << 8),
+            0xFF52 => h.src = (h.src & 0xFF00) | u16::from(val & 0xF0),
+            0xFF53 => h.dst = (h.dst & 0x00FF) | (u16::from(val & 0x1F) << 8),
+            0xFF54 => h.dst = (h.dst & 0xFF00) | u16::from(val & 0xF0),
+            // Writing bit 7 = 0 during an HBlank copy stops it.
+            _ if h.active && val & 0x80 == 0 => h.active = false,
+            // Bit 7 = 0: general-purpose, everything now while the CPU waits.
+            _ if val & 0x80 == 0 => {
+                for _ in 0..=val & 0x7F {
+                    self.hdma_block();
+                }
+                self.hdma.remaining = 0x7F; // reads $FF: done
+            }
+            // Bit 7 = 1: a block of $10 bytes in each HBlank.
+            // TODO(accuracy): started with the LCD off, hardware copies one
+            // block straight away; here nothing happens until HBlanks resume.
+            _ => {
+                h.active = true;
+                h.remaining = val & 0x7F;
+            }
+        }
+    }
+
+    /// Copies $10 bytes to VRAM (the bank VBK selects) and charges the CPU
+    /// the time: about 8 µs, which is 32 T-cycles, or 64 in double speed.
+    fn hdma_block(&mut self) {
+        for i in 0..0x10 {
+            let byte = self.read(self.hdma.src.wrapping_add(i));
+            let dst = 0x8000 | ((self.hdma.dst + i) & 0x1FFF);
+            self.ppu.write_vram(dst, byte);
+        }
+        self.hdma.src = self.hdma.src.wrapping_add(0x10);
+        self.hdma.dst = (self.hdma.dst + 0x10) & 0x1FF0;
+        self.dma_stall += if self.double_speed { 64 } else { 32 };
+    }
+
+    /// CPU T-cycles the CPU now has to wait for VRAM DMA.
+    pub fn take_dma_stall(&mut self) -> u32 {
+        std::mem::take(&mut self.dma_stall)
+    }
+
     /// The real time `cpu_cycles` of CPU T-cycles take, in normal-speed
     /// T-cycles: half as long in double speed.
     pub fn real_cycles(&self, cpu_cycles: u32) -> u32 {
@@ -185,9 +285,10 @@ impl Bus {
             0xFF44 if self.doctor_mode => 0x90,
             0xFF40..=0xFF4B => self.ppu.read_reg(addr),
             // Color registers: unused bits read 1; on the original, all of it.
-            0xFF4D | 0xFF4F | 0xFF68..=0xFF6C | 0xFF70 if !self.cgb() => 0xFF,
+            0xFF4D | 0xFF4F | 0xFF51..=0xFF55 | 0xFF68..=0xFF6C | 0xFF70 if !self.cgb() => 0xFF,
             0xFF4D => 0x7E | (u8::from(self.double_speed) << 7) | u8::from(self.speed_armed),
             0xFF4F => 0xFE | self.ppu.vram_bank(),
+            0xFF51..=0xFF55 => self.read_hdma(addr),
             0xFF68..=0xFF6C => self.ppu.read_color_reg(addr),
             0xFF70 => 0xF8 | self.svbk,
             _ => self.io[(addr - 0xFF00) as usize],
@@ -228,9 +329,10 @@ impl Bus {
             0xFF0F => self.if_reg = val | 0xE0,
             0xFF46 => self.oam_dma(val),
             0xFF40..=0xFF4B => self.ppu.write_reg(addr, val),
-            0xFF4D | 0xFF4F | 0xFF68..=0xFF6C | 0xFF70 if !self.cgb() => {}
+            0xFF4D | 0xFF4F | 0xFF51..=0xFF55 | 0xFF68..=0xFF6C | 0xFF70 if !self.cgb() => {}
             0xFF4D => self.speed_armed = val & 1 != 0,
             0xFF4F => self.ppu.set_vram_bank(val & 1),
+            0xFF51..=0xFF55 => self.write_hdma(addr, val),
             0xFF68..=0xFF6C => self.ppu.write_color_reg(addr, val),
             0xFF70 => self.svbk = val & 7,
             _ => self.io[(addr - 0xFF00) as usize] = val,
@@ -268,6 +370,19 @@ impl Bus {
         }
         let real = self.real_cycles(cycles);
         self.if_reg |= self.ppu.tick(real);
+        // An HBlank copy moves one block per HBlank, paused while the CPU
+        // is halted. (Only the Color can start one.)
+        for _ in 0..self.ppu.take_hblanks() {
+            if self.hdma.active && !self.cpu_halted {
+                self.hdma_block();
+                if self.hdma.remaining == 0 {
+                    self.hdma.active = false;
+                    self.hdma.remaining = 0x7F;
+                } else {
+                    self.hdma.remaining -= 1;
+                }
+            }
+        }
         self.cart.tick(real);
         for _ in 0..self.timer.take_div_apu_ticks() {
             self.apu.frame_sequencer_tick();
@@ -407,13 +522,94 @@ mod tests {
         let mut b = bus();
         b.write(0xD000, 0x55);
         for reg in [
-            0xFF4D, 0xFF4F, 0xFF68, 0xFF69, 0xFF6A, 0xFF6B, 0xFF6C, 0xFF70,
+            0xFF4D, 0xFF4F, 0xFF55, 0xFF68, 0xFF69, 0xFF6A, 0xFF6B, 0xFF6C, 0xFF70,
         ] {
             b.write(reg, 0x01);
             assert_eq!(b.read(reg), 0xFF, "${reg:04X}");
         }
         assert_eq!(b.read(0xD000), 0x55, "SVBK did nothing");
         assert!(!b.speed_switch());
+    }
+
+    /// Puts `bytes` at $C000 and points HDMA from there to VRAM $8000.
+    fn hdma_bus(bytes: &[u8]) -> Bus {
+        let mut b = cgb_bus();
+        for (i, &v) in bytes.iter().enumerate() {
+            b.write(0xC000 + i as u16, v);
+        }
+        b.write(0xFF51, 0xC0);
+        b.write(0xFF52, 0x0F); // low 4 bits ignored: $C000
+        b.write(0xFF53, 0xE0); // only bits 12-8 count: $0000
+        b.write(0xFF54, 0x0F); // low 4 bits ignored
+        b
+    }
+
+    fn vram_bytes(b: &Bus, from: u16, n: u16) -> Vec<u8> {
+        (from..from + n).map(|a| b.read(a)).collect()
+    }
+
+    #[test]
+    fn general_purpose_dma_copies_everything_at_once_and_the_cpu_waits() {
+        let data: Vec<u8> = (1..=0x30).collect();
+        let mut b = hdma_bus(&data);
+        assert_eq!(b.read(0xFF55), 0xFF, "idle");
+        b.write(0xFF55, 0x01); // 2 blocks of $10
+        assert_eq!(vram_bytes(&b, 0x8000, 0x20), data[..0x20]);
+        assert_eq!(b.read(0x8020), 0, "no more than asked");
+        assert_eq!(b.read(0xFF55), 0xFF, "done");
+        assert_eq!(b.take_dma_stall(), 2 * 32, "8 µs a block");
+        assert_eq!(b.read(0xFF51), 0xFF, "the address registers can't be read");
+    }
+
+    #[test]
+    fn dma_goes_to_the_selected_vram_bank_and_costs_more_cycles_in_double_speed() {
+        let mut b = hdma_bus(&[0xAB; 0x10]);
+        b.write(0xFF4F, 1);
+        b.write(0xFF4D, 1);
+        b.speed_switch();
+        b.write(0xFF55, 0x00);
+        assert_eq!(b.read(0x8000), 0xAB);
+        b.write(0xFF4F, 0);
+        assert_eq!(b.read(0x8000), 0x00, "bank 0 untouched");
+        assert_eq!(
+            b.take_dma_stall(),
+            64,
+            "the same 8 µs is twice the CPU cycles"
+        );
+    }
+
+    #[test]
+    fn hblank_dma_copies_a_block_per_hblank_and_can_be_stopped() {
+        let data: Vec<u8> = (1..=0x40).collect();
+        let mut b = hdma_bus(&data);
+        b.write(0xFF55, 0x83); // 4 blocks, one per HBlank
+        assert_eq!(b.read(0xFF55), 0x03, "bit 7 = 0: running");
+        assert_eq!(b.read(0x8000), 0, "nothing until an HBlank");
+        b.tick(252); // line 0's HBlank begins
+        assert_eq!(vram_bytes(&b, 0x8000, 0x10), data[..0x10]);
+        assert_eq!(b.read(0x8010), 0);
+        assert_eq!(b.read(0xFF55), 0x02);
+        assert_eq!(b.take_dma_stall(), 32);
+        b.tick(456);
+        assert_eq!(vram_bytes(&b, 0x8000, 0x20), data[..0x20]);
+        b.write(0xFF55, 0x00); // stop
+        assert_eq!(b.read(0xFF55), 0x81, "stopped with 2 blocks left");
+        b.tick(456);
+        assert_eq!(b.read(0x8020), 0, "no more after stopping");
+    }
+
+    #[test]
+    fn hblank_dma_finishes_and_pauses_while_the_cpu_is_halted() {
+        let mut b = hdma_bus(&[0x11; 0x20]);
+        b.write(0xFF55, 0x81); // 2 blocks
+        b.cpu_halted = true;
+        b.tick(456);
+        assert_eq!(b.read(0x8000), 0, "halted: this HBlank is skipped");
+        b.cpu_halted = false;
+        b.tick(456);
+        b.tick(456);
+        assert_eq!(vram_bytes(&b, 0x8000, 0x20), [0x11; 0x20]);
+        assert_eq!(b.read(0xFF55), 0xFF, "finished");
     }
 
     #[test]

@@ -113,7 +113,8 @@ Pick whichever sound most fun:
         (cgb-acid2: every pixel not drawn by a sprite matches)
   - [x] Color sprites: palette and bank bits, OAM-order priority, LCDC bit 0 as master priority
         (`cgb-acid2` matches pixel for pixel)
-  - [ ] HDMA: copying to VRAM all at once, or a block per HBlank
+  - [x] HDMA: copying to VRAM all at once, or a block per HBlank (and lines are now drawn as
+        HBlank begins, so HBlank writes show from the next line)
   - [ ] A Game Boy Color homebrew game plays in the browser
 - [ ] Link cable over WebRTC: two browsers, two-player games
 

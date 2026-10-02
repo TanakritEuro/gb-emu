@@ -110,8 +110,19 @@ impl GameBoy {
     /// Executes one instruction and advances the rest of the hardware by the
     /// same number of T-cycles. Returns the T-cycles consumed.
     pub fn step(&mut self) -> Result<u32, CpuError> {
-        let cycles = self.cpu.step(&mut self.bus)?;
+        let mut cycles = self.cpu.step(&mut self.bus)?;
+        self.bus.cpu_halted = self.cpu.halted;
         self.bus.tick(cycles);
+        // While the Color's VRAM DMA copies, the CPU waits and the rest of
+        // the hardware carries on (which can start the next HBlank block).
+        loop {
+            let stall = self.bus.take_dma_stall();
+            if stall == 0 {
+                break;
+            }
+            self.bus.tick(stall);
+            cycles += stall;
+        }
         Ok(cycles)
     }
 

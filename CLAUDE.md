@@ -7,7 +7,8 @@ A Game Boy (DMG) emulator in Rust that runs in the browser via WebAssembly.
 - `crates/gb-core/` — the emulator. Pure Rust, no I/O, no `unsafe`, no dependencies. Two models
   (`Model::Dmg`, `Model::Cgb`), picked from the cartridge header unless overridden.
   - `cpu.rs` SM83 CPU (registers, fetch/decode/execute)
-  - `bus.rs` memory map; routes every read/write; IF/IE; serial; OAM DMA
+  - `bus.rs` memory map; routes every read/write; IF/IE; serial; OAM DMA; the Color's WRAM banks,
+    speed switch and VRAM DMA (HDMA)
   - `cartridge.rs` header parsing + MBCs (ROM-only, MBC1, MBC2, MBC3 with its real-time clock, MBC5)
   - `ppu.rs` scanline timing, STAT/LY, framebuffer (scanline renderer: background, window, sprites);
     debugger pictures of VRAM (tile sheet, tile maps)
