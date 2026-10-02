@@ -31,7 +31,8 @@ const MAGIC: &[u8; 4] = b"GBST";
 /// 4: OPRI, the Color's sprite priority mode.
 /// 5: the Color's VRAM DMA.
 /// 6: the serial port in its own section, with transfer progress.
-pub const VERSION: u16 = 6;
+/// 7: OAM DMA in progress (it now takes its real 160 M-cycles).
+pub const VERSION: u16 = 7;
 /// Bytes before the payload: magic, version, fingerprint, length.
 const HEADER_LEN: usize = 4 + 2 + 8 + 4;
 

@@ -151,6 +151,8 @@ pub struct Cpu {
     /// Set by HALT when it hits the HALT bug: the next opcode fetch doesn't
     /// advance PC. See the HALT arm in `execute`.
     halt_bug: bool,
+    /// T-cycles the current step has let the rest of the hardware run.
+    ticked: u32,
 }
 
 impl Cpu {
@@ -230,23 +232,48 @@ impl Cpu {
         Ok(())
     }
 
-    fn fetch8(&mut self, bus: &Bus) -> u8 {
-        let v = bus.read(self.regs.pc);
+    /// One M-cycle without a memory access: the rest of the hardware runs
+    /// for 4 T-cycles while the CPU works inside (e.g. on SP or PC).
+    fn idle(&mut self, bus: &mut Bus) {
+        bus.tick(4);
+        self.ticked += 4;
+    }
+
+    /// One M-cycle reading memory. The CPU touches memory once per M-cycle,
+    /// and the PPU, timer and DMA keep running in between, so each access
+    /// sees the hardware as it is at that point of the instruction: the
+    /// second write of a PUSH lands 16 T-cycles after the instruction began.
+    /// Here an M-cycle lets the hardware run first, then accesses memory.
+    /// Which M-cycle does what: Gekkio's "Game Boy: Complete Technical
+    /// Reference"; the totals: https://gbdev.io/pandocs/CPU_Instruction_Set.html
+    fn read(&mut self, bus: &mut Bus, addr: u16) -> u8 {
+        self.idle(bus);
+        bus.cpu_read(addr)
+    }
+
+    /// One M-cycle writing memory. See [`Cpu::read`].
+    fn write(&mut self, bus: &mut Bus, addr: u16, val: u8) {
+        self.idle(bus);
+        bus.cpu_write(addr, val);
+    }
+
+    fn fetch8(&mut self, bus: &mut Bus) -> u8 {
+        let v = self.read(bus, self.regs.pc);
         self.regs.pc = self.regs.pc.wrapping_add(1);
         v
     }
 
-    fn fetch16(&mut self, bus: &Bus) -> u16 {
+    fn fetch16(&mut self, bus: &mut Bus) -> u16 {
         let lo = self.fetch8(bus);
         let hi = self.fetch8(bus);
         u16::from_le_bytes([lo, hi])
     }
 
     /// Reads the 8-bit operand an opcode's 3-bit field names (`r[y]`/`r[z]`):
-    /// B C D E H L (HL) A. Index 6 is the byte in memory at HL, which costs
-    /// an extra 4 T-cycles per access; the caller's cycle count covers that.
+    /// B C D E H L (HL) A. Index 6 is the byte in memory at HL, an access that
+    /// takes an M-cycle of its own.
     /// https://gbdev.io/pandocs/CPU_Instruction_Set.html
-    fn read_r8(&self, bus: &Bus, r: u8) -> u8 {
+    fn read_r8(&mut self, bus: &mut Bus, r: u8) -> u8 {
         match r {
             0 => self.regs.b,
             1 => self.regs.c,
@@ -254,7 +281,7 @@ impl Cpu {
             3 => self.regs.e,
             4 => self.regs.h,
             5 => self.regs.l,
-            6 => bus.read(self.regs.hl()),
+            6 => self.read(bus, self.regs.hl()),
             _ => self.regs.a,
         }
     }
@@ -268,7 +295,7 @@ impl Cpu {
             3 => self.regs.e = val,
             4 => self.regs.h = val,
             5 => self.regs.l = val,
-            6 => bus.write(self.regs.hl(), val),
+            6 => self.write(bus, self.regs.hl(), val),
             _ => self.regs.a = val,
         }
     }
@@ -310,21 +337,23 @@ impl Cpu {
         }
     }
 
-    /// Pushes a word: high byte to SP-1, then low byte to SP-2, in that order,
-    /// as the hardware does. The stack grows downward.
+    /// Pushes a word: an M-cycle to decrement SP, then the high byte to SP-1
+    /// and the low byte to SP-2, in that order, as the hardware does. The
+    /// stack grows downward.
     fn push16(&mut self, bus: &mut Bus, val: u16) {
         let [lo, hi] = val.to_le_bytes();
+        self.idle(bus);
         self.regs.sp = self.regs.sp.wrapping_sub(1);
-        bus.write(self.regs.sp, hi);
+        self.write(bus, self.regs.sp, hi);
         self.regs.sp = self.regs.sp.wrapping_sub(1);
-        bus.write(self.regs.sp, lo);
+        self.write(bus, self.regs.sp, lo);
     }
 
     /// Pops a word: low byte from SP, then high byte from SP+1.
-    fn pop16(&mut self, bus: &Bus) -> u16 {
-        let lo = bus.read(self.regs.sp);
+    fn pop16(&mut self, bus: &mut Bus) -> u16 {
+        let lo = self.read(bus, self.regs.sp);
         self.regs.sp = self.regs.sp.wrapping_add(1);
-        let hi = bus.read(self.regs.sp);
+        let hi = self.read(bus, self.regs.sp);
         self.regs.sp = self.regs.sp.wrapping_add(1);
         u16::from_le_bytes([lo, hi])
     }
@@ -436,7 +465,7 @@ impl Cpu {
     /// low byte as unsigned 8-bit numbers, whatever the sign: SP + (-1) on
     /// $0005 sets both. Z and N are cleared.
     /// https://gbdev.io/pandocs/CPU_Instruction_Set.html
-    fn sp_plus_e8(&mut self, bus: &Bus) -> u16 {
+    fn sp_plus_e8(&mut self, bus: &mut Bus) -> u16 {
         let e = self.fetch8(bus);
         let sp = self.regs.sp;
         let lo = sp.to_le_bytes()[0];
@@ -487,10 +516,18 @@ impl Cpu {
         }
     }
 
-    /// Relative jump. The offset is signed and counts from the address after
-    /// the JR instruction, which is where PC already points.
-    fn jr(&mut self, offset: u8) {
+    /// Relative jump, an M-cycle to work out the new PC. The offset is signed
+    /// and counts from the address after the JR instruction, which is where
+    /// PC already points.
+    fn jr(&mut self, bus: &mut Bus, offset: u8) {
+        self.idle(bus);
         self.regs.pc = self.regs.pc.wrapping_add_signed(i16::from(offset as i8));
+    }
+
+    /// An absolute jump (JP, RET, RETI): one M-cycle to load PC.
+    fn jump(&mut self, bus: &mut Bus, addr: u16) {
+        self.idle(bus);
+        self.regs.pc = addr;
     }
 
     /// Pushes the return address (PC, already past the CALL) and jumps.
@@ -518,19 +555,17 @@ impl Cpu {
         }
     }
 
-    /// Serves the highest-priority pending interrupt: clears its IF bit and
-    /// IME, pushes PC and jumps to its vector ($40 VBlank, $48 STAT, $50
-    /// Timer, $58 Serial, $60 Joypad). Returns the 20 T-cycles it takes:
-    /// 2 internal M-cycles, 2 for the push, 1 to load PC.
-    /// https://gbdev.io/pandocs/Interrupts.html
+    /// Serves the highest-priority pending interrupt in 5 M-cycles: the
+    /// opcode fetch it cut short (already spent by `step`), one to decrement
+    /// SP, the push of PC (high byte, then low), and one to jump to the
+    /// vector ($40 VBlank, $48 STAT, $50 Timer, $58 Serial, $60 Joypad).
+    /// Clears IME and the interrupt's IF bit.
     ///
-    /// TODO(accuracy): the IE/IF check happens on real hardware between the
-    /// two pushes. If the high byte of PC lands on $FFFF (IE) and disables the
-    /// interrupt, the CPU jumps to $0000 instead (Mooneye's ie_push test).
-    fn dispatch_interrupt(&mut self, bus: &mut Bus, pending: u8) -> u32 {
-        // Lowest bit wins: VBlank (bit 0) has the highest priority.
-        let bit = pending.trailing_zeros() as u8;
-        bus.if_reg &= !(1 << bit);
+    /// The interrupt is only picked after the high byte is pushed. If that
+    /// push lands on IE ($FFFF) and switches the interrupt off, nothing is
+    /// left to serve and the CPU jumps to $0000 (Mooneye's ie_push).
+    /// https://gbdev.io/pandocs/Interrupts.html
+    fn dispatch_interrupt(&mut self, bus: &mut Bus) {
         self.ime = false;
         // EI ; HALT with an interrupt pending hits the HALT bug and then
         // dispatches here: the handler returns to the HALT, which runs again.
@@ -540,49 +575,75 @@ impl Cpu {
         } else {
             self.regs.pc
         };
-        self.push16(bus, ret);
-        self.regs.pc = 0x40 + 8 * u16::from(bit);
-        20
+        let [lo, hi] = ret.to_le_bytes();
+        self.idle(bus);
+        self.regs.sp = self.regs.sp.wrapping_sub(1);
+        self.write(bus, self.regs.sp, hi);
+        let pending = bus.pending_interrupts();
+        self.regs.sp = self.regs.sp.wrapping_sub(1);
+        self.write(bus, self.regs.sp, lo);
+        self.idle(bus);
+        self.regs.pc = if pending == 0 {
+            0x0000
+        } else {
+            // Lowest bit wins: VBlank (bit 0) has the highest priority.
+            let bit = pending.trailing_zeros() as u8;
+            bus.if_reg &= !(1 << bit);
+            0x40 + 8 * u16::from(bit)
+        };
     }
 
-    /// Executes one instruction, or dispatches an interrupt, and returns the
-    /// T-cycles it took.
+    /// Executes one instruction, or dispatches an interrupt, running the rest
+    /// of the hardware along with it M-cycle by M-cycle. Returns the T-cycles
+    /// it took.
     pub fn step(&mut self, bus: &mut Bus) -> Result<u32, CpuError> {
-        if self.halted {
-            if bus.pending_interrupts() != 0 {
-                self.halted = false;
-            } else {
-                return Ok(4);
-            }
+        self.ticked = 0;
+        if self.halted && bus.pending_interrupts() != 0 {
+            self.halted = false; // HALT began with one already pending
         }
+        bus.cpu_halted = self.halted;
 
-        // Interrupts are checked between instructions. EI's one-instruction
+        // M-cycle 1 fetches the opcode. Interrupts are checked as it ends:
+        // if one is pending (and IME is on), the opcode is dropped and this
+        // M-cycle becomes the first of the dispatch. EI's one-instruction
         // delay works because IME only turns on at the end of the next step.
-        let pending = bus.pending_interrupts();
-        if self.ime && pending != 0 {
-            return Ok(self.dispatch_interrupt(bus, pending));
+        // In HALT the CPU spends M-cycles like this one until an interrupt is
+        // pending; the one in which it arrives carries on as the fetch.
+        self.idle(bus);
+        if self.halted {
+            if bus.pending_interrupts() == 0 {
+                return Ok(self.ticked);
+            }
+            self.halted = false;
+            bus.cpu_halted = false;
         }
-
-        let enable_ime_after = std::mem::take(&mut self.ime_pending);
         let pc = self.regs.pc;
+        let opcode = bus.cpu_read(pc);
+        if self.ime && bus.pending_interrupts() != 0 {
+            self.dispatch_interrupt(bus);
+            return Ok(self.ticked);
+        }
+        let enable_ime_after = std::mem::take(&mut self.ime_pending);
         // After the HALT bug, PC isn't advanced past this opcode, so the
         // byte after HALT is read twice.
-        let opcode = if std::mem::take(&mut self.halt_bug) {
-            bus.read(pc)
-        } else {
-            self.fetch8(bus)
-        };
+        if !std::mem::take(&mut self.halt_bug) {
+            self.regs.pc = pc.wrapping_add(1);
+        }
 
-        let cycles = match self.execute(Opcode::new(opcode), bus) {
+        let _cycles = match self.execute(Opcode::new(opcode), bus) {
             Ok(cycles) => cycles,
             Err(Illegal) => return Err(CpuError::Illegal { opcode, pc }),
         };
+        // The opcode table's count must match the M-cycles spent; checked on
+        // every instruction the unit tests run.
+        #[cfg(test)]
+        assert_eq!(_cycles, self.ticked, "opcode {opcode:02X}: M-cycles spent");
 
         // EI followed directly by DI leaves interrupts disabled.
         if enable_ime_after && opcode != 0xF3 {
             self.ime = true;
         }
-        Ok(cycles)
+        Ok(self.ticked)
     }
 
     /// Runs one opcode whose byte has already been fetched. Returns T-cycles.
@@ -598,7 +659,9 @@ impl Cpu {
                     // LD (a16), SP: low byte to a16, high byte to a16+1
                     1 => {
                         let addr = self.fetch16(bus);
-                        bus.write16(addr, self.regs.sp);
+                        let [lo, hi] = self.regs.sp.to_le_bytes();
+                        self.write(bus, addr, lo);
+                        self.write(bus, addr.wrapping_add(1), hi);
                         Ok(20)
                     }
                     // STOP: two bytes, the second ignored. Resets DIV. On a
@@ -610,7 +673,7 @@ impl Cpu {
                     // TODO(accuracy): a speed switch pauses the CPU for 2050
                     // M-cycles, with DIV not ticking; here it's instant.
                     2 => {
-                        self.fetch8(bus);
+                        self.regs.pc = self.regs.pc.wrapping_add(1);
                         bus.write(0xFF04, 0);
                         bus.speed_switch();
                         Ok(4)
@@ -618,14 +681,14 @@ impl Cpu {
                     // JR e8
                     3 => {
                         let offset = self.fetch8(bus);
-                        self.jr(offset);
+                        self.jr(bus, offset);
                         Ok(12)
                     }
                     // JR cc[y-4], e8: the taken branch costs 4 more cycles
                     _ => {
                         let offset = self.fetch8(bus);
                         if self.condition(op.y - 4) {
-                            self.jr(offset);
+                            self.jr(bus, offset);
                             Ok(12)
                         } else {
                             Ok(8)
@@ -639,10 +702,11 @@ impl Cpu {
                         self.write_rp(op.p, val);
                         Ok(12)
                     }
-                    // ADD HL, rp[p]
+                    // ADD HL, rp[p]: a second M-cycle for the high byte
                     _ => {
                         let val = self.read_rp(op.p);
                         self.add_hl(val);
+                        self.idle(bus);
                         Ok(8)
                     }
                 },
@@ -651,9 +715,9 @@ impl Cpu {
                 2 => {
                     let addr = self.indirect_addr(op.p);
                     if op.q == 0 {
-                        bus.write(addr, self.regs.a);
+                        self.write(bus, addr, self.regs.a);
                     } else {
-                        self.regs.a = bus.read(addr);
+                        self.regs.a = self.read(bus, addr);
                     }
                     Ok(8)
                 }
@@ -668,6 +732,7 @@ impl Cpu {
                         val.wrapping_sub(1)
                     };
                     self.write_rp(op.p, r);
+                    self.idle(bus);
                     Ok(8)
                 }
                 // INC r[y]
@@ -762,8 +827,10 @@ impl Cpu {
                     // RET cc[y]: checking the condition takes a cycle of its
                     // own, so taken is 20 (vs 16 for RET) and not taken is 8.
                     0..=3 => {
+                        self.idle(bus);
                         if self.condition(op.y) {
-                            self.regs.pc = self.pop16(bus);
+                            let addr = self.pop16(bus);
+                            self.jump(bus, addr);
                             Ok(20)
                         } else {
                             Ok(8)
@@ -772,24 +839,27 @@ impl Cpu {
                     // LDH (a8), A: high page $FF00-$FFFF (I/O and HRAM)
                     4 => {
                         let addr = 0xFF00 | u16::from(self.fetch8(bus));
-                        bus.write(addr, self.regs.a);
+                        self.write(bus, addr, self.regs.a);
                         Ok(12)
                     }
-                    // ADD SP, e8
+                    // ADD SP, e8: two M-cycles of 8-bit adds inside
                     5 => {
                         self.regs.sp = self.sp_plus_e8(bus);
+                        self.idle(bus);
+                        self.idle(bus);
                         Ok(16)
                     }
                     // LDH A, (a8)
                     6 => {
                         let addr = 0xFF00 | u16::from(self.fetch8(bus));
-                        self.regs.a = bus.read(addr);
+                        self.regs.a = self.read(bus, addr);
                         Ok(12)
                     }
                     // LD HL, SP+e8
                     _ => {
                         let val = self.sp_plus_e8(bus);
                         self.regs.set_hl(val);
+                        self.idle(bus);
                         Ok(12)
                     }
                 },
@@ -802,14 +872,16 @@ impl Cpu {
                     }
                     // RET
                     (_, 0) => {
-                        self.regs.pc = self.pop16(bus);
+                        let addr = self.pop16(bus);
+                        self.jump(bus, addr);
                         Ok(16)
                     }
                     // RETI: RET, then set IME immediately (no one-instruction
                     // delay like EI). How it interacts with interrupt dispatch
                     // is milestone 2's business.
                     (_, 1) => {
-                        self.regs.pc = self.pop16(bus);
+                        let addr = self.pop16(bus);
+                        self.jump(bus, addr);
                         self.ime = true;
                         Ok(16)
                     }
@@ -821,6 +893,7 @@ impl Cpu {
                     // LD SP, HL
                     _ => {
                         self.regs.sp = self.regs.hl();
+                        self.idle(bus);
                         Ok(8)
                     }
                 },
@@ -829,7 +902,7 @@ impl Cpu {
                     0..=3 => {
                         let addr = self.fetch16(bus);
                         if self.condition(op.y) {
-                            self.regs.pc = addr;
+                            self.jump(bus, addr);
                             Ok(16)
                         } else {
                             Ok(12)
@@ -837,31 +910,32 @@ impl Cpu {
                     }
                     // LDH (C), A
                     4 => {
-                        bus.write(0xFF00 | u16::from(self.regs.c), self.regs.a);
+                        self.write(bus, 0xFF00 | u16::from(self.regs.c), self.regs.a);
                         Ok(8)
                     }
                     // LD (a16), A
                     5 => {
                         let addr = self.fetch16(bus);
-                        bus.write(addr, self.regs.a);
+                        self.write(bus, addr, self.regs.a);
                         Ok(16)
                     }
                     // LDH A, (C)
                     6 => {
-                        self.regs.a = bus.read(0xFF00 | u16::from(self.regs.c));
+                        self.regs.a = self.read(bus, 0xFF00 | u16::from(self.regs.c));
                         Ok(8)
                     }
                     // LD A, (a16)
                     _ => {
                         let addr = self.fetch16(bus);
-                        self.regs.a = bus.read(addr);
+                        self.regs.a = self.read(bus, addr);
                         Ok(16)
                     }
                 },
                 3 => match op.y {
                     // JP a16
                     0 => {
-                        self.regs.pc = self.fetch16(bus);
+                        let addr = self.fetch16(bus);
+                        self.jump(bus, addr);
                         Ok(16)
                     }
                     1 => Ok(self.execute_cb(bus)),
@@ -1026,7 +1100,7 @@ mod tests {
         cpu.regs.e = 0x33;
         cpu.regs.a = 0x77;
         // H and L are $C0/$00 here because they hold the pointer.
-        let read: Vec<u8> = (0..8).map(|r| cpu.read_r8(&bus, r)).collect();
+        let read: Vec<u8> = (0..8).map(|r| cpu.read_r8(&mut bus, r)).collect();
         assert_eq!(read, [0x00, 0x11, 0x22, 0x33, 0xC0, 0x00, 0x66, 0x77]);
     }
 
@@ -1036,7 +1110,7 @@ mod tests {
             let (mut cpu, mut bus) = setup(&[]);
             let before = cpu.regs;
             cpu.write_r8(&mut bus, r, 0xAB);
-            assert_eq!(cpu.read_r8(&bus, r), 0xAB, "index {r}");
+            assert_eq!(cpu.read_r8(&mut bus, r), 0xAB, "index {r}");
             let mut expected = before;
             match r {
                 0 => expected.b = 0xAB,
@@ -1058,7 +1132,7 @@ mod tests {
         let before = cpu.regs;
         cpu.write_r8(&mut bus, 6, 0x5A);
         assert_eq!(bus.read(0xC123), 0x5A);
-        assert_eq!(cpu.read_r8(&bus, 6), 0x5A);
+        assert_eq!(cpu.read_r8(&mut bus, 6), 0x5A);
         assert_eq!(cpu.regs, before, "(HL) writes leave registers alone");
     }
 
@@ -1181,10 +1255,10 @@ mod tests {
                 let opcode = 0x40 | y << 3 | z;
                 let (mut cpu, mut bus) = setup_loaded(&[opcode]);
                 let f = cpu.regs.f;
-                let src = cpu.read_r8(&bus, z);
+                let src = cpu.read_r8(&mut bus, z);
                 let want = if y == 6 || z == 6 { 8 } else { 4 };
                 assert_eq!(cpu.step(&mut bus), Ok(want), "opcode {opcode:02X}");
-                assert_eq!(cpu.read_r8(&bus, y), src, "opcode {opcode:02X}");
+                assert_eq!(cpu.read_r8(&mut bus, y), src, "opcode {opcode:02X}");
                 assert_eq!(cpu.regs.f, f, "loads leave flags alone");
             }
         }
@@ -1197,7 +1271,7 @@ mod tests {
             let (mut cpu, mut bus) = setup_loaded(&[opcode, 0x5A]);
             let want = if y == 6 { 12 } else { 8 };
             assert_eq!(cpu.step(&mut bus), Ok(want), "opcode {opcode:02X}");
-            assert_eq!(cpu.read_r8(&bus, y), 0x5A, "opcode {opcode:02X}");
+            assert_eq!(cpu.read_r8(&mut bus, y), 0x5A, "opcode {opcode:02X}");
             assert_eq!(cpu.regs.pc, 0x0102);
         }
     }
@@ -1474,7 +1548,7 @@ mod tests {
                 let opcode = 0x80 | y << 3 | z;
                 let (mut cpu, mut bus) = setup_loaded(&[opcode]);
                 let mut want = cpu.clone();
-                want.alu(y, cpu.read_r8(&bus, z));
+                want.alu(y, cpu.read_r8(&mut bus, z));
                 let cycles = if z == 6 { 8 } else { 4 };
                 assert_eq!(cpu.step(&mut bus), Ok(cycles), "opcode {opcode:02X}");
                 assert_eq!(
@@ -1525,12 +1599,12 @@ mod tests {
         for y in 0..8u8 {
             let (inc, dec) = (0x04 | y << 3, 0x05 | y << 3);
             let (mut cpu, mut bus) = setup_loaded(&[inc, dec]);
-            let before = cpu.read_r8(&bus, y);
+            let before = cpu.read_r8(&mut bus, y);
             let cycles = if y == 6 { 12 } else { 4 };
             assert_eq!(cpu.step(&mut bus), Ok(cycles), "opcode {inc:02X}");
-            assert_eq!(cpu.read_r8(&bus, y), before.wrapping_add(1));
+            assert_eq!(cpu.read_r8(&mut bus, y), before.wrapping_add(1));
             assert_eq!(cpu.step(&mut bus), Ok(cycles), "opcode {dec:02X}");
-            assert_eq!(cpu.read_r8(&bus, y), before);
+            assert_eq!(cpu.read_r8(&mut bus, y), before);
         }
     }
 
@@ -1714,7 +1788,7 @@ mod tests {
                     bus.write(0xC000, e);
                     cpu.regs.pc = 0xC000;
                     cpu.regs.sp = sp;
-                    let got = cpu.sp_plus_e8(&bus);
+                    let got = cpu.sp_plus_e8(&mut bus);
 
                     // Reference: signed 16-bit add, flags by the XOR trick
                     // on the sign-extended offset.
@@ -2000,7 +2074,7 @@ mod tests {
             }
             cpu.regs.pc = 0xC000;
             cpu.regs.f = FLAG_C;
-            let val = cpu.read_r8(&bus, op.z);
+            let val = cpu.read_r8(&mut bus, op.z);
             let mut model = cpu.clone();
             let bit = 1u8 << op.y;
             let want_val = match op.x {
@@ -2016,7 +2090,7 @@ mod tests {
             };
             let msg = format!("CB {cb:02X}");
             assert_eq!(cpu.step(&mut bus), Ok(want_cycles), "{msg}");
-            assert_eq!(cpu.read_r8(&bus, op.z), want_val, "{msg}");
+            assert_eq!(cpu.read_r8(&mut bus, op.z), want_val, "{msg}");
             assert_eq!(cpu.regs.pc, 0xC002, "{msg}");
             match op.x {
                 0 => assert_eq!(cpu.regs.f, model.regs.f, "{msg}"),
@@ -2164,6 +2238,60 @@ mod tests {
         assert!(!cpu.halted);
         assert_eq!(cpu.regs.pc, 0x50);
         assert_eq!(bus.read16(cpu.regs.sp), 0xC001, "returns after the HALT");
+    }
+
+    #[test]
+    fn an_interrupt_arriving_in_halt_is_served_from_that_m_cycle() {
+        // TIMA overflows during HALT. The M-cycle in which the interrupt
+        // arrives becomes the first of the dispatch, as an opcode fetch would.
+        let (mut cpu, mut bus) = setup_irq(&[0x76], interrupt::TIMER, 0);
+        bus.write(0xFF05, 0xFF); // TIMA, one tick from overflowing
+        bus.write(0xFF07, 0x05); // on, a tick every 16 T-cycles
+        cpu.step(&mut bus).unwrap(); // HALT
+        let mut steps = vec![];
+        while cpu.halted {
+            steps.push(cpu.step(&mut bus).unwrap());
+        }
+        let (last, asleep) = steps.split_last().unwrap();
+        assert!(
+            !asleep.is_empty() && asleep.iter().all(|&c| c == 4),
+            "{steps:?}"
+        );
+        assert_eq!(*last, 20, "4 asleep become the first of the dispatch's 20");
+        assert_eq!(cpu.regs.pc, 0x50);
+    }
+
+    #[test]
+    fn each_access_sees_the_hardware_at_its_own_m_cycle() {
+        // LDH A,($44) reads LY in its third M-cycle, 12 T-cycles in, and line
+        // 0 ends 456 dots after the PPU starts.
+        for (head_start, ly) in [(456 - 12, 1), (456 - 13, 0)] {
+            let (mut cpu, mut bus) = setup_wram(&[0xF0, 0x44]);
+            bus.tick(head_start);
+            cpu.step(&mut bus).unwrap();
+            assert_eq!(cpu.regs.a, ly, "{head_start} dots in");
+        }
+    }
+
+    #[test]
+    fn the_interrupt_is_picked_after_the_high_byte_of_pc_is_pushed() {
+        // SP = $0000, so PC's high byte lands on IE ($FFFF).
+        // PC $C000: IE becomes $C0, VBlank is off, nothing left: PC = $0000.
+        let (mut cpu, mut bus) = setup_irq(&[0x00], interrupt::VBLANK, interrupt::VBLANK);
+        cpu.regs.sp = 0x0000;
+        assert_eq!(cpu.step(&mut bus), Ok(20));
+        assert_eq!(cpu.regs.pc, 0x0000);
+        assert_eq!(bus.ie_reg, 0xC0);
+        assert_eq!(bus.if_reg & 0x1F, interrupt::VBLANK, "still requested");
+
+        // PC $0150: IE becomes $01, so VBlank is served instead of STAT.
+        let both = interrupt::VBLANK | interrupt::STAT;
+        let (mut cpu, mut bus) = setup_irq(&[], interrupt::STAT, both);
+        cpu.regs.pc = 0x0150;
+        cpu.regs.sp = 0x0000;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.regs.pc, 0x0040);
+        assert_eq!(bus.if_reg & 0x1F, interrupt::STAT);
     }
 
     #[test]

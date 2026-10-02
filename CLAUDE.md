@@ -6,7 +6,8 @@ A Game Boy (DMG) and Game Boy Color (CGB) emulator in Rust that runs in the brow
 
 - `crates/gb-core/` — the emulator. Pure Rust, no I/O, no `unsafe`, no dependencies. Two models
   (`Model::Dmg`, `Model::Cgb`), picked from the cartridge header unless overridden.
-  - `cpu.rs` SM83 CPU (registers, fetch/decode/execute)
+  - `cpu.rs` SM83 CPU (registers, fetch/decode/execute). Each memory access is its own M-cycle
+    (`Cpu::read`/`write`/`idle`), which first ticks the rest of the hardware 4 T-cycles
   - `bus.rs` memory map; routes every read/write; IF/IE; serial; OAM DMA; the Color's WRAM banks,
     speed switch and VRAM DMA (HDMA)
   - `cartridge.rs` header parsing + MBCs (ROM-only, MBC1, MBC2, MBC3 with its real-time clock, MBC5)
@@ -60,6 +61,8 @@ fail bytes), 2 emulator/usage error
 ## Conventions
 
 - Cycle counts are **T-cycles** (4.194304 MHz; 1 M-cycle = 4 T-cycles). `Cpu::step` returns them.
+  The CPU ticks the bus itself as it goes, so nothing else ticks for its cycles; the opcode
+  table's counts are checked against the M-cycles spent on every instruction the unit tests run.
 - Hardware behavior follows Pan Docs (https://gbdev.io/pandocs/) and the opcode table
   (https://gbdev.io/gb-opcodes/optables/). Cite the relevant Pan Docs page in a doc
   comment when implementing a non-obvious behavior.

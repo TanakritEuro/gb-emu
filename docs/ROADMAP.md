@@ -128,6 +128,27 @@ Pick whichever sound most fun:
         Link Pong (homebrew/link-pong, our own, in assembly with RGBDS), on the page as
         "try Link Pong"; two linked Game Boys play it in lockstep, byte for byte the same
 
+## Milestone 8 — Mooneye PPU timing
+
+Mooneye's `acceptance/ppu` tests time the PPU to the T-cycle. Games mostly don't care, but
+this is where the hardware gets interesting.
+
+- [x] Memory accesses at their own M-cycle: the CPU runs the rest of the hardware between the
+      reads and writes of an instruction, checks interrupts at the end of the opcode fetch
+      (where HALT wakes too), and picks the interrupt after pushing PC's high byte. OAM DMA
+      takes its real 160 M-cycles and holds OAM meanwhile. DIV starts at $AB.
+      (All of Mooneye's instruction timing, OAM DMA, interrupt and timer tests pass, and
+      Blargg's `mem_timing` 1 and 2; `acceptance/ppu`: 5/12; Mooneye overall 89/100 here)
+- [ ] Mode 3 length: 172 dots plus SCX's fine scroll, sprites and the window, moving the start
+      of HBlank (`hblank_ly_scx_timing`, `intr_2_mode0_timing_sprites`)
+- [ ] OAM and VRAM closed to the CPU while the PPU reads them, in modes 2 and 3
+      (`intr_2_oam_ok_timing`)
+- [ ] Switching the LCD on, and line 144: the first line's quirks (`lcdon_timing`,
+      `lcdon_write_timing`), LY == LYC as the LCD goes off and on (`stat_lyc_onoff`), the mode 2
+      interrupt at line 144 (`vblank_stat_intr`)
+
+**Done when:** Mooneye `acceptance/ppu` passes 12/12.
+
 ---
 
 ## References

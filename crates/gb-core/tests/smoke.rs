@@ -361,6 +361,27 @@ fn a_color_state_carries_on_exactly_like_the_original() {
     ));
 }
 
+#[test]
+fn a_state_saved_during_oam_dma_carries_on_the_copy() {
+    // LD A,$C0 ; LDH ($46),A ; then NOPs: DMA from $C000 runs under them.
+    let mut gb = GameBoy::new(rom(&[0x3E, 0xC0, 0xE0, 0x46])).unwrap();
+    for _ in 0..6 {
+        gb.step().unwrap(); // NOP, JP, LD, LDH, two NOPs: mid-copy
+    }
+    assert_eq!(gb.peek(0xFF46), 0xC0);
+    let saved = gb.save_state();
+    let after = |gb: &mut GameBoy| {
+        for _ in 0..200 {
+            gb.step().unwrap();
+        }
+        gb.save_state()
+    };
+    let original = after(&mut gb);
+    let mut fresh = GameBoy::new(rom(&[0x3E, 0xC0, 0xE0, 0x46])).unwrap();
+    fresh.load_state(&saved).unwrap();
+    assert!(after(&mut fresh) == original);
+}
+
 fn run_frames(gb: &mut GameBoy, n: usize) {
     for _ in 0..n {
         gb.run_frame().unwrap();

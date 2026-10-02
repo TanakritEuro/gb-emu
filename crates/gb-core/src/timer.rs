@@ -9,6 +9,7 @@
 //! https://gbdev.io/pandocs/Timer_Obscure_Behaviour.html
 
 use crate::state::{StateError, StateReader, StateWriter};
+use crate::Model;
 
 /// Where TIMA is in the two M-cycles after it overflows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -42,6 +43,20 @@ pub struct Timer {
 impl Timer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The timer as the boot ROM leaves it. On the original, DIV reads $AB
+    /// at $0100: the internal counter is $ABCC when the first opcode is
+    /// fetched, which is $ABC8 here, where an M-cycle runs the hardware before
+    /// the CPU's access (Mooneye's boot_div).
+    /// https://gbdev.io/pandocs/Power_Up_Sequence.html#hardware-registers
+    /// TODO(accuracy): the Color's boot ROM leaves another value, which
+    /// depends on its logo animation; it starts at 0 here.
+    pub fn post_boot(model: Model) -> Self {
+        Self {
+            counter: if model == Model::Dmg { 0xABC8 } else { 0 },
+            ..Self::default()
+        }
     }
 
     pub fn set_double_speed(&mut self, on: bool) {
@@ -191,6 +206,11 @@ impl Timer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_original_boot_rom_leaves_div_at_ab() {
+        assert_eq!(Timer::post_boot(Model::Dmg).read(0xFF04), 0xAB);
+    }
 
     #[test]
     fn div_counts_every_256_cycles() {

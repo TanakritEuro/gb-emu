@@ -32,6 +32,31 @@ impl Default for Hdma {
     }
 }
 
+/// OAM DMA, started by writing a source page to $FF46: after an M-cycle to
+/// start up, it copies $XX00-$XX9F to OAM one byte per M-cycle, 160 in all
+/// (640 T-cycles, at the CPU's speed). While it copies, OAM belongs to it:
+/// the CPU reads $FF there and its writes are lost. Writing $FF46 again
+/// restarts it; the old copy carries on (and keeps OAM) until the new one
+/// starts. https://gbdev.io/pandocs/OAM_DMA_Transfer.html
+#[derive(Debug, Clone, Copy, Default)]
+struct OamDma {
+    /// A copy is running.
+    active: bool,
+    /// Source page of the running copy.
+    page: u8,
+    /// Bytes it has copied, 0-159.
+    copied: u8,
+    /// A copy asked for by a write to $FF46: it starts once `starting`
+    /// M-cycles pass (0: none waiting).
+    starting: u8,
+    next_page: u8,
+    /// CPU T-cycles toward the next M-cycle.
+    cycles: u8,
+}
+
+/// M-cycles from a write to $FF46 until the copy starts.
+const OAM_DMA_START: u8 = 2;
+
 /// Bits of IF ($FF0F) and IE ($FFFF), in priority order.
 pub mod interrupt {
     pub const VBLANK: u8 = 0x01;
@@ -61,6 +86,7 @@ pub struct Bus {
     /// PPU, sound and cartridge clock don't. Color only.
     pub double_speed: bool,
     hdma: Hdma,
+    oam_dma: OamDma,
     /// CPU T-cycles the CPU must wait for VRAM DMA; `GameBoy::step` runs
     /// the rest of the hardware through them.
     dma_stall: u32,
@@ -81,7 +107,7 @@ impl Bus {
         Self {
             cart,
             ppu: Ppu::with_model(model),
-            timer: Timer::new(),
+            timer: Timer::post_boot(model),
             joypad: Joypad::new(),
             apu: Apu::new(),
             model,
@@ -90,6 +116,7 @@ impl Bus {
             speed_armed: false,
             double_speed: false,
             hdma: Hdma::default(),
+            oam_dma: OamDma::default(),
             dma_stall: 0,
             cpu_halted: false,
             hram: [0; 0x7F],
@@ -114,6 +141,15 @@ impl Bus {
         w.u16(self.hdma.dst);
         w.bool(self.hdma.active);
         w.u8(self.hdma.remaining);
+        let dma = &self.oam_dma;
+        w.bool(dma.active);
+        w.bytes(&[
+            dma.page,
+            dma.copied,
+            dma.starting,
+            dma.next_page,
+            dma.cycles,
+        ]);
         w.bytes(&self.hram);
         w.bytes(&self.io);
         w.bytes(&[self.if_reg, self.ie_reg]);
@@ -142,6 +178,21 @@ impl Bus {
             remaining: r.u8()? & 0x7F,
         };
         self.timer.set_double_speed(self.double_speed);
+        let active = r.bool()?;
+        let mut dma = [0; 5];
+        r.bytes(&mut dma)?;
+        let [page, copied, starting, next_page, cycles] = dma;
+        if copied >= 0xA0 || starting > OAM_DMA_START || cycles >= 4 {
+            return Err(StateError::Corrupt("OAM DMA"));
+        }
+        self.oam_dma = OamDma {
+            active,
+            page,
+            copied,
+            starting,
+            next_page,
+            cycles,
+        };
         r.bytes(&mut self.hram)?;
         r.bytes(&mut self.io)?;
         self.if_reg = r.u8()?;
@@ -259,6 +310,28 @@ impl Bus {
         }
     }
 
+    /// A read by the CPU: like [`read`](Self::read), except that OAM reads
+    /// $FF while OAM DMA has it.
+    /// TODO(accuracy): during OAM DMA the DMG's CPU can't use the bus the copy
+    /// reads from either (cartridge and WRAM, or VRAM): it gets the byte being
+    /// copied. Code waiting for DMA runs from HRAM, so games don't notice.
+    pub fn cpu_read(&self, addr: u16) -> u8 {
+        if self.oam_dma.active && (0xFE00..=0xFEFF).contains(&addr) {
+            return 0xFF;
+        }
+        self.read(addr)
+    }
+
+    /// A write by the CPU. See [`cpu_read`](Self::cpu_read).
+    pub fn cpu_write(&mut self, addr: u16, val: u8) {
+        if self.oam_dma.active && (0xFE00..=0xFEFF).contains(&addr) {
+            return;
+        }
+        self.write(addr, val);
+    }
+
+    /// Reads memory as it is, with no regard for who has the bus: for DMA,
+    /// debuggers and tests.
     pub fn read(&self, addr: u16) -> u8 {
         match addr {
             0x0000..=0x7FFF => self.cart.read_rom(addr),
@@ -336,15 +409,38 @@ impl Bus {
         self.write(addr.wrapping_add(1), hi);
     }
 
-    /// Copies 160 bytes from $XX00 into OAM. Real hardware takes 640 T-cycles
-    /// and blocks most of the bus meanwhile; doing it instantly is fine until
-    /// a game depends on the timing.
+    /// A write to $FF46: asks for a copy from page `page`. See [`OamDma`].
     fn oam_dma(&mut self, page: u8) {
         self.ppu.dma = page;
-        let src = u16::from(page) << 8;
-        for i in 0..0xA0 {
-            let byte = self.read(src + i);
+        self.oam_dma.next_page = page;
+        self.oam_dma.starting = OAM_DMA_START;
+    }
+
+    /// One M-cycle of OAM DMA: the running copy moves a byte, and a copy
+    /// asked for gets closer to starting. Sources $E000 and up read WRAM
+    /// ($FE00 copies from $DE00), as on the original.
+    /// TODO(accuracy): the Color reads other things from $E000 up.
+    fn oam_dma_m_cycle(&mut self) {
+        let dma = &mut self.oam_dma;
+        if dma.active {
+            let mut src = u16::from_be_bytes([dma.page, dma.copied]);
+            if src >= 0xE000 {
+                src -= 0x2000;
+            }
+            let i = u16::from(dma.copied);
+            dma.copied += 1;
+            dma.active = dma.copied < 0xA0;
+            let byte = self.read(src);
             self.ppu.write_oam(0xFE00 + i, byte);
+        }
+        let dma = &mut self.oam_dma;
+        if dma.starting > 0 {
+            dma.starting -= 1;
+            if dma.starting == 0 {
+                dma.active = true;
+                dma.page = dma.next_page;
+                dma.copied = 0;
+            }
         }
     }
 
@@ -352,6 +448,14 @@ impl Bus {
     /// T-cycles, collecting any interrupts they raise. In double speed the
     /// timer keeps pace with the CPU, but the PPU, sound and clock see half.
     pub fn tick(&mut self, cycles: u32) {
+        if self.oam_dma.active || self.oam_dma.starting > 0 {
+            let mut total = u32::from(self.oam_dma.cycles) + cycles;
+            while total >= 4 && (self.oam_dma.active || self.oam_dma.starting > 0) {
+                total -= 4;
+                self.oam_dma_m_cycle();
+            }
+            self.oam_dma.cycles = (total % 4) as u8;
+        }
         if self.timer.tick(cycles) {
             self.if_reg |= interrupt::TIMER;
         }
@@ -429,14 +533,49 @@ mod tests {
     }
 
     #[test]
-    fn oam_dma_copies_a_page() {
+    fn oam_dma_takes_160_m_cycles_and_holds_oam_meanwhile() {
         let mut b = bus();
         for i in 0..0xA0u16 {
-            b.write(0xC100 + i, i as u8);
+            b.write(0xC100 + i, 0x10 + i as u8);
         }
-        b.write(0xFF46, 0xC1);
-        assert_eq!(b.read(0xFE00), 0x00);
-        assert_eq!(b.read(0xFE9F), 0x9F);
+        b.write(0xFE00, 0x99);
+        b.cpu_write(0xFF46, 0xC1);
+        b.tick(4);
+        assert_eq!(b.cpu_read(0xFE00), 0x99, "an M-cycle to start up");
+        b.tick(4);
+        assert_eq!(b.cpu_read(0xFE00), 0xFF, "OAM belongs to the copy");
+        b.cpu_write(0xFE00, 0x55); // lost
+        b.tick(4);
+        assert_eq!(b.read(0xFE00), 0x10, "the first byte");
+        assert_eq!(b.read(0xFE01), 0x00, "not the second yet");
+        b.tick(4 * 158);
+        assert_eq!(b.cpu_read(0xFE9F), 0xFF, "still copying");
+        b.tick(4);
+        assert_eq!(b.cpu_read(0xFE9F), 0x10 + 0x9F, "done: 160 M-cycles held");
+        assert_eq!(b.cpu_read(0xFE00), 0x10, "the CPU's write was lost");
+    }
+
+    #[test]
+    fn restarting_oam_dma_keeps_oam_held_until_the_new_copy_starts() {
+        let mut b = bus();
+        b.write(0xC200, 0x77);
+        b.cpu_write(0xFF46, 0xC1);
+        b.tick(4 * 100);
+        b.cpu_write(0xFF46, 0xC2);
+        b.tick(4 * 2);
+        assert_eq!(b.cpu_read(0xFE00), 0xFF, "the old copy carried on");
+        assert_eq!(b.read(0xFF46), 0xC2);
+        b.tick(4 * 160);
+        assert_eq!(b.cpu_read(0xFE00), 0x77, "the new copy, from the start");
+    }
+
+    #[test]
+    fn oam_dma_from_e000_up_reads_wram() {
+        let mut b = bus();
+        b.write(0xDE05, 0x42);
+        b.cpu_write(0xFF46, 0xFE);
+        b.tick(4 * 162);
+        assert_eq!(b.read(0xFE05), 0x42);
     }
 
     #[test]
