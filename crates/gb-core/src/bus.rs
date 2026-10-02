@@ -55,6 +55,31 @@ struct OamDma {
     cycles: u8,
 }
 
+/// When, within its M-cycle, a CPU write reaches a register. Memory takes
+/// it as the M-cycle ends; some PPU registers are wired so they take it a
+/// dot or two sooner, or in two stages, and a few registers a dot later.
+/// Which pixel a mid-line write shows from depends on it. The timings are
+/// SameBoy's (Core/sm83_cpu.c, https://github.com/LIJI32/SameBoy, MIT),
+/// which match Mealybug Tearoom's pictures of real hardware.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum WriteTiming {
+    /// As the M-cycle ends.
+    End,
+    /// This many dots before the M-cycle ends.
+    Early(u32),
+    /// A dot after the M-cycle ends (the next M-cycle is a dot shorter).
+    Late,
+    /// As the M-cycle ends, with one more dot run before the CPU goes on.
+    EndThenDot,
+    /// `first(old, new)` lands `early` dots before the M-cycle ends, the
+    /// new value `then` dots after that.
+    Staged {
+        first: fn(u8, u8) -> u8,
+        early: u32,
+        then: u32,
+    },
+}
+
 /// M-cycles from a write to $FF46 until the copy starts.
 const OAM_DMA_START: u8 = 2;
 
@@ -344,6 +369,66 @@ impl Bus {
             0xFE00..=0xFEFF => self.oam_dma.active || self.ppu.oam_locked(write),
             0xFF69 | 0xFF6B => self.cgb() && self.ppu.vram_locked(write),
             _ => false,
+        }
+    }
+
+    /// When a CPU write to `addr` lands within its M-cycle (see
+    /// [`WriteTiming`]). Differs between the original, the Color, and the
+    /// Color in double speed.
+    /// TODO(accuracy): the Color's palettes are CPU revision C's (revision D
+    /// and later take writes a dot sooner); the Color's LCDC tile-select
+    /// glitch and the original's WX "just written" dot aren't modeled.
+    pub(crate) fn write_timing(&self, addr: u16) -> WriteTiming {
+        use WriteTiming::*;
+        if !(0xFF00..=0xFF7F).contains(&addr) {
+            return End;
+        }
+        let dmg = self.model == Model::Dmg;
+        let double = self.double_speed;
+        match addr {
+            0xFF0F => Late, // IF
+            // LCDC: the original's background-enable bit lands a dot early.
+            0xFF40 if dmg => Staged {
+                first: |old, new| old | (new & 0x01),
+                early: 2,
+                then: 1,
+            },
+            0xFF40 if double => Staged {
+                first: |old, new| (new & !0x81) | (old & 0x81),
+                early: 2,
+                then: 2,
+            },
+            // STAT: on the original it reads as all ones for a dot (the
+            // STAT write bug: a spurious interrupt if any source is active).
+            0xFF41 if dmg => Staged {
+                first: |_, _| 0xFF,
+                early: 0,
+                then: 1,
+            },
+            0xFF41 if double => Staged {
+                first: |old, new| (new & !0x08) | (old & 0x08),
+                early: 0,
+                then: 1,
+            },
+            0xFF41 => Staged {
+                first: |old, new| (old & 0x40) | (new & !0x40),
+                early: 0,
+                then: 1,
+            },
+            0xFF42 if dmg => Early(1),           // SCY
+            0xFF43 if dmg || double => Early(2), // SCX
+            0xFF45 if !dmg && !double => Late,   // LYC
+            // BGP, OBP0, OBP1: the original's are read by the LCD directly,
+            // and for a dot hold the old and new values ORed together.
+            0xFF47..=0xFF49 if dmg => Staged {
+                first: |old, new| old | new,
+                early: 2,
+                then: 1,
+            },
+            0xFF47..=0xFF49 if !double => Early(1),
+            0xFF4B if dmg => EndThenDot, // WX
+            0xFF4B if !double => Late,
+            _ => End,
         }
     }
 
@@ -639,13 +724,18 @@ mod tests {
 
     /// What the CPU gets reading VRAM and OAM, both holding $42, `dots` into
     /// line 1 of a fresh frame (line 0, just after the LCD comes on, has no
-    /// OAM scan).
+    /// OAM scan, and starts a few dots in).
     fn cpu_sees(b: &mut Bus, dots: u32) -> (u8, u8) {
         b.write(0xFF40, 0x00);
         b.write(0x8000, 0x42);
         b.write(0xFE00, 0x42);
         b.write(0xFF40, 0x91); // back on: line 0 starts over
-        b.tick(456 + dots);
+        let line_0 = if b.model == Model::Dmg {
+            456 - 2
+        } else {
+            456 - 3
+        };
+        b.tick(line_0 + dots);
         (b.cpu_read(0x8000), b.cpu_read(0xFE00))
     }
 

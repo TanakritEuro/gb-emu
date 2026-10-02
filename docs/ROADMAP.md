@@ -183,9 +183,11 @@ pixel leaves it per dot, through the palette registers as they are at that momen
 Mealybug Tearoom's tests, `roms/mealybug-tearoom-tests/ppu`) change registers mid-line and expect
 to see it land on the exact pixel.
 
-- [ ] A pixel FIFO renderer: the background/window fetcher and the sprite fetches, dot by dot;
+- [x] A pixel FIFO renderer: the background/window fetcher and the sprite fetches, dot by dot;
       mode 3's length comes out of it instead of a formula (Mooneye, dmg-acid2 and cgb-acid2
-      keep passing)
+      keep passing). With it, writes to the PPU's registers land at their own dot of the
+      M-cycle (the original's palettes old OR new for a dot, its STAT write bug), and the line
+      after switching the LCD on is short. Mealybug: 4/24 on the original, 13/27 on the Color
 - [ ] The original's mid-line quirks: the window starting again, WX changes, the tile-select
       glitch, sprite fetches cut short (Mealybug on the original: 24/24)
 - [ ] The Color's own fetcher timings (Mealybug on the Color, against its CGB-C pictures)

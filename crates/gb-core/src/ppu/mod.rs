@@ -475,9 +475,9 @@ impl Ppu {
                 }
             }
             // Bits 0-2 (mode, LYC flag) are read-only. A new enable mask can
-            // raise the STAT line right away.
-            // TODO(accuracy): on DMG, writing STAT briefly acts as if $FF were
-            // written, which can fire a spurious STAT interrupt.
+            // raise the STAT line right away. (The original's STAT write bug,
+            // $FF for a dot first, is in how the CPU's write lands:
+            // `bus::WriteTiming`.)
             0xFF41 => {
                 self.stat = (self.stat & 0x07) | (val & 0x78);
                 self.check_stat_line();
@@ -525,11 +525,18 @@ impl Ppu {
     /// LCDC bit 7 set: the PPU starts over from the top of line 0, comparing
     /// LY with LYC straight away (an interrupt if that turns the flag on).
     /// That first line has no OAM scan: it starts in mode 0 and goes
-    /// straight to mode 3 at dot 80 (Mooneye's lcdon_timing).
+    /// straight to mode 3 at dot 80 (Mooneye's lcdon_timing). It's also
+    /// short: it starts at dot 2 on the original, pinned by Mooneye, which
+    /// reads in whole M-cycles (intr_2_mode0_timing_sprites needs the later
+    /// lines 2 dots earlier, and lcdon_timing and lcdon_write_timing fail
+    /// starting at dot 1 or 3). The Color starts a dot later still (SameBoy
+    /// has only the original wait a dot after switching on), which Mealybug
+    /// Tearoom's Color pictures need.
     /// TODO(accuracy): the first frame after turning it back on stays blank.
-    /// The Color's first line differs again (lcdon_timing fails on it); it's
-    /// treated like the original's here.
+    /// The Color's first line differs in other ways too (lcdon_timing fails
+    /// on it); otherwise it's treated like the original's here.
     fn turn_on(&mut self) {
+        self.dot = if self.model == Model::Dmg { 2 } else { 3 };
         self.first_line = true;
         self.hblank_dot = HBLANK_DOT;
         self.update_stat_bits();
@@ -611,6 +618,14 @@ impl Ppu {
     /// The mode 2 source also fires once for line 144, though it has no OAM
     /// scan: with VBlank on the original, an M-cycle before it on the Color
     /// (Mooneye's vblank_stat_intr-GS and -C).
+    ///
+    /// On the Color the mode 2 source also comes on a dot before STAT shows
+    /// mode 2 (except into line 0), as in SameBoy's PPU (Core/display.c);
+    /// that puts 12 more of Mealybug Tearoom's Color pictures in place.
+    /// TODO(accuracy): SameBoy has the original do it too, which puts its
+    /// Mealybug pictures in place as well, but here it makes Mooneye's
+    /// intr_2_mode0_timing_sprites fail: something else in our line timing
+    /// differs from SameBoy's on the original.
     fn check_stat_line(&mut self) {
         if !self.lcd_on() {
             return;
@@ -620,8 +635,10 @@ impl Ppu {
             Model::Dmg => self.ly == VBLANK_LINE && self.dot == 0,
             Model::Cgb => self.ly == VBLANK_LINE - 1 && self.dot == DOTS_PER_LINE - 4,
         };
+        let early_mode2 =
+            self.model == Model::Cgb && self.ly < VBLANK_LINE - 1 && self.dot == DOTS_PER_LINE - 1;
         let line = (self.stat & 0x40 != 0 && self.stat & 0x04 != 0)
-            || (self.stat & 0x20 != 0 && (mode == 2 || line_144))
+            || (self.stat & 0x20 != 0 && (mode == 2 || line_144 || early_mode2))
             || (self.stat & 0x10 != 0 && mode == 1)
             || (self.stat & 0x08 != 0 && mode == 0);
         if line && !self.stat_line {
@@ -860,6 +877,20 @@ mod tests {
     }
 
     #[test]
+    fn the_colors_mode_2_interrupt_comes_a_dot_early() {
+        // The last dot of line 0: on the Color the mode 2 interrupt for line
+        // 1 is already there; on the original it waits for the line.
+        for (model, early) in [(Model::Cgb, true), (Model::Dmg, false)] {
+            let mut p = Ppu::with_model(model);
+            p.write_reg(0xFF41, 0x20);
+            p.tick(454);
+            assert_eq!(p.tick(1) & interrupt::STAT != 0, early, "{model:?}");
+            assert_eq!(p.tick(1) & interrupt::STAT != 0, !early, "{model:?}");
+            assert_eq!(p.ly, 1);
+        }
+    }
+
+    #[test]
     fn the_mode_2_source_fires_with_vblank_on_the_original_only() {
         let mut p = stat_ppu(0x20);
         p.tick(456 * 144 - 100 - 1); // a dot before line 144
@@ -911,8 +942,8 @@ mod tests {
     fn the_first_line_after_switching_on_skips_the_oam_scan() {
         let mut p = stat_ppu(0x20); // the mode 2 interrupt
         p.write_reg(0xFF40, 0x11);
-        p.write_reg(0xFF40, 0x91);
-        assert_eq!(count_stat(&mut p, 79), 0, "no mode 2 on line 0");
+        p.write_reg(0xFF40, 0x91); // line 0 starts at dot 2
+        assert_eq!(count_stat(&mut p, 77), 0, "no mode 2 on line 0");
         assert_eq!((p.stat & 0x03, p.oam_locked(false)), (0, false));
         p.tick(1);
         assert_eq!((p.stat & 0x03, p.oam_locked(false)), (3, true), "dot 80");

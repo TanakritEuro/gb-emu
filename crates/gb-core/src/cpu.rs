@@ -8,7 +8,7 @@
 //! Opcode reference: https://gbdev.io/gb-opcodes/optables/
 //! Cycle counts here are T-cycles (4 per M-cycle).
 
-use crate::bus::Bus;
+use crate::bus::{Bus, WriteTiming};
 use crate::state::{StateError, StateReader, StateWriter};
 use crate::Model;
 use std::fmt;
@@ -153,6 +153,10 @@ pub struct Cpu {
     halt_bug: bool,
     /// T-cycles the current step has let the rest of the hardware run.
     ticked: u32,
+    /// T-cycles the hardware already ran past the last M-cycle's end (a
+    /// write that lands late, see [`WriteTiming`]); the next M-cycle runs
+    /// that many fewer.
+    ahead: u32,
 }
 
 impl Cpu {
@@ -235,7 +239,7 @@ impl Cpu {
     /// One M-cycle without a memory access: the rest of the hardware runs
     /// for 4 T-cycles while the CPU works inside (e.g. on SP or PC).
     fn idle(&mut self, bus: &mut Bus) {
-        bus.tick(4);
+        bus.tick(4 - std::mem::take(&mut self.ahead));
         self.ticked += 4;
     }
 
@@ -251,10 +255,47 @@ impl Cpu {
         bus.cpu_read(addr)
     }
 
-    /// One M-cycle writing memory. See [`Cpu::read`].
+    /// One M-cycle writing memory. See [`Cpu::read`]. A write lands as the
+    /// M-cycle ends, except for some PPU and interrupt registers, which take
+    /// it a dot or two sooner or later, some in two stages ([`WriteTiming`]).
+    /// That decides which pixel a mid-line write shows from.
     fn write(&mut self, bus: &mut Bus, addr: u16, val: u8) {
-        self.idle(bus);
-        bus.cpu_write(addr, val);
+        self.ticked += 4;
+        let ahead = std::mem::take(&mut self.ahead);
+        match bus.write_timing(addr) {
+            WriteTiming::End => {
+                bus.tick(4 - ahead);
+                bus.cpu_write(addr, val);
+            }
+            WriteTiming::Early(dots) => {
+                bus.tick(4 - ahead - dots);
+                bus.cpu_write(addr, val);
+                bus.tick(dots);
+            }
+            WriteTiming::Late => {
+                bus.tick(5 - ahead);
+                bus.cpu_write(addr, val);
+                self.ahead = 1;
+            }
+            WriteTiming::EndThenDot => {
+                bus.tick(4 - ahead);
+                bus.cpu_write(addr, val);
+                bus.tick(1);
+                self.ahead = 1;
+            }
+            WriteTiming::Staged { first, early, then } => {
+                let old = bus.read(addr);
+                bus.tick(4 - ahead - early);
+                bus.cpu_write(addr, first(old, val));
+                bus.tick(then);
+                bus.cpu_write(addr, val);
+                if early > then {
+                    bus.tick(early - then);
+                } else {
+                    self.ahead = then - early;
+                }
+            }
+        }
     }
 
     fn fetch8(&mut self, bus: &mut Bus) -> u8 {
@@ -2270,6 +2311,53 @@ mod tests {
             bus.tick(head_start);
             cpu.step(&mut bus).unwrap();
             assert_eq!(cpu.regs.a, ly, "{head_start} dots in");
+        }
+    }
+
+    #[test]
+    fn the_originals_palette_writes_show_old_or_new_for_a_pixel() {
+        // LD A,$08 ; LDH ($47),A in mid-line: BGP's color 1 goes from shade 1
+        // ($04) to shade 2 ($08). For a dot it holds $04 | $08: shade 3.
+        let (mut cpu, mut bus) = setup_wram(&[0x3E, 0x08, 0xE0, 0x47]);
+        bus.write(0xFF47, 0x04);
+        for row in 0..8 {
+            bus.write(0x8000 + row * 2, 0xFF); // tile 0, every pixel color 1
+        }
+        bus.tick(120); // line 0's mode 3
+        cpu.step(&mut bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        bus.tick(456);
+        let shades: Vec<usize> = bus.ppu.framebuffer()[..160 * 4]
+            .chunks(4)
+            .map(|px| {
+                crate::ppu::DMG_PALETTE
+                    .iter()
+                    .position(|c| c == px)
+                    .unwrap()
+            })
+            .collect();
+        let glitch = shades.iter().position(|&s| s == 3).unwrap();
+        assert!(shades[..glitch].iter().all(|&s| s == 1), "{shades:?}");
+        assert!(shades[glitch + 1..].iter().all(|&s| s == 2), "{shades:?}");
+    }
+
+    #[test]
+    fn writing_stat_on_the_original_can_fire_a_stray_interrupt() {
+        // LD A,0 ; LDH ($41),A during HBlank: on the original STAT reads all
+        // ones for a dot, so the HBlank source is on for it.
+        for (model, stray) in [(Model::Dmg, true), (Model::Cgb, false)] {
+            let cart = Cartridge::from_rom(rom_with_program(&[])).unwrap();
+            let mut bus = Bus::new(cart, model);
+            let mut cpu = Cpu::new();
+            for (i, b) in [0x3E, 0x00, 0xE0, 0x41].into_iter().enumerate() {
+                bus.write(0xC000 + i as u16, b);
+            }
+            cpu.regs.pc = 0xC000;
+            bus.tick(300); // line 0's HBlank
+            bus.if_reg = 0xE0;
+            cpu.step(&mut bus).unwrap();
+            cpu.step(&mut bus).unwrap();
+            assert_eq!(bus.if_reg & interrupt::STAT != 0, stray, "{model:?}");
         }
     }
 

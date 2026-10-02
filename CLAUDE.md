@@ -7,7 +7,8 @@ A Game Boy (DMG) and Game Boy Color (CGB) emulator in Rust that runs in the brow
 - `crates/gb-core/` — the emulator. Pure Rust, no I/O, no `unsafe`, no dependencies. Two models
   (`Model::Dmg`, `Model::Cgb`), picked from the cartridge header unless overridden.
   - `cpu.rs` SM83 CPU (registers, fetch/decode/execute). Each memory access is its own M-cycle
-    (`Cpu::read`/`write`/`idle`), which first ticks the rest of the hardware 4 T-cycles
+    (`Cpu::read`/`write`/`idle`), which first ticks the rest of the hardware 4 T-cycles; some
+    I/O registers take a write a dot or two off the M-cycle's end (`bus::WriteTiming`)
   - `bus.rs` memory map; routes every read/write; IF/IE; serial; OAM DMA; the Color's WRAM banks,
     speed switch and VRAM DMA (HDMA). The CPU goes through `cpu_read`/`cpu_write`, which lock it
     out of OAM/VRAM while DMA or the PPU has them; `read`/`write` are the raw view (debugger, DMA)
@@ -15,8 +16,9 @@ A Game Boy (DMG) and Game Boy Color (CGB) emulator in Rust that runs in the brow
   - `compat.rs` a Color running an original cartridge ("DMG compatibility mode"): what its boot
     ROM leaves (palettes, registers). `Bus::compat` shuts the Color's own registers; the PPU's
     `cgb()` means Color features are on, `model` which console it is (timing quirks)
-  - `ppu.rs` scanline timing, STAT/LY, framebuffer (scanline renderer: background, window, sprites);
-    debugger pictures of VRAM (tile sheet, tile maps)
+  - `ppu/mod.rs` line timing, STAT/LY, OAM/VRAM locks, palettes, framebuffer; debugger pictures of
+    VRAM (tile sheet, tile maps). `ppu/fifo.rs` mode 3: the fetcher and pixel FIFOs drawing a line
+    pixel by pixel (timings after SameBoy's PPU)
   - `timer.rs` DIV/TIMA/TMA/TAC
   - `apu.rs` sound: four channels, frame sequencer (length, envelope, sweep), mixer, high-pass filter
   - `joypad.rs` $FF00
