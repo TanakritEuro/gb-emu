@@ -90,7 +90,7 @@ needs MBC1 multicart wiring, which isn't planned.)
 **Done when:** music sounds right and doesn't pop.
 (Done: Tobu Tobu Girl's music plays cleanly, paced by the audio clock with no underruns.)
 
-## Milestone 7 — Show-off features
+## Milestone 7 — Show-off features ✅
 
 Pick whichever sound most fun:
 
@@ -117,7 +117,7 @@ Pick whichever sound most fun:
         HBlank begins, so HBlank writes show from the next line)
   - [x] A Game Boy Color homebrew game plays in the browser (Tobu Tobu Girl Deluxe, at 60 fps,
         with sound, battery saves, save states and rewind)
-- [ ] Link cable over WebRTC: two browsers, two-player games
+- [x] Link cable over WebRTC: two browsers, two-player games
   - [x] Serial port with a partner in the core: transfers take their real time, a master's byte
         goes to the partner and comes back with theirs (or $FF with no cable), a slave answers
         when clocked; two Game Boys linked in a test swap bytes
@@ -125,7 +125,9 @@ Pick whichever sound most fun:
         (about 1000 bytes a second, as fast as the real cable)
   - [x] WebRTC between two browsers, connected by copying a code each way (no server; STUN, no
         TURN relay, so the strictest networks can't link)
-  - [ ] A two-player homebrew game plays over the link
+  - [x] A two-player homebrew game plays over the link: none free to download turned up, so
+        Link Pong (homebrew/link-pong, our own, in assembly with RGBDS), on the page as
+        "try Link Pong"; two linked Game Boys play it in lockstep, byte for byte the same
 
 ---
 

@@ -81,6 +81,12 @@ open **Link cable**, then:
   Keep both visible (browsers pause background tabs). Bytes cross at the real link speed, about
   1 KB/s; closing either window unplugs the other.
 
+To try it, there's **Link Pong**, a two-player Pong written for this emulator (in Game Boy
+assembly, [homebrew/link-pong](homebrew/link-pong/link-pong.asm)): press **try Link Pong** on the
+screen in both browsers, link up, and press START on one (it becomes player 1). SELECT plays
+the computer instead. Up and down move your paddle; first to 9 wins. Building it locally needs
+[RGBDS](https://rgbds.gbdev.io): `node scripts/build-homebrew.js` puts it in `web/games/`.
+
 Sound starts with your first click, tap or key press (browsers require one). The Sound button
 or M mutes it. Fast-forward is silent.
 

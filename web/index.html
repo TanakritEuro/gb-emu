@@ -17,7 +17,10 @@
 
     <div id="drop" class="screen-wrap">
       <canvas id="screen" width="160" height="144"></canvas>
-      <div id="hint" class="hint">Drop a <code>.gb</code> or <code>.gbc</code> file here<br>or <label class="link">choose one<input id="file" type="file" accept=".gb,.gbc"></label></div>
+      <!-- One block inside: the hint is a grid, which would put each inline piece on its own row. -->
+      <div id="hint" class="hint"><div>Drop a <code>.gb</code> or <code>.gbc</code> file here<br>or <label class="link">choose one<input id="file" type="file" accept=".gb,.gbc"></label>
+        <span id="try-pong-line"><br><br>or <button id="try-pong" class="link link-button" type="button">try Link Pong</button>,
+        made for this emulator</span></div></div>
       <div id="paused" class="paused" hidden>Paused</div>
       <pre id="error" class="error" hidden></pre>
     </div>

@@ -991,6 +991,25 @@ $("file").addEventListener("change", (e) => {
   const file = e.target.files[0];
   if (file) loadRom(file);
 });
+
+// Link Pong: our own two-player link cable game (homebrew/link-pong), built
+// into games/ next to the page. Where it hasn't been built, the offer goes.
+const LINK_PONG = "games/link-pong.gb";
+fetch(LINK_PONG, { method: "HEAD" })
+  .then((r) => {
+    if (!r.ok) throw new Error();
+  })
+  .catch(() => ($("try-pong-line").hidden = true));
+$("try-pong").addEventListener("click", async () => {
+  try {
+    const r = await fetch(LINK_PONG);
+    if (!r.ok) throw new Error(`${r.status}`);
+    await loadRom(new File([await r.arrayBuffer()], "link-pong.gb"));
+    $("link-panel").open = true; // it's a two-player game: show how to link
+  } catch (e) {
+    showError(`Couldn't load Link Pong: ${e.message ?? e}`);
+  }
+});
 const drop = $("drop");
 drop.addEventListener("dragover", (e) => {
   e.preventDefault();

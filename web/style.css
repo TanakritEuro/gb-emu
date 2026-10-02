@@ -438,3 +438,13 @@ main > * { min-width: 0; }
 }
 .link-code button:hover:not(:disabled) { border-color: var(--accent); }
 .link-code button:disabled { opacity: 0.4; cursor: default; }
+
+/* "try Link Pong" in the drop hint: a button that looks like the link beside it. */
+.link-button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}

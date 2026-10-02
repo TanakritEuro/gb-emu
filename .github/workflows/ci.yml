@@ -13,6 +13,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # Assembles the homebrew games (homebrew/, e.g. Link Pong).
+  RGBDS_VERSION: v1.0.4
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -24,6 +28,13 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
+      - name: Install RGBDS
+        run: |
+          mkdir -p "$HOME/rgbds"
+          curl -sSfL "https://github.com/gbdev/rgbds/releases/download/$RGBDS_VERSION/rgbds-linux-x86_64.tar.xz" | tar -xJ -C "$HOME/rgbds"
+          echo "$HOME/rgbds" >> "$GITHUB_PATH"
+      # Before the tests: some of them play the homebrew games.
+      - run: node scripts/build-homebrew.js
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
@@ -60,6 +71,15 @@ jobs:
         with:
           tool: wasm-bindgen@${{ steps.wasm-bindgen.outputs.version }}
       - run: ./scripts/build-web.sh
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Install RGBDS
+        run: |
+          mkdir -p "$HOME/rgbds"
+          curl -sSfL "https://github.com/gbdev/rgbds/releases/download/$RGBDS_VERSION/rgbds-linux-x86_64.tar.xz" | tar -xJ -C "$HOME/rgbds"
+          echo "$HOME/rgbds" >> "$GITHUB_PATH"
+      - run: node scripts/build-homebrew.js # web/games/, e.g. Link Pong
       - name: Collect the site
         run: |
           mkdir _site

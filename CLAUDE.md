@@ -29,6 +29,9 @@ A Game Boy (DMG) and Game Boy Color (CGB) emulator in Rust that runs in the brow
 - `.cargo/config.toml` — on Windows (GNU) link with Rust's bundled MinGW linker; MSYS2's ld
   crashes on Rust DLLs
 - `scripts/serve.js` — zero-dependency Node dev server for `web/` (port 8765)
+- `homebrew/` — our own Game Boy games in RGBDS assembly (`link-pong/`: two-player Pong over the
+  link cable); `scripts/build-homebrew.js` builds them into `web/games/` (build products, like
+  `web/pkg/`). `crates/gb-core/tests/link_pong.rs` plays it on two linked Game Boys
 - `.github/workflows/ci.yml` — tests every push; pushes to `main` also deploy `web/` to GitHub Pages
   (https://tanakriteuro.github.io/gb-emu/)
 - `roms/` — test ROMs, git-ignored. Never commit ROM files.
@@ -47,6 +50,7 @@ cargo run --release -p gb-cli -- <rom.gb> --model dmg           # force a model 
 cargo run --release -p gb-cli -- <rom.gb> --screenshot out.ppm  # save the last frame (PPM)
 ./scripts/build-web.ps1                                 # build the browser version (Windows)
 node scripts/serve.js                                   # serve it at http://localhost:8765
+node scripts/build-homebrew.js                          # build homebrew/ into web/games/ (needs RGBDS)
 ```
 
 gb-cli exit codes: 0 passed, 1 failed (Blargg "Failed" over serial or a failure code at $A000, or Mooneye
