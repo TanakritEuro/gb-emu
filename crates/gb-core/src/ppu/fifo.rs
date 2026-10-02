@@ -214,6 +214,15 @@ pub(super) struct Mode3 {
     window_off_check: bool,
     /// The original's WX was written just now (for the next dot).
     wx_just_written: bool,
+    /// The Color's LCDC bit 4 was just changed (`Some(set)`): a tile data
+    /// read in the next dot glitches (see `read_tile_data`). Its write
+    /// always runs that dot before the CPU goes on (`bus::WriteTiming`),
+    /// so save states needn't hold it.
+    tile_sel_glitch: Option<bool>,
+    /// LCDC bit 4 as of when the tile data address was worked out.
+    tiles_at_8000: bool,
+    /// The byte the tile-select glitch latches and reads back.
+    glitch_data: u8,
 }
 
 /// Pixel position -16, where every line starts.
@@ -240,6 +249,20 @@ impl Ppu {
     #[cfg(test)]
     pub(super) fn fetching_window(&self) -> bool {
         self.m3.step != Step::Idle && self.m3.window_fetching
+    }
+
+    /// The fetcher's next step.
+    #[cfg(test)]
+    pub(super) fn next_fetch_step(&self) -> FetchStep {
+        self.m3.fetch
+    }
+
+    /// LCDC bit 4 changed. On the Color, a tile data read in the next dot
+    /// glitches (see [`read_tile_data`](Self::read_tile_data)).
+    pub(super) fn tile_sel_changed(&mut self, set: bool) {
+        if self.color_hw() {
+            self.m3.tile_sel_glitch = Some(set);
+        }
     }
 
     /// LCDC bit 1 went off. On the original, a sprite fetch under way is
@@ -273,6 +296,7 @@ impl Ppu {
     pub(super) fn end_dot(&mut self) {
         let m = &mut self.m3;
         m.wx_just_written = false;
+        m.tile_sel_glitch = None;
         if std::mem::take(&mut m.window_off_check) && m.step != Step::Idle && m.window_fetching {
             m.no_window_glitch = true;
         }
@@ -381,6 +405,10 @@ impl Ppu {
                     }
                     m.step = Step::SpriteAdvance;
                 }
+                // TODO(accuracy): on the Color (CPU CGB C), a sprite met with
+                // the fetcher already at its high byte reads its data a dot
+                // sooner than this (Mealybug's m3_lcdc_obj_size_change_scx);
+                // dropping this dot for every sprite breaks the other tests.
                 Step::SpriteAdvance => {
                     m.step = Step::SpriteOam;
                     self.advance_fetcher();
@@ -405,6 +433,7 @@ impl Ppu {
                     self.m3.sprite_fetching = false;
                     let addr = self.sprite_row_addr();
                     self.m3.sprite_data[1] = self.vram[addr + 1];
+                    self.m3.glitch_data = self.m3.sprite_data[1];
                     self.m3.step = Step::SpriteMix;
                     return self.sleep(1);
                 }
@@ -468,7 +497,8 @@ impl Ppu {
     /// on (a dot late, on the original), and WX - 7 is the pixel position
     /// (WX 0 is special). The background FIFO is emptied and the fetcher
     /// starts over on the window's map. Returns true if that costs a dot
-    /// (WX 0 with a fine scroll, on the original).
+    /// (WX 0 with a fine scroll; on the Color too, its CPU CGB C pictures
+    /// say, though SameBoy has it on the original only).
     fn window_check(&mut self) -> bool {
         let color = self.color_hw();
         let m = &mut self.m3;
@@ -503,15 +533,15 @@ impl Ppu {
                 self.window_y = self.window_y.wrapping_add(1);
                 m.window_tile_x = 0;
                 m.bg.clear();
-                extra_dot = self.wx == 0 && self.scx & 7 != 0 && !color;
+                extra_dot = self.wx == 0 && self.scx & 7 != 0;
                 m.window_active = true;
                 m.fetch = FetchStep::TileAddr;
                 m.window_fetching = true;
             }
         }
-        // The window starting over where it already is pushes a blank pixel.
+        // The window starting over where it already is pushes a blank pixel
+        // (on the Color too: Mealybug's CPU CGB C pictures, against SameBoy).
         if self.wx == m.position.wrapping_add(7)
-            && (!color || self.wx == 0)
             && m.window_active
             && !m.window_fetching
             && m.fetch == FetchStep::TileAddr
@@ -567,20 +597,21 @@ impl Ppu {
             }
             FetchStep::LowAddr => {
                 self.m3.tile_data_addr = self.tile_row_addr();
+                self.m3.tiles_at_8000 = self.lcdc & 0x10 != 0;
                 self.m3.fetch = FetchStep::LowRead;
             }
             FetchStep::LowRead => {
-                let m = &mut self.m3;
-                m.tile_data[0] = self.vram[usize::from(m.tile_data_addr)];
-                m.fetch = FetchStep::HighAddr;
+                self.m3.tile_data[0] = self.read_tile_data(false);
+                self.m3.fetch = FetchStep::HighAddr;
             }
             FetchStep::HighAddr => {
                 self.m3.tile_data_addr = self.tile_row_addr() + 1;
+                self.m3.tiles_at_8000 = self.lcdc & 0x10 != 0;
                 self.m3.fetch = FetchStep::HighRead;
             }
             FetchStep::HighRead => {
+                self.m3.tile_data[1] = self.read_tile_data(true);
                 let m = &mut self.m3;
-                m.tile_data[1] = self.vram[usize::from(m.tile_data_addr)];
                 if m.window_active {
                     m.window_tile_x = (m.window_tile_x + 1) & 0x1F;
                 }
@@ -589,6 +620,32 @@ impl Ppu {
             }
             FetchStep::Push => self.push_row(),
         }
+    }
+
+    /// A tile data byte, from the address the fetcher worked out a dot ago.
+    /// On the Color, a read in the dot right after LCDC bit 4 changes
+    /// glitches. Bit 4 cleared: the byte is the tile's number (when the
+    /// address was worked out for $8000 tiles and the tile is below $80),
+    /// and what the read should have given is latched. Bit 4 set: the byte
+    /// is the latch. The latch also takes each sprite's high byte, and each
+    /// tile's high byte read from $8000 tiles.
+    /// https://github.com/mattcurrie/mealybug-tearoom-tests/blob/master/the-comprehensive-game-boy-ppu-documentation.md#tile_sel-bit-4
+    /// (CPU revision C; the latch's rules fitted to Mealybug Tearoom's
+    /// m3_lcdc_tile_sel_change pictures, building on SameBoy's version)
+    /// TODO(accuracy): revision D and later glitch differently on a clear.
+    fn read_tile_data(&mut self, high: bool) -> u8 {
+        let m = &mut self.m3;
+        let read = self.vram[usize::from(m.tile_data_addr)];
+        let data = match m.tile_sel_glitch {
+            None => read,
+            Some(false) if m.tiles_at_8000 && m.tile & 0x80 == 0 => m.tile,
+            Some(false) => read,
+            Some(true) => return m.glitch_data,
+        };
+        if (high && m.tiles_at_8000) || m.tile_sel_glitch.is_some() {
+            m.glitch_data = read;
+        }
+        data
     }
 
     /// The fetcher's last step: the row goes into the background FIFO once
@@ -795,6 +852,8 @@ impl Ppu {
             u8::from(m.insert_pixel),
             u8::from(m.no_window_glitch),
             u8::from(m.window_enable_seen),
+            u8::from(m.tiles_at_8000),
+            m.glitch_data,
         ]);
         w.u16(m.tile_map_addr);
         w.u16(m.tile_data_addr);
@@ -806,7 +865,7 @@ impl Ppu {
     }
 
     pub(super) fn load_mode3(&mut self, r: &mut StateReader) -> Result<(), StateError> {
-        let mut b = [0u8; 22];
+        let mut b = [0u8; 24];
         r.bytes(&mut b)?;
         let step = match b[0] {
             0 => Step::Idle,
@@ -855,6 +914,9 @@ impl Ppu {
         m.insert_pixel = b[19] != 0;
         m.no_window_glitch = b[20] != 0;
         m.window_enable_seen = b[21] != 0;
+        m.tiles_at_8000 = b[22] != 0;
+        m.glitch_data = b[23];
+        m.tile_sel_glitch = None;
         m.window_off_check = false;
         m.wx_just_written = false;
         // Addresses into VRAM (both banks): masked to stay inside it.

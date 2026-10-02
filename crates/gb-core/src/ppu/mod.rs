@@ -526,6 +526,9 @@ impl Ppu {
                 if self.lcdc & !val & 0x20 != 0 {
                     self.window_turned_off();
                 }
+                if (self.lcdc ^ val) & 0x10 != 0 {
+                    self.tile_sel_changed(val & 0x10 != 0);
+                }
                 self.lcdc = val;
                 if was_on && !self.lcd_on() {
                     self.turn_off();
@@ -2070,6 +2073,130 @@ mod tests {
         assert_eq!((p.ly, p.stat & 0x03), (0, 0), "still line 0's HBlank");
         p.tick(456 * 153);
         assert_eq!((p.ly, p.read_reg(0xFF44)), (153, 0), "and from 153 to 0");
+    }
+
+    /// A Color running an original game: the original's way of drawing (so
+    /// BGP's shades, through the boot palettes) on the Color's hardware.
+    /// LCD and background on, $8000 tiles, $9800 map.
+    fn compat_ppu() -> Ppu {
+        let mut p = Ppu::with_model(Model::Cgb);
+        p.enter_compat_mode(crate::compat::DEFAULT_PALETTES);
+        p.lcdc = 0x91;
+        p.bgp = 0b11_10_01_00;
+        p
+    }
+
+    /// The color index (through BGP's identity shades) at (x, 0) in
+    /// compatibility mode.
+    fn compat_index(p: &Ppu, x: usize) -> usize {
+        let bg = crate::compat::DEFAULT_PALETTES.bg;
+        (0..4)
+            .find(|&i| rgba_at(p, x, 0) == rgba(bg[i]))
+            .expect("a background color")
+    }
+
+    /// Runs line 0 to the first dot, past pixel 16, after which the
+    /// fetcher reads a tile's low data byte; writes LCDC there and draws
+    /// the rest of the line. Returns the line's color indexes.
+    fn write_lcdc_before_a_low_byte_read(p: &mut Ppu, lcdc: u8) -> Vec<usize> {
+        while p.dot < MODE3_DOT + 30 || p.next_fetch_step() != fifo::FetchStep::LowRead {
+            p.tick(1);
+        }
+        p.write_reg(0xFF40, lcdc);
+        lines(p, 1);
+        (0..SCREEN_WIDTH).map(|x| compat_index(p, x)).collect()
+    }
+
+    #[test]
+    fn clearing_tile_select_glitches_the_colors_next_tile_read() {
+        // Tile 1 is solid color 3 at $8010 and blank at $9010. LCDC bit 4
+        // cleared just before a low byte read: on the Color that byte is
+        // the tile's number (1), so the tile shows color 1 in its last
+        // pixel only. The original reads it normally: the tile mixes $8010's
+        // low byte with $9010's high byte, color 1 all along.
+        let setup = |mut p: Ppu| {
+            put_tile(&mut p, 0x8010, striped(0xFF, 0xFF));
+            for col in 0..32 {
+                p.write_vram(0x9800 + col, 1);
+            }
+            p
+        };
+        let line = write_lcdc_before_a_low_byte_read(&mut setup(compat_ppu()), 0x81);
+        let glitched = line.iter().position(|&i| i == 1).expect("a glitched tile");
+        assert_eq!(line[glitched - 7..=glitched], [0, 0, 0, 0, 0, 0, 0, 1]);
+
+        let mut p = setup(bg_ppu());
+        p.compat = false;
+        let line: Vec<usize> = {
+            while p.dot < MODE3_DOT + 30 || p.next_fetch_step() != fifo::FetchStep::LowRead {
+                p.tick(1);
+            }
+            p.write_reg(0xFF40, 0x81);
+            lines(&mut p, 1);
+            (0..SCREEN_WIDTH).map(|x| shade_at(&p, x, 0)).collect()
+        };
+        let mixed = line.iter().position(|&i| i == 1).expect("the mixed tile");
+        assert_eq!(
+            line[mixed..mixed + 9],
+            [1, 1, 1, 1, 1, 1, 1, 1, 0],
+            "{line:?}"
+        );
+    }
+
+    #[test]
+    fn setting_tile_select_reads_back_the_colors_latched_byte() {
+        // Bit 4 clear: tile 1 is blank ($9010). A sprite with sprites off
+        // (the Color still fetches it) leaves its high byte, $0F, in the
+        // latch. Setting bit 4 just before a low byte read: that byte is
+        // the latch, the high byte comes from $8010 ($FF): colors 2 and 3.
+        let mut p = compat_ppu();
+        p.lcdc = 0x81;
+        put_tile(&mut p, 0x8010, striped(0x00, 0xFF));
+        put_tile(&mut p, 0x8020, striped(0x00, 0x0F));
+        for col in 0..32 {
+            p.write_vram(0x9800 + col, 1);
+        }
+        put_sprite(&mut p, 0, 0, 0, 2, 0);
+        let line = write_lcdc_before_a_low_byte_read(&mut p, 0x91);
+        let glitched = line.iter().position(|&i| i == 3).expect("a glitched tile");
+        assert_eq!(line[glitched - 4..glitched + 4], [2, 2, 2, 2, 3, 3, 3, 3]);
+    }
+
+    #[test]
+    fn the_window_at_wx_0_with_a_fine_scroll_costs_a_dot_on_both_consoles() {
+        // WX 0 and SCX % 8 = 3: the window starts before the fine scroll
+        // is thrown away, which costs a dot (Mealybug's
+        // m3_window_timing_wx_0, on the original and the Color alike).
+        let length = |mut p: Ppu, wx: u8| {
+            p.lcdc |= 0x20;
+            p.wx = wx;
+            p.scx = 3;
+            hblank_start(&mut p)
+        };
+        for p in [bg_ppu(), compat_ppu()] {
+            let model = p.model;
+            assert_eq!(length(p.clone(), 0), length(p, 7) + 1, "{model:?}");
+        }
+    }
+
+    #[test]
+    fn the_window_starting_over_where_it_is_pushes_a_blank_pixel_on_both_consoles() {
+        // The window is showing from pixel 0; WX is moved to pixel 16 just
+        // as the window reaches it, with a fresh row in the FIFO: one blank
+        // pixel goes in there, on the Color too.
+        for mut p in [window_ppu(7, 0), {
+            let mut p = window_ppu(7, 0);
+            p.model = Model::Cgb;
+            p.enter_compat_mode(crate::compat::DEFAULT_PALETTES);
+            p
+        }] {
+            p.tick(MODE3_DOT + 20);
+            p.write_reg(0xFF4B, 7 + 16);
+            lines(&mut p, 1);
+            let px = |x| rgba_at(&p, x, 0);
+            assert_ne!(px(16), px(15), "{:?}", p.model);
+            assert_eq!(px(17), px(15), "{:?}", p.model);
+        }
     }
 
     #[test]

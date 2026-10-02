@@ -427,6 +427,9 @@ impl Bus {
                 early: 2,
                 then: 2,
             },
+            // The Color's tile-select glitch (`ppu::fifo`) takes the dot
+            // right after the write.
+            0xFF40 => EndThenDot,
             // STAT: on the original it reads as all ones for a dot (the
             // STAT write bug: a spurious interrupt if any source is active).
             0xFF41 if dmg => Staged {
@@ -1066,7 +1069,7 @@ mod tests {
         assert_eq!(first(&b, 0x81, 0x7E), 0xFD);
         assert_eq!(first(&b, 0x02, 0x81), 0x02);
         let c = cgb_bus();
-        assert!(matches!(c.write_timing(0xFF40), WriteTiming::End));
+        assert!(matches!(c.write_timing(0xFF40), WriteTiming::EndThenDot));
         assert!(matches!(c.write_timing(0xFF42), WriteTiming::End));
     }
 

@@ -176,7 +176,7 @@ from them. On a real Color you could also hold a button combination at boot to c
 **Done when:** an original game plays in color in the browser, in a palette you picked.
 (Done: Tobu Tobu Girl plays in the Color's automatic palette and in any of the 12.)
 
-## Milestone 10 — Pixel by pixel
+## Milestone 10 — Pixel by pixel ✅
 
 The PPU doesn't draw a line at once: in mode 3 a fetcher reads tiles into a pixel FIFO and one
 pixel leaves it per dot, through the palette registers as they are at that moment. Games (and
@@ -192,10 +192,14 @@ to see it land on the exact pixel.
       (and turning them off early at the line's first pixel), sprite fetches cut short by
       switching sprites off, the hidden window's blank pixel, the window starting a pixel late,
       SCY two dots early. Mealybug on the original: 24/24 (and still 20/27 on the Color)
-- [ ] The Color's own fetcher timings (Mealybug on the Color, against its CGB-C pictures)
+- [x] The Color's own fetcher timings: the tile-select glitch both ways (clearing LCDC bit 4
+      mid-read gives the tile's number, setting it gives back a latched byte), WX 0 with a fine
+      scroll costing a dot and the window restart's blank pixel on the Color too. Mealybug on
+      the Color: 26/27 against its CPU CGB C pictures (m3_lcdc_obj_size_change_scx is left: a
+      sprite fetch a dot early in one case, marked `TODO(accuracy)`)
 
 **Done when:** every Mealybug Tearoom PPU test matches its picture on the original.
-(Before: 1/24 on the original, 1/27 on the Color.)
+(Before: 1/24 on the original, 1/27 on the Color. After: 24/24 and 26/27.)
 
 ---
 
