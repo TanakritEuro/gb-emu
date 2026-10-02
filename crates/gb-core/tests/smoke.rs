@@ -368,6 +368,95 @@ fn run_frames(gb: &mut GameBoy, n: usize) {
     }
 }
 
+/// Sends `byte` over the link cable, as master (SC = $81) or slave ($80),
+/// waits for the transfer to finish, and stores what came back at $C000.
+fn link_program(byte: u8, sc: u8) -> Vec<u8> {
+    #[rustfmt::skip]
+    let code = [
+        0x3E, byte, 0xE0, 0x01, // SB = byte
+        0x3E, sc, 0xE0, 0x02,   // SC: go (master) or listen (slave)
+        0xF0, 0x02,             // $0158 LDH A,(SC)
+        0x87,                   //       ADD A,A: bit 7 into carry
+        0x38, 0xFB,             //       JR C,$0158 until it's done
+        0xF0, 0x01,             //       LDH A,(SB)
+        0xEA, 0x00, 0xC0,       //       LD ($C000),A
+        0x18, 0xFE,             //       spin
+    ];
+    rom(&code)
+}
+
+/// Plays the host between two linked Game Boys: whatever one clocks out as
+/// master goes to the other, and the answer comes back.
+fn carry(from: &mut GameBoy, to: &mut GameBoy) {
+    while let Some(byte) = from.take_link_out() {
+        let back = to.link_clocked(byte);
+        from.link_answer(back);
+    }
+}
+
+/// Runs both for `frames` frames, carrying bytes across; returns how often
+/// a frame stopped to wait for the partner.
+fn run_linked(a: &mut GameBoy, b: &mut GameBoy, frames: usize) -> usize {
+    let mut waits = 0;
+    for _ in 0..frames {
+        for flip in [false, true] {
+            let (x, y) = if flip {
+                (&mut *b, &mut *a)
+            } else {
+                (&mut *a, &mut *b)
+            };
+            while x.run_frame().unwrap() == FrameEnd::LinkWait {
+                waits += 1;
+                carry(x, y);
+            }
+            carry(x, y);
+        }
+    }
+    waits
+}
+
+#[test]
+fn two_linked_game_boys_swap_bytes() {
+    let mut slave = GameBoy::new(link_program(0x99, 0x80)).unwrap();
+    let mut master = GameBoy::new(link_program(0x42, 0x81)).unwrap();
+    slave.plug_link(true);
+    master.plug_link(true);
+    run_frames(&mut slave, 1); // listening before the master starts
+    let waits = run_linked(&mut master, &mut slave, 2);
+    assert_eq!(master.peek(0xC000), 0x99, "the master got the slave's byte");
+    assert_eq!(slave.peek(0xC000), 0x42, "and the slave the master's");
+    assert!(waits > 0, "the master waited for the answer");
+    for gb in [&master, &slave] {
+        assert_eq!(gb.peek(0xFF0F) & 0x08, 0x08, "serial interrupt requested");
+    }
+}
+
+#[test]
+fn a_master_reads_ff_with_no_cable_or_nobody_listening() {
+    let mut alone = GameBoy::new(link_program(0x42, 0x81)).unwrap();
+    run_frames(&mut alone, 1);
+    assert_eq!(alone.peek(0xC000), 0xFF, "no cable");
+
+    // A cable, but the other side never sets SC to listen.
+    let mut master = GameBoy::new(link_program(0x42, 0x81)).unwrap();
+    let mut deaf = GameBoy::new(rom(&[0x18, 0xFE])).unwrap();
+    master.plug_link(true);
+    deaf.plug_link(true);
+    run_linked(&mut master, &mut deaf, 2);
+    assert_eq!(master.peek(0xC000), 0xFF);
+}
+
+#[test]
+fn pulling_the_cable_frees_a_waiting_master() {
+    let mut master = GameBoy::new(link_program(0x42, 0x81)).unwrap();
+    master.plug_link(true);
+    assert_eq!(master.run_frame(), Ok(FrameEnd::LinkWait));
+    assert_eq!(master.run_frame(), Ok(FrameEnd::LinkWait), "still waiting");
+    master.plug_link(false);
+    run_frames(&mut master, 1);
+    assert_eq!(master.peek(0xC000), 0xFF);
+}
+
 #[test]
 fn a_loaded_state_carries_on_exactly_like_the_original() {
     let mut gb = GameBoy::new(busy_rom()).unwrap();

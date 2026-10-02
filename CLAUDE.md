@@ -15,6 +15,8 @@ A Game Boy (DMG) and Game Boy Color (CGB) emulator in Rust that runs in the brow
   - `timer.rs` DIV/TIMA/TMA/TAC
   - `apu.rs` sound: four channels, frame sequencer (length, envelope, sweep), mixer, high-pass filter
   - `joypad.rs` $FF00
+  - `serial.rs` SB/SC and the link cable: real transfer timing; the host carries bytes to a
+    partner (`GameBoy::take_link_out` / `link_answer` / `link_clocked`, `FrameEnd::LinkWait`)
   - `disasm.rs` disassembler for the debugger panel (same x/y/z decoding as `cpu.rs`)
   - `rewind.rs` rewind history: recent states as XOR deltas, newest first
   - `state.rs` save state format; each component has `save_state`/`load_state` next to its
@@ -24,6 +26,8 @@ A Game Boy (DMG) and Game Boy Color (CGB) emulator in Rust that runs in the brow
 - `crates/gb-wasm/` — wasm-bindgen wrapper (`Emulator` class) used by `web/`
 - `web/` — static frontend (`index.html`, `main.js`, `style.css`; `input.js` maps keyboard/gamepad/touch to buttons, `timing.js` paces frames, `saves.js` keeps battery saves in localStorage, `states.js` save state slots in IndexedDB, `audio.js` + `audio-worklet.js` + `audio-queue.js` play sound, `debugger.js` + `memview.js` + `vramview.js` + `breakpoints.js` are the debugger panel); `web/pkg/` is generated
 - `scripts/build-web.ps1` / `build-web.sh` — build `web/pkg`
+- `.cargo/config.toml` — on Windows (GNU) link with Rust's bundled MinGW linker; MSYS2's ld
+  crashes on Rust DLLs
 - `scripts/serve.js` — zero-dependency Node dev server for `web/` (port 8765)
 - `.github/workflows/ci.yml` — tests every push; pushes to `main` also deploy `web/` to GitHub Pages
   (https://tanakriteuro.github.io/gb-emu/)

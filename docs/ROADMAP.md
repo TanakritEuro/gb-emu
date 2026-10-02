@@ -118,6 +118,12 @@ Pick whichever sound most fun:
   - [x] A Game Boy Color homebrew game plays in the browser (Tobu Tobu Girl Deluxe, at 60 fps,
         with sound, battery saves, save states and rewind)
 - [ ] Link cable over WebRTC: two browsers, two-player games
+  - [x] Serial port with a partner in the core: transfers take their real time, a master's byte
+        goes to the partner and comes back with theirs (or $FF with no cable), a slave answers
+        when clocked; two Game Boys linked in a test swap bytes
+  - [ ] Two browser tabs linked on one computer, to get the browser side right without a network
+  - [ ] WebRTC between two browsers, connected by copying a code each way (no server)
+  - [ ] A two-player homebrew game plays over the link
 
 ---
 

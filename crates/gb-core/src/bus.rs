@@ -4,7 +4,9 @@
 //! Reference: https://gbdev.io/pandocs/Memory_Map.html
 
 use crate::state::{StateError, StateReader, StateWriter};
-use crate::{apu::Apu, cartridge::Cartridge, joypad::Joypad, ppu::Ppu, timer::Timer, Model};
+use crate::{
+    apu::Apu, cartridge::Cartridge, joypad::Joypad, ppu::Ppu, serial::Serial, timer::Timer, Model,
+};
 
 /// The Color's VRAM DMA, set up through HDMA1-5 ($FF51-$FF55).
 #[derive(Debug, Clone, Copy)]
@@ -69,9 +71,8 @@ pub struct Bus {
     io: [u8; 0x80],
     pub if_reg: u8,
     pub ie_reg: u8,
-    serial_data: u8,
-    serial_ctrl: u8,
-    serial_out: Vec<u8>,
+    /// SB/SC and the link cable.
+    pub serial: Serial,
     pub doctor_mode: bool,
 }
 
@@ -95,16 +96,13 @@ impl Bus {
             io: [0; 0x80],
             if_reg: 0xE1,
             ie_reg: 0,
-            serial_data: 0,
-            serial_ctrl: 0,
-            serial_out: Vec::new(),
+            serial: Serial::new(model == Model::Cgb),
             doctor_mode: false,
         }
     }
 
-    /// RAM, I/O, IF/IE and serial, then each chip's own section. Leaves out
-    /// the serial output not yet taken and Doctor mode: the host's, not the
-    /// Game Boy's.
+    /// RAM, I/O and IF/IE, then each chip's own section. Leaves out Doctor
+    /// mode: the host's, not the Game Boy's.
     pub(crate) fn save_state(&self, w: &mut StateWriter) {
         w.tag(b"BUS ");
         w.u8(self.model as u8);
@@ -118,7 +116,8 @@ impl Bus {
         w.u8(self.hdma.remaining);
         w.bytes(&self.hram);
         w.bytes(&self.io);
-        w.bytes(&[self.if_reg, self.ie_reg, self.serial_data, self.serial_ctrl]);
+        w.bytes(&[self.if_reg, self.ie_reg]);
+        self.serial.save_state(w);
         self.cart.save_state(w);
         self.ppu.save_state(w);
         self.timer.save_state(w);
@@ -145,9 +144,9 @@ impl Bus {
         self.timer.set_double_speed(self.double_speed);
         r.bytes(&mut self.hram)?;
         r.bytes(&mut self.io)?;
-        let mut b = [0; 4];
-        r.bytes(&mut b)?;
-        [self.if_reg, self.ie_reg, self.serial_data, self.serial_ctrl] = b;
+        self.if_reg = r.u8()?;
+        self.ie_reg = r.u8()?;
+        self.serial.load_state(r)?;
         self.cart.load_state(r)?;
         self.ppu.load_state(r)?;
         self.timer.load_state(r)?;
@@ -277,8 +276,7 @@ impl Bus {
     fn read_io(&self, addr: u16) -> u8 {
         match addr {
             0xFF00 => self.joypad.read(),
-            0xFF01 => self.serial_data,
-            0xFF02 => self.serial_ctrl | 0x7E,
+            0xFF01 | 0xFF02 => self.serial.read(addr),
             0xFF04..=0xFF07 => self.timer.read(addr),
             0xFF10..=0xFF3F => self.apu.read(addr),
             0xFF0F => self.if_reg | 0xE0,
@@ -312,18 +310,7 @@ impl Bus {
     fn write_io(&mut self, addr: u16, val: u8) {
         match addr {
             0xFF00 => self.joypad.write(val),
-            0xFF01 => self.serial_data = val,
-            0xFF02 => {
-                self.serial_ctrl = val;
-                // Transfer requested with the internal clock: there's no link
-                // partner, so "send" the byte instantly and capture it.
-                if val & 0x81 == 0x81 {
-                    self.serial_out.push(self.serial_data);
-                    self.serial_data = 0xFF;
-                    self.serial_ctrl &= 0x7F;
-                    self.if_reg |= interrupt::SERIAL;
-                }
-            }
+            0xFF01 | 0xFF02 => self.serial.write(addr, val),
             0xFF04..=0xFF07 => self.timer.write(addr, val),
             0xFF10..=0xFF3F => self.apu.write(addr, val),
             0xFF0F => self.if_reg = val | 0xE0,
@@ -368,6 +355,9 @@ impl Bus {
         if self.timer.tick(cycles) {
             self.if_reg |= interrupt::TIMER;
         }
+        if self.serial.tick(cycles) {
+            self.if_reg |= interrupt::SERIAL;
+        }
         let real = self.real_cycles(cycles);
         self.if_reg |= self.ppu.tick(real);
         // An HBlank copy moves one block per HBlank, paused while the CPU
@@ -396,7 +386,7 @@ impl Bus {
     }
 
     pub fn take_serial_output(&mut self) -> String {
-        let bytes = std::mem::take(&mut self.serial_out);
+        let bytes = self.serial.take_log();
         String::from_utf8_lossy(&bytes).into_owned()
     }
 }
@@ -429,10 +419,13 @@ mod tests {
         for &c in b"Hi" {
             b.write(0xFF01, c);
             b.write(0xFF02, 0x81);
+            assert_eq!(b.if_reg & interrupt::SERIAL, 0, "8 bits take time");
+            b.tick(8 * 512);
+            assert_eq!(b.if_reg & interrupt::SERIAL, interrupt::SERIAL);
+            assert_eq!(b.read(0xFF02) & 0x80, 0, "transfer flag clears when done");
+            b.if_reg = 0;
         }
         assert_eq!(b.take_serial_output(), "Hi");
-        assert_eq!(b.if_reg & interrupt::SERIAL, interrupt::SERIAL);
-        assert_eq!(b.read(0xFF02) & 0x80, 0, "transfer flag clears when done");
     }
 
     #[test]

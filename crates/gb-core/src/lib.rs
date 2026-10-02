@@ -13,6 +13,7 @@ pub mod disasm;
 pub mod joypad;
 pub mod ppu;
 pub mod rewind;
+pub mod serial;
 pub mod state;
 pub mod timer;
 
@@ -78,6 +79,9 @@ pub enum FrameEnd {
     /// PC reached a breakpoint, partway through the frame. The instruction
     /// there hasn't run yet.
     Breakpoint,
+    /// A link cable transfer is waiting for the partner's byte (see
+    /// [`GameBoy::link_answer`]); everything stands still until it comes.
+    LinkWait,
 }
 
 impl GameBoy {
@@ -146,6 +150,9 @@ impl GameBoy {
     pub fn run_frame(&mut self) -> Result<FrameEnd, CpuError> {
         let mut elapsed = 0;
         while elapsed < CYCLES_PER_FRAME {
+            if self.bus.serial.waiting() {
+                return Ok(FrameEnd::LinkWait);
+            }
             if self.at_breakpoint() {
                 self.resume_here = true;
                 return Ok(FrameEnd::Breakpoint);
@@ -238,6 +245,43 @@ impl GameBoy {
     /// Test ROMs (Blargg's) print their results this way.
     pub fn take_serial_output(&mut self) -> String {
         self.bus.take_serial_output()
+    }
+
+    // The link cable. A partner is another Game Boy somewhere else; the host
+    // carries bytes between them (see the serial module).
+
+    /// Plugs a link cable in, or pulls it out. With no cable a master reads
+    /// $FF; with one, transfers swap bytes with whatever the host brings.
+    pub fn plug_link(&mut self, plugged: bool) {
+        if self.bus.serial.plug(plugged) {
+            self.bus.if_reg |= interrupt::SERIAL;
+        }
+    }
+
+    /// A byte this Game Boy clocked out as master: carry it to the partner
+    /// (its [`link_clocked`](Self::link_clocked)) and bring back the answer
+    /// for [`link_answer`](Self::link_answer).
+    pub fn take_link_out(&mut self) -> Option<u8> {
+        self.bus.serial.take_out()
+    }
+
+    /// The partner's byte for this Game Boy's transfer. If
+    /// [`run_frame`](Self::run_frame) stopped with [`FrameEnd::LinkWait`],
+    /// this lets it carry on.
+    pub fn link_answer(&mut self, byte: u8) {
+        if self.bus.serial.answer(byte) {
+            self.bus.if_reg |= interrupt::SERIAL;
+        }
+    }
+
+    /// The partner, as master, clocked `byte` into this Game Boy. Returns the
+    /// byte that goes back: SB if the game was listening (SC = $80), else $FF.
+    pub fn link_clocked(&mut self, byte: u8) -> u8 {
+        let (back, done) = self.bus.serial.clocked(byte);
+        if done {
+            self.bus.if_reg |= interrupt::SERIAL;
+        }
+        back
     }
 
     /// Sets the audio output rate (samples per second per channel), e.g. the

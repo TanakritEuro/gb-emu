@@ -30,7 +30,8 @@ const MAGIC: &[u8; 4] = b"GBST";
 /// 3: Color palettes, and the Color's picture in RGB555.
 /// 4: OPRI, the Color's sprite priority mode.
 /// 5: the Color's VRAM DMA.
-pub const VERSION: u16 = 5;
+/// 6: the serial port in its own section, with transfer progress.
+pub const VERSION: u16 = 6;
 /// Bytes before the payload: magic, version, fingerprint, length.
 const HEADER_LEN: usize = 4 + 2 + 8 + 4;
 

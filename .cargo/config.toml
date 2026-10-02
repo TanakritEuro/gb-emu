@@ -1,0 +1,7 @@
+# Windows with the GNU toolchain: link with the MinGW linker that ships with
+# Rust instead of whichever is on PATH. MSYS2's ld (binutils 2.43.1) crashes
+# without a message when linking Rust DLLs, which `cargo test --workspace`
+# needs for gb-wasm's native build. Other targets (Linux CI, wasm32) are
+# unaffected.
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "link-self-contained=yes"]
