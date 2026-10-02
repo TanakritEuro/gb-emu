@@ -7,6 +7,7 @@
 //! Reference: https://gbdev.io/pandocs/Rendering.html
 
 use crate::bus::interrupt;
+use crate::compat::CompatPalettes;
 use crate::state::{StateError, StateReader, StateWriter};
 use crate::{Model, SCREEN_HEIGHT, SCREEN_WIDTH};
 
@@ -65,6 +66,8 @@ const VBLANK_LINE: u8 = 144;
 #[derive(Clone)]
 pub struct Ppu {
     model: Model,
+    /// A Color in compatibility mode. See [`Ppu::enter_compat_mode`].
+    compat: bool,
     /// 8 KiB on the original; two 8 KiB banks on the Color, bank 1 at
     /// `0x2000..`. Bank 1 holds more tiles and, behind each tile map entry,
     /// that tile's attributes.
@@ -137,6 +140,7 @@ impl Ppu {
     pub fn with_model(model: Model) -> Self {
         Self {
             model,
+            compat: false,
             vram: Box::new([0; 0x4000]),
             vram_bank: 0,
             // The boot ROM makes every background color white ($7FFF) and
@@ -199,7 +203,7 @@ impl Ppu {
         // The picture, so a loaded state shows its own frame straight away.
         // On the original every pixel is one of four shades: 2 bits each, 4
         // per byte. On the Color it's any RGB555 color: 2 bytes each.
-        if self.cgb() {
+        if self.model == Model::Cgb {
             let mut colors = Vec::with_capacity(SCREEN_WIDTH * SCREEN_HEIGHT * 2);
             for px in self.framebuffer.as_chunks::<4>().0 {
                 colors.extend_from_slice(&rgb555(px).to_le_bytes());
@@ -270,8 +274,33 @@ impl Ppu {
         std::mem::swap(&mut self.framebuffer, &mut old.framebuffer);
     }
 
+    /// The Color's own features are on: tile attributes, its palettes picked
+    /// per tile and sprite, VRAM bank 1. Not on the original, nor on a Color
+    /// in compatibility mode.
     fn cgb(&self) -> bool {
-        self.model == Model::Cgb
+        self.model == Model::Cgb && !self.compat
+    }
+
+    /// A Color running an original cartridge, as its boot ROM leaves it:
+    /// `palettes` loaded into background palette 0 and sprite palettes 0
+    /// and 1, sprites overlapping by X as on the original (OPRI), and from
+    /// then on BGP, OBP0 and OBP1 picking their shades from those colors.
+    /// See [`crate::compat`].
+    pub fn enter_compat_mode(&mut self, palettes: CompatPalettes) {
+        self.compat = true;
+        self.opri = 1;
+        let put = |ram: &mut [u8; 64], palette: usize, colors: [u16; 4]| {
+            for (i, c) in colors.into_iter().enumerate() {
+                ram[palette * 8 + i * 2..][..2].copy_from_slice(&c.to_le_bytes());
+            }
+        };
+        put(&mut self.bg_palettes, 0, palettes.bg);
+        put(&mut self.obj_palettes, 0, palettes.obj[0]);
+        put(&mut self.obj_palettes, 1, palettes.obj[1]);
+        // Where the boot ROM's auto-incrementing writes left the indexes:
+        // 8 bytes of background colors, 16 of sprite colors.
+        self.bcps = 0x88;
+        self.ocps = 0x90;
     }
 
     /// The Color's palette registers, $FF68-$FF6B, and OPRI, $FF6C. Unused
@@ -559,14 +588,18 @@ impl Ppu {
     /// interrupt fires only on that line's rising edge. So a source turning
     /// on while another already holds the line high fires nothing ("STAT
     /// blocking"). https://gbdev.io/pandocs/Interrupt_Sources.html
-    /// On the original the mode 2 source also fires as line 144 begins, with
-    /// VBlank (Mooneye's vblank_stat_intr; the Color doesn't).
+    /// The mode 2 source also fires once for line 144, though it has no OAM
+    /// scan: with VBlank on the original, an M-cycle before it on the Color
+    /// (Mooneye's vblank_stat_intr-GS and -C).
     fn check_stat_line(&mut self) {
         if !self.lcd_on() {
             return;
         }
         let mode = self.stat & 0x03;
-        let line_144 = !self.cgb() && self.ly == VBLANK_LINE && self.dot == 0;
+        let line_144 = match self.model {
+            Model::Dmg => self.ly == VBLANK_LINE && self.dot == 0,
+            Model::Cgb => self.ly == VBLANK_LINE - 1 && self.dot == DOTS_PER_LINE - 4,
+        };
         let line = (self.stat & 0x40 != 0 && self.stat & 0x04 != 0)
             || (self.stat & 0x20 != 0 && (mode == 2 || line_144))
             || (self.stat & 0x10 != 0 && mode == 1)
@@ -755,26 +788,33 @@ impl Ppu {
     /// RGBA for sprite color `index` (1-3) of a sprite with attributes
     /// `attrs`: through OBP0/OBP1 (bit 4) on the original, from sprite
     /// palette bits 0-2 on the Color.
+    /// In compatibility mode, OBP0/OBP1's shade picks a color from sprite
+    /// palette 0 or 1.
     fn obj_color(&self, attrs: u8, index: u8) -> [u8; 4] {
         if self.cgb() {
-            palette_color(&self.obj_palettes, attrs & 0x07, index)
+            return palette_color(&self.obj_palettes, attrs & 0x07, index);
+        }
+        let obp1 = attrs & 0x10 != 0;
+        let shade = ((if obp1 { self.obp1 } else { self.obp0 }) >> (index * 2)) & 0x03;
+        if self.compat {
+            palette_color(&self.obj_palettes, u8::from(obp1), shade)
         } else {
-            let palette = if attrs & 0x10 != 0 {
-                self.obp1
-            } else {
-                self.obp0
-            };
-            DMG_PALETTE[usize::from((palette >> (index * 2)) & 0x03)]
+            DMG_PALETTE[usize::from(shade)]
         }
     }
 
     /// RGBA for background color `index` (0-3): through BGP on the original,
-    /// from background palette `palette` (0-7) on the Color.
+    /// from background palette `palette` (0-7) on the Color. In compatibility
+    /// mode, BGP's shade picks a color from background palette 0.
     fn bg_color(&self, palette: u8, index: u8) -> [u8; 4] {
         if self.cgb() {
-            palette_color(&self.bg_palettes, palette, index)
+            return palette_color(&self.bg_palettes, palette, index);
+        }
+        let shade = (self.bgp >> (index * 2)) & 0x03;
+        if self.compat {
+            palette_color(&self.bg_palettes, 0, shade)
         } else {
-            DMG_PALETTE[usize::from((self.bgp >> (index * 2)) & 0x03)]
+            DMG_PALETTE[usize::from(shade)]
         }
     }
 
@@ -1973,5 +2013,26 @@ mod tests {
         assert_eq!((p.ly, p.stat & 0x03), (0, 0), "still line 0's HBlank");
         p.tick(456 * 153);
         assert_eq!((p.ly, p.read_reg(0xFF44)), (153, 0), "and from 153 to 0");
+    }
+
+    #[test]
+    fn compatibility_mode_takes_shades_from_the_boot_palettes() {
+        use crate::compat::DEFAULT_PALETTES;
+        let mut p = Ppu::with_model(Model::Cgb);
+        p.enter_compat_mode(DEFAULT_PALETTES);
+        p.lcdc = 0x93; // on, tiles at $8000, sprites, background
+        p.bgp = 0b00_01_10_11; // color 0 shows as shade 3
+        p.obp1 = 0b00_00_10_00; // color 1 shows as shade 2
+                                // Tile attributes in VRAM bank 1 are ignored (palette 7 here).
+        p.set_vram_bank(1);
+        p.write_vram(0x9800, 0x07);
+        p.set_vram_bank(0);
+        put_tile(&mut p, 0x8010, striped(0xFF, 0x00)); // tile 1: color 1
+                                                       // A sprite on OBP1; the Color's palette bits in its attributes are
+                                                       // ignored too.
+        put_sprite(&mut p, 0, 8, 0, 1, 0x10 | 0x07);
+        draw_line(&mut p, 0);
+        assert_eq!(rgba_at(&p, 0, 0), rgba(DEFAULT_PALETTES.bg[3]));
+        assert_eq!(rgba_at(&p, 8, 0), rgba(DEFAULT_PALETTES.obj[1][2]));
     }
 }

@@ -5,7 +5,8 @@
 
 use crate::state::{StateError, StateReader, StateWriter};
 use crate::{
-    apu::Apu, cartridge::Cartridge, joypad::Joypad, ppu::Ppu, serial::Serial, timer::Timer, Model,
+    apu::Apu, cartridge::Cartridge, compat, joypad::Joypad, ppu::Ppu, serial::Serial, timer::Timer,
+    Model,
 };
 
 /// The Color's VRAM DMA, set up through HDMA1-5 ($FF51-$FF55).
@@ -74,6 +75,11 @@ pub struct Bus {
     pub joypad: Joypad,
     pub apu: Apu,
     pub model: Model,
+    /// A Color running an original cartridge (KEY0 bit 2, set by its boot
+    /// ROM): the Color's own registers are shut, and the original's palette
+    /// registers pick colors from palettes the boot ROM loaded.
+    /// https://gbdev.io/pandocs/CGB_Registers.html#ff4c--key0sys-cgb-mode-only-cpu-mode-select
+    pub compat: bool,
     /// Work RAM: 8 KiB on the original, 32 KiB in eight 4 KiB banks on the
     /// Color. $C000-$CFFF is always bank 0; $D000-$DFFF is bank 1, or on the
     /// Color whichever SVBK ($FF70) picks.
@@ -104,13 +110,19 @@ pub struct Bus {
 
 impl Bus {
     pub fn new(cart: Cartridge, model: Model) -> Self {
+        let compat = model == Model::Cgb && !cart.header.cgb;
+        let mut ppu = Ppu::with_model(model);
+        if compat {
+            ppu.enter_compat_mode(compat::boot_palettes(&cart));
+        }
         Self {
             cart,
-            ppu: Ppu::with_model(model),
+            ppu,
             timer: Timer::post_boot(model),
-            joypad: Joypad::new(),
+            joypad: Joypad::post_boot(model),
             apu: Apu::new(),
             model,
+            compat,
             wram: Box::new([0; 0x8000]),
             svbk: 0,
             speed_armed: false,
@@ -123,7 +135,7 @@ impl Bus {
             io: [0; 0x80],
             if_reg: 0xE1,
             ie_reg: 0,
-            serial: Serial::new(model == Model::Cgb),
+            serial: Serial::new(model == Model::Cgb && !compat),
             doctor_mode: false,
         }
     }
@@ -205,13 +217,15 @@ impl Bus {
         self.apu.load_state(r)
     }
 
+    /// The Color's own features are on: a Color running a Color cartridge
+    /// (Pan Docs' "CGB mode"), not one in compatibility mode.
     fn cgb(&self) -> bool {
-        self.model == Model::Cgb
+        self.model == Model::Cgb && !self.compat
     }
 
     /// The part of `wram` this model has.
     fn wram_size(&self) -> usize {
-        if self.cgb() {
+        if self.model == Model::Cgb {
             0x8000
         } else {
             0x2000
@@ -374,14 +388,39 @@ impl Bus {
             0xFF0F => self.if_reg | 0xE0,
             0xFF44 if self.doctor_mode => 0x90,
             0xFF40..=0xFF4B => self.ppu.read_reg(addr),
+            // In compatibility mode VBK still reads (bank 0, for good), and so
+            // do the palette index registers and OPRI, as the boot ROM left
+            // them (Mooneye's boot_hwio-C).
+            0xFF4F | 0xFF68 | 0xFF6A | 0xFF6C if self.compat => self.read_color_io(addr),
             // Color registers: unused bits read 1; on the original, all of it.
             0xFF4D | 0xFF4F | 0xFF51..=0xFF55 | 0xFF68..=0xFF6C | 0xFF70 if !self.cgb() => 0xFF,
+            0xFF4D | 0xFF4F | 0xFF51..=0xFF55 | 0xFF68..=0xFF6C | 0xFF70 => {
+                self.read_color_io(addr)
+            }
+            // The Color's undocumented registers: $FF72-$FF73 read back
+            // anything, $FF74 too (in Color mode only), $FF75 bits 4-6.
+            // https://gbdev.io/pandocs/CGB_Registers.html#undocumented-registers
+            0xFF72 | 0xFF73 if self.model == Model::Cgb => self.io[usize::from(addr - 0xFF00)],
+            0xFF74 if self.cgb() => self.io[0x74],
+            0xFF75 if self.model == Model::Cgb => self.io[0x75] | 0x8F,
+            // PCM12/PCM34: the channels' current output levels.
+            // TODO(accuracy): the real levels; 0 is what they read while silent.
+            0xFF76 | 0xFF77 if self.model == Model::Cgb => 0x00,
+            // TODO(accuracy): the Color's infrared port; nothing to receive.
+            0xFF56 if self.cgb() => self.io[0x56],
+            // Nothing there: reads $FF.
+            _ => 0xFF,
+        }
+    }
+
+    /// The Color's own registers.
+    fn read_color_io(&self, addr: u16) -> u8 {
+        match addr {
             0xFF4D => 0x7E | (u8::from(self.double_speed) << 7) | u8::from(self.speed_armed),
             0xFF4F => 0xFE | self.ppu.vram_bank(),
             0xFF51..=0xFF55 => self.read_hdma(addr),
             0xFF68..=0xFF6C => self.ppu.read_color_reg(addr),
-            0xFF70 => 0xF8 | self.svbk,
-            _ => self.io[(addr - 0xFF00) as usize],
+            _ => 0xF8 | self.svbk,
         }
     }
 
@@ -408,6 +447,9 @@ impl Bus {
             0xFF0F => self.if_reg = val | 0xE0,
             0xFF46 => self.oam_dma(val),
             0xFF40..=0xFF4B => self.ppu.write_reg(addr, val),
+            // In compatibility mode only the palette index registers still
+            // take writes, which change nothing anyone sees.
+            0xFF68 | 0xFF6A if self.compat => self.ppu.write_color_reg(addr, val),
             0xFF4D | 0xFF4F | 0xFF51..=0xFF55 | 0xFF68..=0xFF6C | 0xFF70 if !self.cgb() => {}
             0xFF4D => self.speed_armed = val & 1 != 0,
             0xFF4F => self.ppu.set_vram_bank(val & 1),
@@ -663,11 +705,63 @@ mod tests {
         assert_eq!(b.read(0xA000), 1);
     }
 
+    /// A Color with a Color cartridge ($0143 = $80), so in Color mode.
     fn cgb_bus() -> Bus {
+        let mut rom = rom_with_program(&[]);
+        rom[0x143] = 0x80;
+        rom[0x14D] = crate::cartridge::header_checksum(&rom);
+        Bus::new(Cartridge::from_rom(rom).unwrap(), Model::Cgb)
+    }
+
+    /// A Color with an original cartridge: compatibility mode.
+    fn compat_bus() -> Bus {
         Bus::new(
             Cartridge::from_rom(rom_with_program(&[])).unwrap(),
             Model::Cgb,
         )
+    }
+
+    #[test]
+    fn compatibility_mode_shuts_the_colors_own_registers() {
+        let mut b = compat_bus();
+        assert!(b.compat);
+        b.write(0xFF4F, 1); // VBK
+        b.write(0xFF70, 3); // SVBK
+        b.write(0xFF4D, 1); // KEY1
+        assert_eq!(b.read(0xFF4F), 0xFE, "VRAM bank 0 for good");
+        assert_eq!(b.read(0xFF70), 0xFF);
+        assert_eq!(b.read(0xFF4D), 0xFF);
+        assert!(!b.speed_switch(), "no double speed");
+        b.write(0xD000, 0x12);
+        assert_eq!(b.wram[0x1000], 0x12, "$D000 is WRAM bank 1");
+        // The palette indexes as the boot ROM left them; the data is shut.
+        assert_eq!((b.read(0xFF68), b.read(0xFF6A)), (0xC8, 0xD0));
+        b.write(0xFF68, 0x80);
+        b.write(0xFF69, 0x12);
+        assert_eq!(b.read(0xFF69), 0xFF);
+        assert_eq!(
+            b.read(0xFF6C),
+            0xFF,
+            "OPRI: sprites by X, as on the original"
+        );
+        // Undocumented $FF74 is Color mode only; $FF72 is there either way.
+        b.write(0xFF72, 0x5A);
+        b.write(0xFF74, 0x5A);
+        assert_eq!((b.read(0xFF72), b.read(0xFF74)), (0x5A, 0xFF));
+    }
+
+    #[test]
+    fn unused_io_reads_ff_and_the_colors_extras_only_exist_there() {
+        let mut b = bus();
+        for addr in [0xFF03, 0xFF08, 0xFF4C, 0xFF50, 0xFF72, 0xFF75, 0xFF7F] {
+            b.write(addr, 0x00);
+            assert_eq!(b.read(addr), 0xFF, "${addr:04X}");
+        }
+        let mut b = cgb_bus();
+        b.write(0xFF75, 0x00);
+        assert_eq!(b.read(0xFF75), 0x8F, "only bits 4-6 are there");
+        b.write(0xFF74, 0x5A);
+        assert_eq!(b.read(0xFF74), 0x5A);
     }
 
     #[test]

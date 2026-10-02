@@ -12,6 +12,9 @@ A Game Boy (DMG) and Game Boy Color (CGB) emulator in Rust that runs in the brow
     speed switch and VRAM DMA (HDMA). The CPU goes through `cpu_read`/`cpu_write`, which lock it
     out of OAM/VRAM while DMA or the PPU has them; `read`/`write` are the raw view (debugger, DMA)
   - `cartridge.rs` header parsing + MBCs (ROM-only, MBC1, MBC2, MBC3 with its real-time clock, MBC5)
+  - `compat.rs` a Color running an original cartridge ("DMG compatibility mode"): what its boot
+    ROM leaves (palettes, registers). `Bus::compat` shuts the Color's own registers; the PPU's
+    `cgb()` means Color features are on, `model` which console it is (timing quirks)
   - `ppu.rs` scanline timing, STAT/LY, framebuffer (scanline renderer: background, window, sprites);
     debugger pictures of VRAM (tile sheet, tile maps)
   - `timer.rs` DIV/TIMA/TMA/TAC

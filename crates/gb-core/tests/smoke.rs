@@ -362,6 +362,28 @@ fn a_color_state_carries_on_exactly_like_the_original() {
 }
 
 #[test]
+fn an_original_cartridge_on_the_color_runs_in_compatibility_mode() {
+    // LD A,1 ; LDH ($4F),A (VBK) ; then spin.
+    let code = [0x3E, 0x01, 0xE0, 0x4F, 0x18, 0xFE];
+    let mut gb = GameBoy::with_model(rom(&code), Some(Model::Cgb)).unwrap();
+    let r = gb.cpu().regs;
+    assert_eq!(
+        (r.a, r.e, r.hl()),
+        (0x11, 0x08, 0x007C),
+        "the boot ROM's registers"
+    );
+    gb.run_frame().unwrap();
+    assert_eq!(gb.peek(0xFF4F), 0xFE, "VRAM bank 1 out of reach");
+    // The screen is in color: BGP's shade 0 shows as the boot palette's
+    // white, and the boot ROM's BGP ($FC) shows everything else black.
+    let px = &gb.framebuffer()[..4];
+    assert_eq!(px, [0xFF, 0xFF, 0xFF, 0xFF]);
+    // The same cartridge on the original isn't in color.
+    let gb = GameBoy::new(rom(&code)).unwrap();
+    assert_eq!((gb.cpu().regs.a, gb.model()), (0x01, Model::Dmg));
+}
+
+#[test]
 fn a_state_saved_during_oam_dma_carries_on_the_copy() {
     // LD A,$C0 ; LDH ($46),A ; then NOPs: DMA from $C000 runs under them.
     let mut gb = GameBoy::new(rom(&[0x3E, 0xC0, 0xE0, 0x46])).unwrap();

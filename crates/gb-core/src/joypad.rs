@@ -4,6 +4,7 @@
 //! Reference: https://gbdev.io/pandocs/Joypad_Input.html
 
 use crate::state::{StateError, StateReader, StateWriter};
+use crate::Model;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -54,6 +55,16 @@ impl Joypad {
         Self {
             held: 0,
             select: 0x30,
+        }
+    }
+
+    /// As the boot ROM leaves it: the original's leaves both rows selected
+    /// ($CF with nothing held), the Color's neither ($FF) (Mooneye's
+    /// boot_hwio). https://gbdev.io/pandocs/Power_Up_Sequence.html#hardware-registers
+    pub fn post_boot(model: Model) -> Self {
+        Self {
+            held: 0,
+            select: if model == Model::Dmg { 0x00 } else { 0x30 },
         }
     }
 

@@ -107,7 +107,7 @@ Pick whichever sound most fun:
 - [x] Game Boy Color support (double-speed CPU, color palettes, VRAM banks)
   - [x] Color mode: picked from the header, the Color's boot state, VRAM and WRAM banks, double
         speed (Blargg `cpu_instrs`/`instr_timing` pass in Color mode, `interrupt_time` passes;
-        `cgb_sound` 8/12. Mooneye's Color tests need DMG compatibility mode, which isn't planned)
+        `cgb_sound` 8/12. Mooneye's Color tests need DMG compatibility mode: Milestone 9)
   - [x] Color palettes and per-tile background attributes (palette, VRAM bank, flips, priority)
         (cgb-acid2: every pixel not drawn by a sprite matches)
   - [x] Color sprites: palette and bank bits, OAM-order priority, LCDC bit 0 as master priority
@@ -153,6 +153,25 @@ this is where the hardware gets interesting.
 **Done when:** Mooneye `acceptance/ppu` passes 12/12.
 (Done: 12/12. Mooneye overall 96/100 here; the other 4 are unused I/O bits, boot I/O
 values, the serial clock's boot alignment and an MBC1 multicart.)
+
+## Milestone 9 — Original games in color
+
+A Game Boy Color plays original Game Boy cartridges in its "DMG compatibility mode": the boot
+ROM loads a few palettes (per game, for Nintendo's) and the original's palette registers pick
+from them. On a real Color you could also hold a button combination at boot to choose.
+
+- [x] Compatibility mode in the core: a Color with an original cartridge shuts its own registers
+      (VRAM and WRAM banks, double speed, HDMA, palette data), BGP/OBP0/OBP1 pick colors from the
+      boot ROM's palettes (the default one so far), and the boot ROM's registers. Unused I/O
+      reads $FF; the Color's undocumented $FF72-$FF77. (Mooneye: `boot_regs-cgb`,
+      `boot_hwio-C`, `unused_hwio-C`, `vblank_stat_intr-C` pass, and so now do `boot_hwio` and
+      `unused_hwio` on the original: 98/100 here)
+- [ ] The boot ROM's palette for each of Nintendo's games: a checksum of the title, and its 4th
+      letter where checksums collide
+- [ ] In the browser: play original games on a Game Boy or a Game Boy Color, and pick one of
+      the 12 palettes a real Color offers for button combinations at boot
+
+**Done when:** an original game plays in color in the browser, in a palette you picked.
 
 ---
 

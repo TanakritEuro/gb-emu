@@ -8,6 +8,7 @@
 pub mod apu;
 pub mod bus;
 pub mod cartridge;
+pub mod compat;
 pub mod cpu;
 pub mod disasm;
 pub mod joypad;
@@ -96,15 +97,20 @@ impl GameBoy {
     }
 
     /// Like [`new`](Self::new), but `Some(model)` overrides the choice,
-    /// e.g. to run a test ROM on a particular console.
+    /// e.g. to run a test ROM on a particular console. An original
+    /// cartridge on the Color runs in its compatibility mode ([`compat`]).
     pub fn with_model(rom: Vec<u8>, model: Option<Model>) -> Result<Self, CartridgeError> {
         let cart = Cartridge::from_rom(rom)?;
         let model = model.unwrap_or_else(|| Model::for_cartridge(&cart));
+        let bus = Bus::new(cart, model);
         let mut cpu = Cpu::new();
         cpu.reset_post_boot(model);
+        if bus.compat {
+            cpu.regs = compat::boot_registers(&bus.cart);
+        }
         Ok(Self {
             cpu,
-            bus: Bus::new(cart, model),
+            bus,
             breakpoints: BTreeSet::new(),
             resume_here: false,
             frame_elapsed: 0,
