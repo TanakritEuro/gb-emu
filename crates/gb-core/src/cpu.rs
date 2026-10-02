@@ -2263,9 +2263,9 @@ mod tests {
 
     #[test]
     fn each_access_sees_the_hardware_at_its_own_m_cycle() {
-        // LDH A,($44) reads LY in its third M-cycle, 12 T-cycles in, and line
-        // 0 ends 456 dots after the PPU starts.
-        for (head_start, ly) in [(456 - 12, 1), (456 - 13, 0)] {
+        // LDH A,($44) reads LY in its third M-cycle, 12 T-cycles in, and LY
+        // reads 1 from dot 452 of line 0.
+        for (head_start, ly) in [(452 - 12, 1), (452 - 13, 0)] {
             let (mut cpu, mut bus) = setup_wram(&[0xF0, 0x44]);
             bus.tick(head_start);
             cpu.step(&mut bus).unwrap();

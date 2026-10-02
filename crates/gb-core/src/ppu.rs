@@ -46,9 +46,11 @@ fn rgb555(px: &[u8; 4]) -> u16 {
 }
 
 const DOTS_PER_LINE: u32 = 456;
-/// Where mode 3 (drawing) ends and mode 0 (HBlank) begins on lines 0-143.
-/// TODO(accuracy): really 252-369, depending on sprites, SCX and the window.
-const HBLANK_DOT: u32 = 252;
+/// Where mode 3 (drawing) starts on lines 0-143, after the OAM scan.
+const MODE3_DOT: u32 = 80;
+/// The earliest mode 3 ends and mode 0 (HBlank) begins: 172 dots of drawing.
+/// Each line works out its own end, [`Ppu::mode3_end`].
+const HBLANK_DOT: u32 = MODE3_DOT + 172;
 const LINES_PER_FRAME: u8 = 154;
 const VBLANK_LINE: u8 = 144;
 
@@ -93,6 +95,8 @@ pub struct Ppu {
     dot: u32,
     /// Set once WY == LY at the start of a line; cleared at VBlank.
     wy_triggered: bool,
+    /// The dot where this line's mode 3 ends and HBlank begins.
+    hblank_dot: u32,
     /// Which window row the next window line draws; reset at VBlank.
     window_line: u8,
     /// The STAT interrupt line as of the last check, for edge detection.
@@ -146,6 +150,7 @@ impl Ppu {
             wx: 0,
             dot: 0,
             wy_triggered: false,
+            hblank_dot: HBLANK_DOT,
             window_line: 0,
             stat_line: false,
             pending_irq: 0,
@@ -171,6 +176,7 @@ impl Ppu {
         ]);
         w.u32(self.dot);
         w.bool(self.wy_triggered);
+        w.u16(self.hblank_dot as u16);
         w.u8(self.window_line);
         w.bool(self.stat_line);
         w.u8(self.pending_irq);
@@ -213,6 +219,10 @@ impl Ppu {
             return Err(StateError::Corrupt("PPU position"));
         }
         self.wy_triggered = r.bool()?;
+        self.hblank_dot = u32::from(r.u16()?);
+        if !(HBLANK_DOT..DOTS_PER_LINE).contains(&self.hblank_dot) {
+            return Err(StateError::Corrupt("PPU mode 3 length"));
+        }
         self.window_line = r.u8()?;
         self.stat_line = r.bool()?;
         self.pending_irq = r.u8()?;
@@ -322,7 +332,7 @@ impl Ppu {
             0xFF41 => self.stat | 0x80,
             0xFF42 => self.scy,
             0xFF43 => self.scx,
-            0xFF44 => self.ly,
+            0xFF44 => self.ly_reg(),
             0xFF45 => self.lyc,
             0xFF46 => self.dma,
             0xFF47 => self.bgp,
@@ -331,6 +341,18 @@ impl Ppu {
             0xFF4A => self.wy,
             0xFF4B => self.wx,
             _ => 0xFF,
+        }
+    }
+
+    /// What LY ($FF44) reads: the line, except that it moves on to the next
+    /// one 4 dots before this one ends (Mooneye's hblank_ly_scx_timing times
+    /// it from the HBlank interrupt).
+    /// TODO(accuracy): on line 153, LY reads 0 from 4 dots in.
+    fn ly_reg(&self) -> u8 {
+        if self.dot >= DOTS_PER_LINE - 4 {
+            (self.ly + 1) % LINES_PER_FRAME
+        } else {
+            self.ly
         }
     }
 
@@ -402,7 +424,10 @@ impl Ppu {
             // The line is drawn as mode 3 ends and HBlank begins, so what a
             // game changes during HBlank (scroll registers, an HBlank DMA
             // block) shows from the next line on, as on hardware.
-            if self.dot == HBLANK_DOT && self.ly < VBLANK_LINE {
+            if self.dot == MODE3_DOT && self.ly < VBLANK_LINE {
+                self.hblank_dot = self.mode3_end();
+            }
+            if self.dot == self.hblank_dot && self.ly < VBLANK_LINE {
                 self.render_scanline();
                 self.hblanks += 1;
             }
@@ -422,17 +447,16 @@ impl Ppu {
     }
 
     /// Sets STAT's mode bits and LY == LYC flag. Each line is mode 2 (OAM
-    /// scan), 3 (drawing), then 0 (HBlank); lines 144-153 are mode 1 (VBlank).
-    /// TODO(accuracy): mode 3 really lasts 172-289 dots depending on sprites,
-    /// SCX and the window, which also moves the start of mode 0.
+    /// scan), 3 (drawing, as long as [`Ppu::mode3_end`] says), then 0 (HBlank);
+    /// lines 144-153 are mode 1 (VBlank).
     fn update_stat_bits(&mut self) {
         let mode = if !self.lcd_on() {
             0
         } else if self.ly >= VBLANK_LINE {
             1
-        } else if self.dot < 80 {
+        } else if self.dot < MODE3_DOT {
             2
-        } else if self.dot < HBLANK_DOT {
+        } else if self.dot < self.hblank_dot {
             3
         } else {
             0
@@ -463,6 +487,73 @@ impl Ppu {
         self.stat_line = line;
     }
 
+    /// The dot where this line's mode 3 ends, worked out as it begins. The
+    /// PPU fetches tiles into a pixel FIFO and pushes one pixel per dot, so
+    /// 160 pixels take at least 172 dots, and the line pauses for:
+    /// - SCX % 8 dots at the start, while the pixels scrolled off the left
+    ///   edge are thrown away;
+    /// - 6 dots where the window starts, to restart the fetcher on its map;
+    /// - each sprite: 6 dots to fetch it, plus waiting for the background
+    ///   fetch under it to finish: as many dots as that tile has pixels right
+    ///   of the sprite's leftmost, minus 2. Only the first sprite on a tile
+    ///   waits.
+    ///
+    /// https://gbdev.io/pandocs/Rendering.html#mode-3-length
+    /// TODO(accuracy): this uses SCX, the window and the sprites as mode 3
+    /// starts; hardware reads them as it gets there.
+    fn mode3_end(&mut self) -> u32 {
+        // The window's "Y condition": once WY == LY at the start of a line, it
+        // holds for the rest of the frame. https://gbdev.io/pandocs/Window.html
+        if self.ly == self.wy {
+            self.wy_triggered = true;
+        }
+        let mut dots = HBLANK_DOT + u32::from(self.scx & 7);
+        let window = self.window_start();
+        if window.is_some() {
+            dots += 6;
+        }
+        let (mut sprites, count) = self.sprites_on_line();
+        let sprites = &mut sprites[..count];
+        sprites.sort_by_key(|s| s.x); // the fetcher meets them left to right
+        let mut waited_on: Vec<i16> = Vec::with_capacity(count);
+        let mut sprite_dots = 0;
+        // Past X = 167 a sprite is never reached.
+        for s in sprites.iter().filter(|s| s.x < 168) {
+            let pixel = i16::from(s.x) - 8;
+            // The background or window tile under the sprite's leftmost
+            // pixel (window tiles counted from 1000, to keep them apart), and
+            // where in it that pixel is. A sprite at X = 0 waits as if at the
+            // start of a tile of its own, whatever SCX is.
+            let (tile, offset) = match window {
+                _ if s.x == 0 => (-1000, 0),
+                Some(start) if pixel >= start => (1000 + (pixel - start) / 8, (pixel - start) % 8),
+                _ => {
+                    let x = pixel + i16::from(self.scx & 7);
+                    (x.div_euclid(8), x.rem_euclid(8))
+                }
+            };
+            if !waited_on.contains(&tile) {
+                waited_on.push(tile);
+                sprite_dots += (7 - offset - 2).max(0) as u32;
+            }
+            sprite_dots += 6;
+        }
+        // Measured against Pan Docs' figures, a line's sprites take 3 dots
+        // less in all: that's what makes all 105 cases of Mooneye's
+        // intr_2_mode0_timing_sprites (timed on hardware) come out right.
+        dots + sprite_dots.saturating_sub(3)
+    }
+
+    /// The screen column where the window starts on this line, if it shows:
+    /// LCDC bit 5 on (and bit 0 on the original), WY reached, WX at most 166.
+    /// TODO(accuracy): WX 0 also shifts it left by SCX % 8, and WX 166 has a
+    /// DMG-only glitch.
+    fn window_start(&self) -> Option<i16> {
+        let bg_on = self.cgb() || self.lcdc & 0x01 != 0;
+        let on = bg_on && self.lcdc & 0x20 != 0 && self.wy_triggered && self.wx <= 166;
+        on.then(|| i16::from(self.wx) - 7)
+    }
+
     /// Draws line LY into the framebuffer, all at once at the end of the line:
     /// the background, the window over it from WX-7 rightward, then sprites.
     /// TODO(accuracy): hardware pushes pixels through a FIFO during mode 3, so
@@ -479,10 +570,9 @@ impl Ppu {
         // count as color 0 (for sprite priority too), shown through BGP. On
         // the Color it hides nothing; it's a sprite priority switch there.
         let bg_on = self.cgb() || self.lcdc & 0x01 != 0;
-        let window_on = bg_on && self.lcdc & 0x20 != 0 && self.wy_triggered && self.wx <= 166;
-        // Screen column where the window starts. TODO(accuracy): WX 0 also
-        // shifts it left by SCX % 8, and WX 166 has a DMG-only glitch.
-        let window_x = i16::from(self.wx) - 7;
+        let window = self.window_start();
+        let window_on = window.is_some();
+        let window_x = window.unwrap_or(0);
 
         let row = usize::from(self.ly) * SCREEN_WIDTH;
         for x in 0..SCREEN_WIDTH as u8 {
@@ -1628,5 +1718,84 @@ mod tests {
         put_sprite(&mut p, 3, 0, 10, 2, 0x00);
         draw_line(&mut p, 10);
         assert_eq!(shade_at(&p, 4, 10), 2, "smaller X first on the original");
+    }
+
+    /// Runs a PPU from the start of line 0 to its HBlank: the dot where STAT
+    /// first reads mode 0 after the OAM scan.
+    fn hblank_start(p: &mut Ppu) -> u32 {
+        for dot in 1..DOTS_PER_LINE {
+            p.tick(1);
+            if dot > MODE3_DOT && p.stat & 0x03 == 0 {
+                return dot;
+            }
+        }
+        DOTS_PER_LINE
+    }
+
+    #[test]
+    fn mode_3_lasts_172_dots_plus_the_fine_scroll() {
+        for scx in [0, 1, 7, 8, 13] {
+            let mut p = bg_ppu();
+            p.scx = scx;
+            assert_eq!(hblank_start(&mut p), 252 + u32::from(scx % 8), "SCX {scx}");
+        }
+    }
+
+    #[test]
+    fn the_window_adds_6_dots_on_lines_it_shows() {
+        assert_eq!(hblank_start(&mut window_ppu(7, 0)), 258);
+        assert_eq!(hblank_start(&mut window_ppu(7, 1)), 252, "WY not reached");
+        assert_eq!(hblank_start(&mut window_ppu(167, 0)), 252, "off the right");
+    }
+
+    #[test]
+    fn sprites_add_6_dots_each_plus_a_wait_for_the_tile_under_them() {
+        // OAM X positions, and the dots they add: Pan Docs' figures (6 a
+        // sprite, plus the pixels of its tile right of it, less 2, for the
+        // first on a tile), less 3 for the line.
+        let cases: &[(&[u8], u32)] = &[
+            (&[8], 6 + 5 - 3),             // at a tile's left edge: waits 5
+            (&[12], 6 + 1 - 3),            // halfway: waits 1
+            (&[15], 6 - 3),                // at its right end: no wait
+            (&[8, 8], 6 + 5 + 6 - 3),      // a second on the tile doesn't wait
+            (&[8, 16], 6 + 5 + 6 + 5 - 3), // the next tile waits again
+            (&[16, 8], 6 + 5 + 6 + 5 - 3), // whatever the OAM order
+            (&[0, 0], 6 + 5 + 6 - 3),      // X = 0 waits as at a tile's start
+            (&[168], 0),                   // never reached
+        ];
+        for &(xs, dots) in cases {
+            let mut p = sprite_ppu();
+            for (i, &x) in xs.iter().enumerate() {
+                put_sprite(&mut p, i as u16, i16::from(x) - 8, 0, 1, 0);
+            }
+            assert_eq!(hblank_start(&mut p), 252 + dots, "sprites at {xs:?}");
+        }
+        // SCX moves the tiles under them: X = 8 is now halfway into one.
+        let mut p = sprite_ppu();
+        p.scx = 4;
+        put_sprite(&mut p, 0, 0, 0, 1, 0);
+        assert_eq!(hblank_start(&mut p), 252 + 4 + (6 + 1 - 3));
+    }
+
+    #[test]
+    fn hblank_dma_and_drawing_follow_the_longer_mode_3() {
+        let mut p = bg_ppu();
+        p.scx = 5;
+        p.tick(252 + 4);
+        assert_eq!(p.take_hblanks(), 0, "still drawing");
+        p.tick(1);
+        assert_eq!(p.take_hblanks(), 1);
+    }
+
+    #[test]
+    fn ly_moves_on_4_dots_before_the_line_ends() {
+        let mut p = Ppu::new();
+        p.tick(451);
+        assert_eq!(p.read_reg(0xFF44), 0);
+        p.tick(1);
+        assert_eq!(p.read_reg(0xFF44), 1);
+        assert_eq!((p.ly, p.stat & 0x03), (0, 0), "still line 0's HBlank");
+        p.tick(456 * 153);
+        assert_eq!((p.ly, p.read_reg(0xFF44)), (153, 0), "and from 153 to 0");
     }
 }

@@ -139,8 +139,9 @@ this is where the hardware gets interesting.
       takes its real 160 M-cycles and holds OAM meanwhile. DIV starts at $AB.
       (All of Mooneye's instruction timing, OAM DMA, interrupt and timer tests pass, and
       Blargg's `mem_timing` 1 and 2; `acceptance/ppu`: 5/12; Mooneye overall 89/100 here)
-- [ ] Mode 3 length: 172 dots plus SCX's fine scroll, sprites and the window, moving the start
-      of HBlank (`hblank_ly_scx_timing`, `intr_2_mode0_timing_sprites`)
+- [x] Mode 3 length: 172 dots plus SCX's fine scroll, sprites and the window, moving the start
+      of HBlank (`hblank_ly_scx_timing`, `intr_2_mode0_timing_sprites`; LY now reads the next
+      line 4 dots early. `acceptance/ppu`: 7/12; Mooneye overall 91/100 here)
 - [ ] OAM and VRAM closed to the CPU while the PPU reads them, in modes 2 and 3
       (`intr_2_oam_ok_timing`)
 - [ ] Switching the LCD on, and line 144: the first line's quirks (`lcdon_timing`,
