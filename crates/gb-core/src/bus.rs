@@ -310,21 +310,38 @@ impl Bus {
         }
     }
 
-    /// A read by the CPU: like [`read`](Self::read), except that OAM reads
-    /// $FF while OAM DMA has it.
+    /// Whether something else has `addr` so the CPU can't reach it: OAM
+    /// while OAM DMA copies or the PPU scans and draws (modes 2 and 3), VRAM
+    /// and the Color's palette data while the PPU draws (mode 3).
+    /// https://gbdev.io/pandocs/Rendering.html#ppu-modes
     /// TODO(accuracy): during OAM DMA the DMG's CPU can't use the bus the copy
     /// reads from either (cartridge and WRAM, or VRAM): it gets the byte being
     /// copied. Code waiting for DMA runs from HRAM, so games don't notice.
+    fn cpu_locked_out(&self, addr: u16) -> bool {
+        match addr {
+            0x8000..=0x9FFF => self.ppu.vram_busy(),
+            0xFE00..=0xFEFF => self.oam_dma.active || self.ppu.oam_busy(),
+            0xFF69 | 0xFF6B => self.cgb() && self.ppu.vram_busy(),
+            _ => false,
+        }
+    }
+
+    /// A read by the CPU: like [`read`](Self::read), but memory the CPU is
+    /// locked out of reads $FF.
     pub fn cpu_read(&self, addr: u16) -> u8 {
-        if self.oam_dma.active && (0xFE00..=0xFEFF).contains(&addr) {
+        if self.cpu_locked_out(addr) {
             return 0xFF;
         }
         self.read(addr)
     }
 
-    /// A write by the CPU. See [`cpu_read`](Self::cpu_read).
+    /// A write by the CPU: lost where it's locked out (though a palette
+    /// write still moves the palette index on).
     pub fn cpu_write(&mut self, addr: u16, val: u8) {
-        if self.oam_dma.active && (0xFE00..=0xFEFF).contains(&addr) {
+        if self.cpu_locked_out(addr) {
+            if matches!(addr, 0xFF69 | 0xFF6B) {
+                self.ppu.lost_palette_write(addr);
+            }
             return;
         }
         self.write(addr, val);
@@ -535,6 +552,7 @@ mod tests {
     #[test]
     fn oam_dma_takes_160_m_cycles_and_holds_oam_meanwhile() {
         let mut b = bus();
+        b.write(0xFF40, 0x00); // LCD off: only the copy holds OAM
         for i in 0..0xA0u16 {
             b.write(0xC100 + i, 0x10 + i as u8);
         }
@@ -558,6 +576,7 @@ mod tests {
     #[test]
     fn restarting_oam_dma_keeps_oam_held_until_the_new_copy_starts() {
         let mut b = bus();
+        b.write(0xFF40, 0x00); // LCD off: only the copy holds OAM
         b.write(0xC200, 0x77);
         b.cpu_write(0xFF46, 0xC1);
         b.tick(4 * 100);
@@ -567,6 +586,56 @@ mod tests {
         assert_eq!(b.read(0xFF46), 0xC2);
         b.tick(4 * 160);
         assert_eq!(b.cpu_read(0xFE00), 0x77, "the new copy, from the start");
+    }
+
+    /// What the CPU gets reading VRAM and OAM, both holding $42, `dots` into
+    /// line 0 of a fresh frame.
+    fn cpu_sees(b: &mut Bus, dots: u32) -> (u8, u8) {
+        b.write(0xFF40, 0x00);
+        b.write(0x8000, 0x42);
+        b.write(0xFE00, 0x42);
+        b.write(0xFF40, 0x91); // back on: line 0 starts over
+        b.tick(dots);
+        (b.cpu_read(0x8000), b.cpu_read(0xFE00))
+    }
+
+    #[test]
+    fn the_cpu_is_locked_out_of_oam_in_modes_2_and_3_and_vram_in_mode_3() {
+        let mut b = bus();
+        assert_eq!(cpu_sees(&mut b, 40), (0x42, 0xFF), "mode 2: OAM busy");
+        assert_eq!(cpu_sees(&mut b, 100), (0xFF, 0xFF), "mode 3: both busy");
+        assert_eq!(cpu_sees(&mut b, 300), (0x42, 0x42), "HBlank: free");
+        assert_eq!(cpu_sees(&mut b, 456 * 145), (0x42, 0x42), "VBlank: free");
+        // Locked out, writes are lost; the PPU's own copies aren't affected.
+        cpu_sees(&mut b, 100);
+        b.cpu_write(0x8000, 0x99);
+        b.cpu_write(0xFE00, 0x99);
+        assert_eq!((b.read(0x8000), b.read(0xFE00)), (0x42, 0x42));
+        // With the LCD off, all of it is the CPU's.
+        b.write(0xFF40, 0x00);
+        b.cpu_write(0x8000, 0x99);
+        assert_eq!(b.cpu_read(0x8000), 0x99);
+    }
+
+    #[test]
+    fn mode_3_lasts_longer_with_scroll_and_so_does_the_lock() {
+        let mut b = bus();
+        b.ppu.scx = 7;
+        assert_eq!(cpu_sees(&mut b, 252 + 6).0, 0xFF, "still drawing");
+        assert_eq!(cpu_sees(&mut b, 252 + 7).0, 0x42);
+    }
+
+    #[test]
+    fn color_palette_writes_in_mode_3_are_lost_but_move_the_index_on() {
+        let mut b = cgb_bus();
+        cpu_sees(&mut b, 100); // mode 3
+        b.cpu_write(0xFF68, 0x80); // BCPS: byte 0, auto-increment
+        b.cpu_write(0xFF69, 0x12);
+        assert_eq!(b.cpu_read(0xFF68), 0xC1, "the index moved on");
+        assert_eq!(b.cpu_read(0xFF69), 0xFF, "data unreadable in mode 3");
+        b.tick(300 - 100); // HBlank
+        b.cpu_write(0xFF68, 0x80);
+        assert_eq!(b.cpu_read(0xFF69), 0xFF, "the write was lost: still white");
     }
 
     #[test]

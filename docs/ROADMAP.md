@@ -142,8 +142,9 @@ this is where the hardware gets interesting.
 - [x] Mode 3 length: 172 dots plus SCX's fine scroll, sprites and the window, moving the start
       of HBlank (`hblank_ly_scx_timing`, `intr_2_mode0_timing_sprites`; LY now reads the next
       line 4 dots early. `acceptance/ppu`: 7/12; Mooneye overall 91/100 here)
-- [ ] OAM and VRAM closed to the CPU while the PPU reads them, in modes 2 and 3
-      (`intr_2_oam_ok_timing`)
+- [x] OAM and VRAM closed to the CPU while the PPU reads them, in modes 2 and 3, and the
+      Color's palette data in mode 3 (`intr_2_oam_ok_timing`. `acceptance/ppu`: 8/12; Mooneye
+      overall 92/100 here; Tobu Tobu Girl, its Color edition and Link Pong draw the same)
 - [ ] Switching the LCD on, and line 144: the first line's quirks (`lcdon_timing`,
       `lcdon_write_timing`), LY == LYC as the LCD goes off and on (`stat_lyc_onoff`), the mode 2
       interrupt at line 144 (`vblank_stat_intr`)

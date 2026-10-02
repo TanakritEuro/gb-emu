@@ -41,6 +41,14 @@ fn rgba(color: u16) -> [u8; 4] {
 }
 
 /// The RGB555 color `rgba` made a pixel (the top 5 bits of each channel).
+/// Moves a palette index (BCPS/OCPS) on to the next byte if its bit 7 asks
+/// for that, wrapping within the 64 bytes.
+fn step_palette_index(index: &mut u8) {
+    if *index & 0x80 != 0 {
+        *index = 0x80 | ((*index + 1) & 0x3F);
+    }
+}
+
 fn rgb555(px: &[u8; 4]) -> u16 {
     u16::from(px[0] >> 3) | (u16::from(px[1] >> 3) << 5) | (u16::from(px[2] >> 3) << 10)
 }
@@ -262,8 +270,8 @@ impl Ppu {
 
     /// The Color's palette registers, $FF68-$FF6B, and OPRI, $FF6C. Unused
     /// bit 6 of the index registers reads 1, as do OPRI's bits 1-7. Reading the data never moves the index.
-    /// TODO(accuracy): during mode 3 palette memory is busy: reads give $FF
-    /// and writes are ignored (the index still moves on).
+    /// During mode 3 the CPU can't reach palette memory: see the bus's
+    /// `cpu_read`/`cpu_write`.
     pub fn read_color_reg(&self, addr: u16) -> u8 {
         match addr {
             0xFF6C => 0xFE | self.opri,
@@ -278,9 +286,7 @@ impl Ppu {
         /// Writes the byte `index` picks, then moves it on if it auto-increments.
         fn write(palettes: &mut [u8; 64], index: &mut u8, val: u8) {
             palettes[usize::from(*index & 0x3F)] = val;
-            if *index & 0x80 != 0 {
-                *index = 0x80 | ((*index + 1) & 0x3F);
-            }
+            step_palette_index(index);
         }
         match addr {
             0xFF6C => self.opri = val & 1,
@@ -289,6 +295,27 @@ impl Ppu {
             0xFF6A => self.ocps = val & 0xBF,
             _ => write(&mut self.obj_palettes, &mut self.ocps, val),
         }
+    }
+
+    /// A write to BCPD/OCPD ($FF69/$FF6B) that mode 3 kept out of palette
+    /// memory: the byte is lost, but the index still moves on.
+    pub fn lost_palette_write(&mut self, addr: u16) {
+        step_palette_index(if addr == 0xFF69 {
+            &mut self.bcps
+        } else {
+            &mut self.ocps
+        });
+    }
+
+    /// Modes 2 and 3: the PPU is reading OAM (the OAM scan, then the sprites
+    /// it draws), so the CPU can't.
+    pub fn oam_busy(&self) -> bool {
+        self.lcd_on() && self.ly < VBLANK_LINE && self.dot < self.hblank_dot
+    }
+
+    /// Mode 3: the PPU is reading VRAM (and on the Color, palette memory).
+    pub fn vram_busy(&self) -> bool {
+        self.oam_busy() && self.dot >= MODE3_DOT
     }
 
     /// How many HBlanks began since the last call.
