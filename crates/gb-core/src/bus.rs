@@ -397,7 +397,7 @@ impl Bus {
         match addr {
             0x8000..=0x9FFF => self.ppu.vram_locked(write),
             0xFE00..=0xFEFF => self.oam_dma.active || self.ppu.oam_locked(write),
-            0xFF69 | 0xFF6B => self.cgb() && self.ppu.vram_locked(write),
+            0xFF69 | 0xFF6B => self.cgb() && self.ppu.palettes_locked(write),
             _ => false,
         }
     }
@@ -451,9 +451,17 @@ impl Bus {
             0xFF43 if dmg || double => Early(2), // SCX
             0xFF45 if !dmg && !double => Late,   // LYC
             // BGP, OBP0, OBP1: the original's are read by the LCD directly,
-            // and for a dot hold the old and new values ORed together.
+            // and for a dot hold the old and new values ORed together;
+            // except with the line's first pixel next out, which gets the
+            // new value (AGE's m3-bg-bgp; as LCDC's pixel bits, above).
             0xFF47..=0xFF49 if dmg => Staged {
-                first: |_, old, new| old | new,
+                first: |bus, old, new| {
+                    if bus.ppu.first_pixel_next() {
+                        new
+                    } else {
+                        old | new
+                    }
+                },
                 early: 2,
                 then: 1,
             },
@@ -1104,6 +1112,21 @@ mod tests {
         }
         assert!(b.ppu.fetching_sprite());
         assert_eq!(first(&b, 0x93, 0x90), 0x91);
+    }
+
+    #[test]
+    fn the_originals_palette_writes_land_whole_at_the_first_pixel() {
+        let WriteTiming::Staged { first, .. } = bus().write_timing(0xFF47) else {
+            panic!("BGP is written in two stages");
+        };
+        let mut b = bus();
+        assert_eq!(first(&b, 0xE4, 0x1B), 0xFF, "old OR new for a dot");
+        let mut dots = 0;
+        while !b.ppu.first_pixel_next() && dots < 456 {
+            b.tick(1);
+            dots += 1;
+        }
+        assert_eq!(first(&b, 0xE4, 0x1B), 0x1B, "the new value at once");
     }
 
     #[test]

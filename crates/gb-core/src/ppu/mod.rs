@@ -426,7 +426,8 @@ impl Ppu {
     /// than a write lands, so reads meet the hold 4 dots sooner. They find
     /// OAM taken from 4 dots before a line begins (as LY moves on) through
     /// mode 3; writes find it taken in mode 2 except its last 4 dots, and in
-    /// mode 3. The first line after the LCD comes on has no OAM scan.
+    /// mode 3 (and on the Color, from 4 dots before the line too, as in
+    /// SameBoy). The first line after the LCD comes on has no OAM scan.
     /// (Mooneye's lcdon_timing and lcdon_write_timing, and
     /// intr_2_oam_ok_timing for where the hold ends.)
     pub fn oam_locked(&self, write: bool) -> bool {
@@ -435,8 +436,11 @@ impl Ppu {
         }
         let next_scans = self.ly + 1 < VBLANK_LINE || self.ly == LINES_PER_FRAME - 1;
         if self.ly >= VBLANK_LINE || self.dot >= self.hblank_dot {
-            // Reads meet the next line's OAM scan before it starts.
-            return !write && next_scans && self.dot >= DOTS_PER_LINE - 4;
+            // Reads meet the next line's OAM scan before it starts, and on
+            // the Color writes do too (AGE's oam-write-cgbBCE).
+            return (!write || self.model == Model::Cgb)
+                && next_scans
+                && self.dot >= DOTS_PER_LINE - 4;
         }
         if self.first_line {
             self.dot >= MODE3_DOT
@@ -446,14 +450,31 @@ impl Ppu {
     }
 
     /// Whether the PPU holds VRAM (and on the Color, palette memory): in
-    /// mode 3, where it fetches tiles. Reads find it taken from 4 dots before
-    /// mode 3, except on the first line after the LCD comes on. See
+    /// mode 3, where it fetches tiles. On the original, reads find it taken
+    /// from 4 dots before mode 3, except on the first line after the LCD
+    /// comes on; on the Color not until mode 3 (AGE's vram-read, and
+    /// SameBoy), and on that first line not until 5 dots into it. See
     /// [`Ppu::oam_locked`].
     pub fn vram_locked(&self, write: bool) -> bool {
-        let from = if write || self.first_line {
-            MODE3_DOT
-        } else {
-            MODE3_DOT - 4
+        self.mode3_locked(write, 5)
+    }
+
+    /// Whether the PPU holds the Color's palette memory: as VRAM, except
+    /// that on the first line after switching on it takes it 2 dots into
+    /// mode 3 (SameBoy).
+    pub fn palettes_locked(&self, write: bool) -> bool {
+        self.mode3_locked(write, 2)
+    }
+
+    /// Held in mode 3 (see [`Ppu::vram_locked`]); on the Color's first
+    /// line after switching on, from `first_line_delay` dots into it.
+    fn mode3_locked(&self, write: bool, first_line_delay: u32) -> bool {
+        let from = match (self.model, self.first_line) {
+            (Model::Cgb, true) => MODE3_DOT + first_line_delay,
+            (Model::Cgb, false) => MODE3_DOT,
+            (Model::Dmg, true) => MODE3_DOT,
+            (Model::Dmg, false) if write => MODE3_DOT,
+            (Model::Dmg, false) => MODE3_DOT - 4,
         };
         self.lcd_on() && self.ly < VBLANK_LINE && (from..self.hblank_dot).contains(&self.dot)
     }
@@ -1151,6 +1172,45 @@ mod tests {
         assert_eq!(at(&mut p, 80), (true, true, true, true), "mode 3");
         assert_eq!(at(&mut p, 252), (false, false, false, false), "HBlank");
         assert_eq!(at(&mut p, 452), (true, false, false, false), "LY moved on");
+
+        // The Color: VRAM reads aren't held before mode 3, and OAM writes
+        // are held from 4 dots before a line too (AGE's vram-read and
+        // oam-write).
+        let mut p = Ppu::with_model(Model::Cgb);
+        p.lcdc = 0x91;
+        assert_eq!(at(&mut p, 76), (true, false, false, false), "end of mode 2");
+        assert_eq!(at(&mut p, 80), (true, true, true, true), "mode 3");
+        assert_eq!(at(&mut p, 452), (true, true, false, false), "LY moved on");
+    }
+
+    #[test]
+    fn the_colors_first_line_after_switching_on_takes_vram_late() {
+        // Mode 3 shows at dot 80, but the Color takes palette memory 2 dots
+        // later and VRAM 5 (SameBoy; AGE's vram-read-cgbBCE); the original
+        // takes VRAM at once.
+        let switched_on = |model| {
+            let mut p = Ppu::with_model(model);
+            p.write_reg(0xFF40, 0x11);
+            p.write_reg(0xFF40, 0x91);
+            while p.dot != MODE3_DOT {
+                p.tick(1);
+            }
+            p
+        };
+        let mut p = switched_on(Model::Cgb);
+        assert_eq!(p.stat & 0x03, 3);
+        assert_eq!(
+            (p.vram_locked(false), p.palettes_locked(false)),
+            (false, false)
+        );
+        p.tick(2);
+        assert_eq!(
+            (p.vram_locked(false), p.palettes_locked(true)),
+            (false, true)
+        );
+        p.tick(3);
+        assert!(p.vram_locked(false) && p.vram_locked(true));
+        assert!(switched_on(Model::Dmg).vram_locked(false));
     }
 
     #[test]

@@ -203,7 +203,7 @@ to see it land on the exact pixel.
 
 ---
 
-## Milestone 11 — LY, LYC and STAT at the edges
+## Milestone 11 — LY, LYC and STAT at the edges ✅
 
 Where a line or a frame turns over, LY, the LY == LYC flag and STAT's mode don't change all at
 once, and line 153 is odd: LY reads 153 for only a few dots, then 0 for the rest of the line.
@@ -224,12 +224,19 @@ Wilbert Pol's extended Mooneye tests (`roms/mooneye-test-suite-wilbertpol`) and 
       `gpu` tests: 54/58 (the other 4 are a later Color's); AGE `stat-mode`, `stat-int`, `halt`
       and `stat-mode-sprites` pass except their double-speed parts. Wilbert Pol 105/121 overall,
       AGE 22/55
-- [ ] OAM and VRAM access at line edges (AGE `oam-read`, `oam-write`, `vram-read`,
-      `lcd-align-ly`)
+- [x] OAM and VRAM access at line edges: on the Color, OAM writes are held from 4 dots before a
+      line and VRAM reads only from mode 3, and on the first line after switching on it takes
+      palette memory 2 dots into mode 3 and VRAM 5; the original's palette writes land whole when
+      the line's first pixel is next out. AGE `oam-read`, `oam-write`, `vram-read` pass in
+      single speed, and all 8 of its screenshot tests (`m3-bg-*`) match. Left: `oam-write-dmgC`'s
+      row its author marks as depending on when the LCD was last switched off
+      (`lcd-align-ly` needs double speed)
 
 **Done when:** Wilbert Pol's `acceptance/gpu` tests pass, and AGE's tests for the original
 (DMG C) and the Color (CPU CGB B/C) pass, except where they need a later Color or double speed.
-(Before: Wilbert Pol 91/121 overall, AGE 9/55.)
+(Before: Wilbert Pol 91/121 overall, AGE 9/55. After: 105/121, the rest being a later Color's,
+other consoles' boot states or tools; AGE 24/55 by register plus its 8 screenshot tests, the
+rest double speed, CPU CGB E, or the one row above.)
 
 ---
 
