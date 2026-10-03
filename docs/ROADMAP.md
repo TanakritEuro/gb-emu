@@ -216,8 +216,14 @@ Wilbert Pol's extended Mooneye tests (`roms/mooneye-test-suite-wilbertpol`) and 
       register verdicts (`LD B,B`, and the old Mooneye exit `$ED`). Wilbert Pol's `ly_lyc_*` and `ly_new_frame`: 13/16
       (`ly_lyc_0-C`, `ly_lyc_153-C` and `ly_new_frame-C` were measured on a later Color, which
       reads 153 longer: AGE's `ly` shows CPU CGB B and C read it like the original)
-- [ ] STAT at line edges: its mode bits and interrupt sources as a line starts and ends, and
-      what writing STAT does to IF (`stat_write_if`, AGE `stat-mode`, `stat-int`, `halt`)
+- [x] STAT at line edges: the mode 2 source is a one-dot pulse as mode 2 begins (so writing STAT
+      during mode 2 fires nothing), line 144's comes a dot before VBlank on the original, the
+      first line after switching on starts with a mode 0 that isn't an HBlank and a mode 3 2 dots
+      longer, VBlank ends with a dot of mode 0 on CPU CGB C too, WY only matches with the window
+      on, and HALT looks for an interrupt an M-cycle after its own (the HALT bug). Wilbert Pol's
+      `gpu` tests: 54/58 (the other 4 are a later Color's); AGE `stat-mode`, `stat-int`, `halt`
+      and `stat-mode-sprites` pass except their double-speed parts. Wilbert Pol 105/121 overall,
+      AGE 22/55
 - [ ] OAM and VRAM access at line edges (AGE `oam-read`, `oam-write`, `vram-read`,
       `lcd-align-ly`)
 

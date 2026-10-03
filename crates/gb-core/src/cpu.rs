@@ -643,15 +643,27 @@ impl Cpu {
 
     /// One M-cycle asleep in HALT. Returns whether an interrupt is pending,
     /// waking the CPU: this M-cycle then serves as the next one's opcode
-    /// fetch. A halted CPU looks for interrupts at a different point than a
-    /// running one, which samples as the fetch ends: the original looks 2
-    /// dots into each halted M-cycle (one arriving later waits for the
-    /// next), the Color as each begins. Neither looks in the first, right
-    /// after HALT checked. As in SameBoy (Core/sm83_cpu.c, GB_cpu_run).
+    /// fetch. The first is HALT's own check, as it ends: with one pending
+    /// and IME off, that's the HALT bug (the CPU never really slept); with
+    /// IME on (EI ; HALT), it's served, returning to the HALT. After that a
+    /// halted CPU looks for interrupts at a different point than a running
+    /// one, which samples as the fetch ends: the original looks 2 dots into
+    /// each halted M-cycle (one arriving later waits for the next), the
+    /// Color as each begins. As in SameBoy (Core/sm83_cpu.c, GB_cpu_run and
+    /// its HALT, which reads once more before it looks).
     fn halted_m_cycle(&mut self, bus: &mut Bus) -> bool {
         if std::mem::take(&mut self.just_halted) {
             self.idle(bus);
-            return false;
+            if bus.pending_interrupts() == 0 {
+                return false;
+            }
+            if self.ime {
+                // EI ; HALT: served at once, returning to the HALT.
+                self.regs.pc = self.regs.pc.wrapping_sub(1);
+            } else {
+                self.halt_bug = true;
+            }
+            return true;
         }
         if bus.model == Model::Dmg {
             bus.tick(2 - std::mem::take(&mut self.ahead));
@@ -671,10 +683,10 @@ impl Cpu {
     /// it took.
     pub fn step(&mut self, bus: &mut Bus) -> Result<u32, CpuError> {
         self.ticked = 0;
-        if self.halted && bus.pending_interrupts() != 0 {
+        if self.halted && !self.just_halted && bus.pending_interrupts() != 0 {
             self.halted = false; // HALT began with one already pending
         }
-        bus.cpu_halted = self.halted;
+        bus.cpu_halted = self.halted && !self.just_halted;
 
         // M-cycle 1 fetches the opcode. Interrupts are checked as it ends:
         // if one is pending (and IME is on), the opcode is dropped and this
@@ -868,19 +880,16 @@ impl Cpu {
             },
 
             // Block 1: LD r[y], r[z]. The slot for LD (HL),(HL) is HALT.
-            // HALT sleeps until an interrupt is pending (`step` wakes it). With
-            // IME off and one already pending, it doesn't sleep and instead
-            // triggers the HALT bug. https://gbdev.io/pandocs/halt.html
+            // HALT sleeps until an interrupt is pending (`step` wakes it). It
+            // looks an M-cycle later (see `halted_m_cycle`): with IME off and
+            // one pending by then, it doesn't sleep and instead triggers the
+            // HALT bug (AGE's halt-m0-interrupt). https://gbdev.io/pandocs/halt.html
             // TODO(accuracy): HALT ; HALT under the bug just retriggers it here.
             // Check against nitro2k01's double-halt-cancel test
             // (github.com/nitro2k01/little-things-gb, not in the c-sp bundle).
             1 if op.y == 6 && op.z == 6 => {
-                if !self.ime && bus.pending_interrupts() != 0 {
-                    self.halt_bug = true;
-                } else {
-                    self.halted = true;
-                    self.just_halted = true;
-                }
+                self.halted = true;
+                self.just_halted = true;
                 Ok(4)
             }
             1 => {
@@ -2373,6 +2382,36 @@ mod tests {
     }
 
     #[test]
+    fn halt_looks_for_a_pending_interrupt_an_m_cycle_after_its_own() {
+        // HBlank's interrupt comes at dot 253 of line 0, and M-cycles end at
+        // dots 7, 11, ... (the PPU starts 3 dots in). NOPs, then HALT ; INC A
+        // with IME off: HALT looks as the M-cycle after it ends. If the
+        // interrupt has come by then, that's the HALT bug and INC A runs
+        // twice; if not, the CPU sleeps, wakes, and runs it once (AGE's
+        // halt-m0-interrupt).
+        let inc_a_runs = |nops: usize| {
+            let cart = Cartridge::from_rom(rom_with_program(&[])).unwrap();
+            let mut bus = Bus::new(cart, Model::Dmg);
+            let program = [vec![0x00; nops], vec![0x76, 0x3C, 0x18, 0xFE]].concat();
+            for (i, &b) in program.iter().enumerate() {
+                bus.write(0xC000 + i as u16, b);
+            }
+            bus.write(0xFF41, 0x08);
+            bus.ie_reg = interrupt::STAT;
+            bus.if_reg = 0xE0;
+            let mut cpu = Cpu::new();
+            cpu.regs.pc = 0xC000;
+            cpu.regs.a = 0;
+            while cpu.regs.pc < 0xC000 + nops as u16 + 2 {
+                cpu.step(&mut bus).unwrap();
+            }
+            cpu.regs.a
+        };
+        assert_eq!(inc_a_runs(61), 2, "HALT ends at 251, looks at 255: the bug");
+        assert_eq!(inc_a_runs(60), 1, "HALT ends at 247, looks at 251: sleeps");
+    }
+
+    #[test]
     fn the_originals_palette_writes_show_old_or_new_for_a_pixel() {
         // LD A,$08 ; LDH ($47),A in mid-line: BGP's color 1 goes from shade 1
         // ($04) to shade 2 ($08). For a dot it holds $04 | $08: shade 3.
@@ -2480,9 +2519,11 @@ mod tests {
         let (mut cpu, mut bus) = setup_irq(&[0x76, 0x3C, 0x00], interrupt::TIMER, interrupt::TIMER);
         cpu.ime = false;
         cpu.regs.a = 0;
-        cpu.step(&mut bus).unwrap();
-        assert!(!cpu.halted, "HALT doesn't sleep");
-        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.step(&mut bus), Ok(4));
+        // HALT looks for the interrupt in the M-cycle after it, which then
+        // fetches INC A: no time asleep.
+        assert_eq!(cpu.step(&mut bus), Ok(4), "HALT doesn't sleep");
+        assert_eq!(cpu.regs.a, 1);
         assert_eq!(cpu.regs.pc, 0xC001, "PC didn't advance");
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.regs.a, 2, "INC A ran twice");

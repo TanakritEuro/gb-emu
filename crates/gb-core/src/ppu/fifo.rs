@@ -307,9 +307,11 @@ impl Ppu {
     /// 8 junk pixels), the sprites found by the OAM scan line up by X, and
     /// drawing starts 5 dots later.
     pub(super) fn start_mode3(&mut self) {
-        // The window's "Y condition": once WY == LY at the start of a line,
-        // it holds for the rest of the frame. https://gbdev.io/pandocs/Window.html
-        if self.ly == self.wy {
+        // The window's "Y condition": once WY == LY at the start of a line
+        // with the window on, it holds for the rest of the frame (as SameBoy
+        // has it; the hidden window's blank pixel depends on it: AGE's
+        // stat-mode-sprites). https://gbdev.io/pandocs/Window.html
+        if self.ly == self.wy && self.lcdc & 0x20 != 0 {
             self.wy_triggered = true;
         }
         let (sprites, count) = self.scan_oam();
@@ -329,7 +331,7 @@ impl Ppu {
         m.sprite_count = count;
         m.next = 0;
         m.step = Step::Dot;
-        m.wait = 5;
+        m.wait = if self.first_line { 7 } else { 5 };
     }
 
     /// The OAM scan: in OAM order, the first 10 sprites whose rows cover LY

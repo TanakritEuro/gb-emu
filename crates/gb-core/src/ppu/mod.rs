@@ -672,8 +672,7 @@ impl Ppu {
     /// ly_lyc_write-C). Line 153 compares as LY reads it: 153 briefly, then
     /// 0 (see [`LYC_153_UNTIL`]).
     fn update_stat_bits(&mut self) {
-        let vblank_over =
-            self.ly == LAST_LINE && self.dot == DOTS_PER_LINE - 1 && self.model == Model::Dmg;
+        let vblank_over = self.ly == LAST_LINE && self.dot == DOTS_PER_LINE - 1;
         let mode = if !self.lcd_on() || vblank_over {
             0
         } else if self.ly >= VBLANK_LINE {
@@ -716,14 +715,18 @@ impl Ppu {
     /// interrupt fires only on that line's rising edge. So a source turning
     /// on while another already holds the line high fires nothing ("STAT
     /// blocking"). https://gbdev.io/pandocs/Interrupt_Sources.html
-    /// The mode 2 source also fires once for line 144, though it has no OAM
-    /// scan: with VBlank on the original, an M-cycle before it on the Color
-    /// (Mooneye's vblank_stat_intr-GS and -C).
     ///
-    /// The sources don't quite follow STAT's mode bits: the mode 2 source
-    /// comes on a dot before STAT shows mode 2 (except into line 0), and the
-    /// HBlank source a dot after STAT shows mode 0, as in SameBoy's PPU
-    /// (Core/display.c). Mealybug Tearoom's pictures depend on it (its
+    /// The sources don't quite follow STAT's mode bits, as in SameBoy's PPU
+    /// (Core/display.c). HBlank and VBlank hold the line for as long as they
+    /// last, but the mode 2 source only pulses, for one dot as mode 2 is
+    /// about to begin: a dot before STAT shows it (except into line 0). So
+    /// enabling it, or the original's STAT write bug, during mode 2 fires
+    /// nothing (Wilbert Pol's stat_write_if). It also pulses once for line
+    /// 144, though that has no OAM scan: a dot before VBlank on the original
+    /// (Wilbert Pol's intr_2_timing), an M-cycle before on the Color
+    /// (Mooneye's vblank_stat_intr-C). The HBlank source comes on a dot
+    /// after STAT shows mode 0, and not for the mode 0 that the first line
+    /// after switching on starts with (Wilbert Pol's intr_0_timing). Mealybug Tearoom's pictures depend on it (its
     /// tests sync to lines with the mode 2 interrupt while running), and so
     /// does Mooneye's timing with the CPU halted (see `Cpu::halted_m_cycle`).
     fn check_stat_line(&mut self) {
@@ -731,18 +734,21 @@ impl Ppu {
             return;
         }
         let mode = self.stat & 0x03;
-        let line_144 = match self.model {
-            Model::Dmg => self.ly == VBLANK_LINE && self.dot == 0,
-            Model::Cgb => self.ly == VBLANK_LINE - 1 && self.dot == DOTS_PER_LINE - 4,
+        let mode2_pulse = match (self.ly, self.dot) {
+            (0, 0) => mode == 2, // not on the first line after switching on
+            (143, 452) => self.model == Model::Cgb,
+            (143, 455) => self.model == Model::Dmg,
+            (ly, 455) => ly < VBLANK_LINE - 1,
+            _ => false,
         };
-        let early_mode2 = self.ly < VBLANK_LINE - 1 && self.dot == DOTS_PER_LINE - 1;
         let line = (self.stat & 0x40 != 0 && self.stat & 0x04 != 0)
-            || (self.stat & 0x20 != 0 && (mode == 2 || line_144 || early_mode2))
+            || (self.stat & 0x20 != 0 && mode2_pulse)
             || (self.stat & 0x10 != 0 && mode == 1)
             || (self.stat & 0x08 != 0
                 && mode == 0
                 && self.ly < VBLANK_LINE
-                && self.dot != self.hblank_dot);
+                && self.dot != self.hblank_dot
+                && !(self.first_line && self.dot < MODE3_DOT));
         if line && !self.stat_line {
             self.pending_irq |= interrupt::STAT;
         }
@@ -1018,14 +1024,60 @@ mod tests {
     }
 
     #[test]
-    fn the_mode_2_source_fires_with_vblank_on_the_original_only() {
+    fn the_mode_2_source_fires_for_line_144_before_vblank() {
+        // A dot before VBlank on the original, as for every line's mode 2;
+        // an M-cycle before on the Color.
         let mut p = stat_ppu(0x20);
-        p.tick(456 * 144 - 100 - 1); // a dot before line 144
-        assert_eq!(p.tick(1), interrupt::VBLANK | interrupt::STAT);
+        p.tick(456 * 144 - 100 - 2);
+        assert_eq!(p.tick(1), interrupt::STAT, "line 143, dot 455");
+        assert_eq!(p.tick(1), interrupt::VBLANK);
         let mut p = Ppu::with_model(Model::Cgb);
         p.write_reg(0xFF41, 0x20);
-        p.tick(456 * 144 - 1);
-        assert_eq!(p.tick(1), interrupt::VBLANK);
+        p.tick(456 * 144 - 5);
+        assert_eq!(p.tick(1), interrupt::STAT, "line 143, dot 452");
+        assert_eq!(p.tick(4), interrupt::VBLANK);
+    }
+
+    #[test]
+    fn the_mode_2_source_is_a_pulse_as_mode_2_begins() {
+        // Enabling it during mode 2 fires nothing (the line was low again),
+        // and nor does the original's STAT write bug then (Wilbert Pol's
+        // stat_write_if). HBlank's source is a level: enabling it during
+        // HBlank fires.
+        let mut p = Ppu::new();
+        p.tick(456 + 20); // line 1's mode 2
+        p.write_reg(0xFF41, 0x20);
+        assert_eq!(p.tick(1) & interrupt::STAT, 0);
+        p.write_reg(0xFF41, 0x38); // all three mode sources, as the bug does
+        assert_eq!(p.tick(1) & interrupt::STAT, 0);
+        p.tick(300); // HBlank
+        p.write_reg(0xFF41, 0x00);
+        p.write_reg(0xFF41, 0x08);
+        assert_eq!(p.tick(1) & interrupt::STAT, interrupt::STAT);
+    }
+
+    #[test]
+    fn switching_on_starts_with_a_mode_0_that_isnt_an_hblank() {
+        // The first line after switching on shows mode 0 until mode 3, but
+        // the HBlank source doesn't count it (Wilbert Pol's intr_0_timing);
+        // and its mode 3 lasts 2 dots longer (AGE's stat-mode).
+        let mut p = Ppu::new();
+        p.write_reg(0xFF40, 0x11);
+        p.write_reg(0xFF41, 0x08);
+        p.write_reg(0xFF40, 0x91);
+        assert_eq!(p.stat & 0x03, 0);
+        assert_eq!(count_stat(&mut p, 60), 0);
+        let mode3_end = |p: &mut Ppu| {
+            while p.stat & 0x03 != 3 {
+                p.tick(1);
+            }
+            while p.stat & 0x03 == 3 {
+                p.tick(1);
+            }
+            p.dot
+        };
+        let first = mode3_end(&mut p);
+        assert_eq!(first, mode3_end(&mut p) + 2, "against the next line");
     }
 
     #[test]
@@ -1603,6 +1655,19 @@ mod tests {
     }
 
     #[test]
+    fn wy_only_matches_while_the_window_is_on() {
+        // WY = 0 with the window off on line 0: no match, so turning the
+        // window on for line 1 shows nothing this frame.
+        let mut p = window_ppu(7, 0);
+        p.lcdc &= !0x20;
+        lines(&mut p, 1);
+        p.lcdc |= 0x20;
+        lines(&mut p, 1);
+        assert_eq!(shade_at(&p, 0, 1), 0);
+        assert!(!p.wy_triggered);
+    }
+
+    #[test]
     fn window_restarts_from_row_0_each_frame() {
         let mut p = window_ppu(7, 0);
         lines(&mut p, 154 + 9); // a whole frame, then lines 0-8 of the next
@@ -2017,8 +2082,10 @@ mod tests {
     }
 
     /// `window_ppu`, but with the window off and the background color 1.
+    /// If WY is 0, the window was on when line 0 started, so WY has matched.
     fn hidden_window_ppu(wx: u8, wy: u8) -> Ppu {
         let mut p = window_ppu(wx, wy);
+        p.wy_triggered = wy == 0;
         p.lcdc &= !0x20;
         for col in 0..32 {
             p.write_vram(0x9800 + col, 1);
@@ -2069,6 +2136,7 @@ mod tests {
         // dot 108. The original's window logic sees LCDC a dot late.
         let window_from = |on_after_dot: u32, wx_after_dot: Option<u32>| {
             let mut p = window_ppu(7 + 16, 0);
+            p.wy_triggered = true; // WY matched earlier, with the window on
             p.lcdc &= !0x20;
             for dot in 0..DOTS_PER_LINE {
                 if dot == on_after_dot {
@@ -2155,15 +2223,16 @@ mod tests {
     }
 
     #[test]
-    fn the_original_shows_mode_0_for_a_dot_before_line_0() {
-        // VBlank's mode 1 ends a dot early on the original, which shows
-        // mode 0 for it; the Color goes straight on to line 0's mode 2.
-        for (mut p, mode) in [(Ppu::new(), 0), (Ppu::with_model(Model::Cgb), 1)] {
+    fn vblank_ends_with_a_dot_of_mode_0() {
+        // VBlank's mode 1 ends a dot early, showing mode 0 for it, on the
+        // original and CPU CGB C (AGE's stat-mode; later Colors go straight
+        // on to line 0's mode 2).
+        for mut p in [Ppu::new(), Ppu::with_model(Model::Cgb)] {
             p.lcdc = 0x91;
             run_to(&mut p, 153, 454);
             assert_eq!(p.stat & 0x03, 1);
             p.tick(1);
-            assert_eq!(p.stat & 0x03, mode, "{:?}", p.model);
+            assert_eq!(p.stat & 0x03, 0, "{:?}", p.model);
             p.tick(1);
             assert_eq!((p.ly, p.stat & 0x03), (0, 2));
         }
