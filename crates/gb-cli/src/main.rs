@@ -3,12 +3,17 @@
 //! Blargg's test ROMs print their results over the serial port and end with
 //! "Passed" or "Failed"; Mooneye's send a fixed byte sequence (see `verdict`);
 //! Blargg's later ones (dmg_sound, ...) leave a result in cartridge RAM (see `ram_verdict`).
+//! Others leave it in the CPU's registers, the same Fibonacci numbers for a
+//! pass: the AGE tests and SameSuite at an `LD B,B`, and the 2016 Mooneye
+//! tests (Wilbert Pol's extended suite) at the unused opcode $ED.
 //! This runs frames until one of those shows up.
 //!
 //! Exit codes: 0 passed (or ran to the frame limit with no verdict expected),
-//! 1 failed, 2 emulator or usage error, 3 frame limit hit with output but no verdict.
+//! 1 failed, 2 emulator or usage error, 3 frame limit hit with output (or an
+//! `LD B,B` without the pass registers) but no verdict.
 
-use gb_core::{GameBoy, Model, CYCLES_PER_FRAME, SCREEN_HEIGHT, SCREEN_WIDTH};
+use gb_core::cpu::CpuError;
+use gb_core::{FrameEnd, GameBoy, Model, CYCLES_PER_FRAME, SCREEN_HEIGHT, SCREEN_WIDTH};
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::process::ExitCode;
@@ -129,13 +134,17 @@ fn main() -> ExitCode {
     };
     let mut serial = String::new();
     gb.set_sample_rate(WAV_RATE);
+    gb.set_ld_b_b_breakpoint(true);
+    // An LD B,B went by without the pass registers: a test that's done (and
+    // failed), or just an LD B,B (Blargg's cpu_instrs runs them as tests).
+    let mut ld_b_b_seen = false;
     let mut audio: Vec<f32> = Vec::new();
 
     let verdict = 'run: {
         for frame in 1..=args.frames {
             let result = match trace.as_mut() {
-                Some(t) => run_frame_traced(&mut gb, t),
-                None => gb.run_frame().map(|_| ()), // no breakpoints set here
+                Some(t) => run_frame_traced(&mut gb, t).map(|()| false),
+                None => run_frame_checked(&mut gb, &mut ld_b_b_seen),
             };
 
             let sound = gb.take_audio();
@@ -150,9 +159,24 @@ fn main() -> ExitCode {
                 serial.push_str(&new_output);
             }
 
-            if let Err(e) = result {
-                eprintln!("\n✘ stopped in frame {frame}: {e}");
-                break 'run 2;
+            match result {
+                Ok(true) => {
+                    eprintln!("\n✔ passed after {frame} frames (LD B,B with the pass registers)");
+                    break 'run 0;
+                }
+                Ok(false) => {}
+                Err(CpuError::Illegal { opcode: 0xED, .. }) if fibonacci(&gb) => {
+                    eprintln!("\n✔ passed after {frame} frames ($ED with the pass registers)");
+                    break 'run 0;
+                }
+                Err(CpuError::Illegal { opcode: 0xED, .. }) => {
+                    eprintln!("\n✘ failed after {frame} frames ($ED without the pass registers)");
+                    break 'run 1;
+                }
+                Err(e) => {
+                    eprintln!("\n✘ stopped in frame {frame}: {e}");
+                    break 'run 2;
+                }
             }
             let from_ram = ram_verdict(&gb);
             if let Some((_, text)) = &from_ram {
@@ -171,7 +195,7 @@ fn main() -> ExitCode {
             }
         }
         eprintln!("\nstopped after {} frames", args.frames);
-        if serial.is_empty() {
+        if serial.is_empty() && !ld_b_b_seen {
             0
         } else {
             3
@@ -286,6 +310,25 @@ fn ram_verdict(gb: &GameBoy) -> Option<(bool, String)> {
     Some((status == 0, text))
 }
 
+/// Runs a frame through, stopping at each `LD B,B` to look at the
+/// registers. True if one of them came with the pass registers.
+fn run_frame_checked(gb: &mut GameBoy, ld_b_b_seen: &mut bool) -> Result<bool, CpuError> {
+    loop {
+        match gb.run_frame()? {
+            FrameEnd::Breakpoint if fibonacci(gb) => return Ok(true),
+            FrameEnd::Breakpoint => *ld_b_b_seen = true,
+            FrameEnd::Done | FrameEnd::LinkWait => return Ok(false),
+        }
+    }
+}
+
+/// B C D E H L hold 3 5 8 13 21 34: the pass signal of tests that report
+/// in the registers.
+fn fibonacci(gb: &GameBoy) -> bool {
+    let r = &gb.cpu().regs;
+    [r.b, r.c, r.d, r.e, r.h, r.l] == [3, 5, 8, 13, 21, 34]
+}
+
 fn run_frame_traced(gb: &mut GameBoy, out: &mut impl Write) -> Result<(), gb_core::cpu::CpuError> {
     let mut elapsed = 0;
     while elapsed < CYCLES_PER_FRAME {
@@ -299,6 +342,39 @@ fn run_frame_traced(gb: &mut GameBoy, out: &mut impl Write) -> Result<(), gb_cor
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ROM that runs `code` from $0150.
+    fn rom(code: &[u8]) -> Vec<u8> {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x100..0x104].copy_from_slice(&[0x00, 0xC3, 0x50, 0x01]);
+        rom[0x150..0x150 + code.len()].copy_from_slice(code);
+        rom
+    }
+
+    /// LD B,3 LD C,5 LD D,8 LD E,13 LD H,21 LD L,34 (the pass registers).
+    const FIBONACCI: [u8; 12] = [0x06, 3, 0x0E, 5, 0x16, 8, 0x1E, 13, 0x26, 21, 0x2E, 34];
+
+    #[test]
+    fn ld_b_b_with_the_fibonacci_registers_is_a_pass() {
+        // An LD B,B before the registers are set doesn't count; the one after does.
+        let code = [&[0x40][..], &FIBONACCI, &[0x40, 0x18, 0xFE]].concat();
+        let mut gb = GameBoy::new(rom(&code)).unwrap();
+        gb.set_ld_b_b_breakpoint(true);
+        let mut seen = false;
+        assert_eq!(run_frame_checked(&mut gb, &mut seen), Ok(true));
+        assert!(seen, "the first LD B,B was noted");
+    }
+
+    #[test]
+    fn the_old_mooneye_exit_is_ed_with_the_verdict_in_the_registers() {
+        let code = [&FIBONACCI[..], &[0xED]].concat();
+        let mut gb = GameBoy::new(rom(&code)).unwrap();
+        assert!(matches!(
+            gb.run_frame(),
+            Err(CpuError::Illegal { opcode: 0xED, .. })
+        ));
+        assert!(fibonacci(&gb));
+    }
 
     #[test]
     fn verdict_understands_blargg_and_mooneye() {

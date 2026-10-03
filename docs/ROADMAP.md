@@ -203,6 +203,30 @@ to see it land on the exact pixel.
 
 ---
 
+## Milestone 11 — LY, LYC and STAT at the edges
+
+Where a line or a frame turns over, LY, the LY == LYC flag and STAT's mode don't change all at
+once, and line 153 is odd: LY reads 153 for only a few dots, then 0 for the rest of the line.
+Wilbert Pol's extended Mooneye tests (`roms/mooneye-test-suite-wilbertpol`) and the AGE tests
+(`roms/age-test-roms`) read them dot by dot.
+
+- [x] Line 153 and the new frame: LY reads 153 for only 4 dots (the end of line 152), LY == LYC
+      matches 153 then 0 through line 153, the original shows mode 0 for a dot before line 0, and
+      on the Color the LY == LYC flag holds through a line's last 4 dots. gb-cli also takes
+      register verdicts (`LD B,B`, and the old Mooneye exit `$ED`). Wilbert Pol's `ly_lyc_*` and `ly_new_frame`: 13/16
+      (`ly_lyc_0-C`, `ly_lyc_153-C` and `ly_new_frame-C` were measured on a later Color, which
+      reads 153 longer: AGE's `ly` shows CPU CGB B and C read it like the original)
+- [ ] STAT at line edges: its mode bits and interrupt sources as a line starts and ends, and
+      what writing STAT does to IF (`stat_write_if`, AGE `stat-mode`, `stat-int`, `halt`)
+- [ ] OAM and VRAM access at line edges (AGE `oam-read`, `oam-write`, `vram-read`,
+      `lcd-align-ly`)
+
+**Done when:** Wilbert Pol's `acceptance/gpu` tests pass, and AGE's tests for the original
+(DMG C) and the Color (CPU CGB B/C) pass, except where they need a later Color or double speed.
+(Before: Wilbert Pol 91/121 overall, AGE 9/55.)
+
+---
+
 ## References
 
 - [Pan Docs](https://gbdev.io/pandocs/) — the hardware reference

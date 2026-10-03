@@ -45,6 +45,9 @@ pub struct GameBoy {
     /// Addresses where [`run_frame`](Self::run_frame) stops before running
     /// the instruction there. Debugger-only: the hardware has nothing like it.
     breakpoints: BTreeSet<u16>,
+    /// Also stop before every `LD B,B` (see
+    /// [`set_ld_b_b_breakpoint`](Self::set_ld_b_b_breakpoint)).
+    ld_b_b_breakpoint: bool,
     /// The debugger stopped the CPU here (a breakpoint, or a step), so the
     /// next run starts by running this instruction instead of stopping on it.
     resume_here: bool,
@@ -117,6 +120,7 @@ impl GameBoy {
             cpu,
             bus,
             breakpoints: BTreeSet::new(),
+            ld_b_b_breakpoint: false,
             resume_here: false,
             frame_elapsed: 0,
             chosen_palettes: None,
@@ -215,10 +219,11 @@ impl GameBoy {
     /// check after the debugger stopped is the instruction it stopped on).
     fn at_breakpoint(&mut self) -> bool {
         let resuming = std::mem::take(&mut self.resume_here);
+        let pc = self.cpu.regs.pc;
         !resuming
-            && !self.breakpoints.is_empty()
             && !self.cpu.halted
-            && self.breakpoints.contains(&self.cpu.regs.pc)
+            && ((!self.breakpoints.is_empty() && self.breakpoints.contains(&pc))
+                || (self.ld_b_b_breakpoint && self.bus.read(pc) == 0x40))
     }
 
     /// Makes the next [`run_frame`](Self::run_frame) run the instruction at
@@ -271,6 +276,14 @@ impl GameBoy {
         } else {
             self.breakpoints.remove(&addr);
         }
+    }
+
+    /// Makes `LD B,B` (opcode $40, which does nothing) a breakpoint
+    /// wherever it is, as in debuggers like BGB. Test ROMs use it to say
+    /// they're done: Mooneye's and the AGE and SameSuite tests, with their
+    /// verdict in the registers.
+    pub fn set_ld_b_b_breakpoint(&mut self, on: bool) {
+        self.ld_b_b_breakpoint = on;
     }
 
     /// The breakpoints, lowest address first.

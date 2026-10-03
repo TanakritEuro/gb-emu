@@ -61,8 +61,9 @@ node scripts/build-homebrew.js                          # build homebrew/ into w
 ```
 
 gb-cli exit codes: 0 passed, 1 failed (Blargg "Failed" over serial or a failure code at $A000, or Mooneye
-fail bytes), 2 emulator/usage error
-(e.g. illegal opcode), 3 frame limit reached without a verdict.
+fail bytes, or the 2016 Mooneye exit $ED without the pass registers), 2 emulator/usage error
+(e.g. illegal opcode), 3 frame limit reached without a verdict. Tests that report in the registers
+(AGE, SameSuite at `LD B,B`; Wilbert Pol's Mooneye at $ED) pass with B C D E H L = 3 5 8 13 21 34.
 
 ## Conventions
 

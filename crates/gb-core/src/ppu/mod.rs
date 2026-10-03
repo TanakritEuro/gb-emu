@@ -64,6 +64,13 @@ const MODE3_DOT: u32 = 80;
 const HBLANK_DOT: u32 = MODE3_DOT + 172;
 const LINES_PER_FRAME: u8 = 154;
 const VBLANK_LINE: u8 = 144;
+/// The frame's last line, where LY reads 153 only briefly (see
+/// [`Ppu::ly_reg`]).
+const LAST_LINE: u8 = 153;
+/// On line 153, LY == LYC compares with 153 for its first 4 dots, with
+/// nothing for the next 4, then with 0 (into line 0).
+const LYC_153_UNTIL: u32 = 4;
+const LYC_0_FROM: u32 = 8;
 
 #[derive(Clone)]
 pub struct Ppu {
@@ -506,10 +513,16 @@ impl Ppu {
 
     /// What LY ($FF44) reads: the line, except that it moves on to the next
     /// one 4 dots before this one ends (Mooneye's hblank_ly_scx_timing times
-    /// it from the HBlank interrupt).
-    /// TODO(accuracy): on line 153, LY reads 0 from 4 dots in.
+    /// it from the HBlank interrupt). And line 153 reads 0 from its first
+    /// dot, so 153 shows only in line 152's last 4 dots: the frame turns
+    /// over a line early as far as LY goes (Wilbert Pol's ly_lyc_153 and
+    /// ly_new_frame, AGE's ly). That's the original and CPU CGB C and
+    /// earlier; later Colors read 153 for 4 dots more.
+    /// https://gbdev.io/pandocs/STAT.html#ff44--ly-lcd-y-coordinate-read-only
     fn ly_reg(&self) -> u8 {
-        if self.dot >= DOTS_PER_LINE - 4 {
+        if self.ly == LAST_LINE {
+            0
+        } else if self.dot >= DOTS_PER_LINE - 4 {
             (self.ly + 1) % LINES_PER_FRAME
         } else {
             self.ly
@@ -648,9 +661,20 @@ impl Ppu {
 
     /// Sets STAT's mode bits and LY == LYC flag. Each line is mode 2 (OAM
     /// scan), 3 (drawing, until the FIFO has put out 160 pixels), then 0 (HBlank);
-    /// lines 144-153 are mode 1 (VBlank).
+    /// lines 144-153 are mode 1 (VBlank). On the original, VBlank shows mode
+    /// 0 for its last dot (Wilbert Pol's ly_lyc_0-GS; not an HBlank for the
+    /// STAT interrupt).
+    ///
+    /// LY == LYC compares the line, except in a line's last 4 dots, where
+    /// LY already reads the next one: on the original the flag reads 0
+    /// there, and on the Color it holds what it was (a new LYC isn't
+    /// compared until the next line: Wilbert Pol's ly_lyc-C and
+    /// ly_lyc_write-C). Line 153 compares as LY reads it: 153 briefly, then
+    /// 0 (see [`LYC_153_UNTIL`]).
     fn update_stat_bits(&mut self) {
-        let mode = if !self.lcd_on() {
+        let vblank_over =
+            self.ly == LAST_LINE && self.dot == DOTS_PER_LINE - 1 && self.model == Model::Dmg;
+        let mode = if !self.lcd_on() || vblank_over {
             0
         } else if self.ly >= VBLANK_LINE {
             1
@@ -665,11 +689,21 @@ impl Ppu {
         } else {
             0
         };
-        // While the LCD is off the flag keeps its value. In a line's last 4
-        // dots, where LY already reads the next line, it reads 0.
-        let coincide = if !self.lcd_on() {
+        // While the LCD is off the flag keeps its value.
+        let compared = if self.ly != LAST_LINE {
+            (self.dot < DOTS_PER_LINE - 4).then_some(self.ly)
+        } else if self.dot < LYC_153_UNTIL {
+            Some(LAST_LINE)
+        } else if self.dot >= LYC_0_FROM {
+            Some(0)
+        } else {
+            None
+        };
+        let frozen =
+            self.model == Model::Cgb && self.ly != LAST_LINE && self.dot >= DOTS_PER_LINE - 4;
+        let coincide = if !self.lcd_on() || frozen {
             self.stat & 0x04
-        } else if self.ly == self.lyc && self.dot < DOTS_PER_LINE - 4 {
+        } else if compared == Some(self.lyc) {
             0x04
         } else {
             0
@@ -707,7 +741,8 @@ impl Ppu {
             || (self.stat & 0x10 != 0 && mode == 1)
             || (self.stat & 0x08 != 0
                 && mode == 0
-                && !(self.ly < VBLANK_LINE && self.dot == self.hblank_dot));
+                && self.ly < VBLANK_LINE
+                && self.dot != self.hblank_dot);
         if line && !self.stat_line {
             self.pending_irq |= interrupt::STAT;
         }
@@ -2073,6 +2108,87 @@ mod tests {
         assert_eq!((p.ly, p.stat & 0x03), (0, 0), "still line 0's HBlank");
         p.tick(456 * 153);
         assert_eq!((p.ly, p.read_reg(0xFF44)), (153, 0), "and from 153 to 0");
+    }
+
+    /// Runs a PPU from where it is to `dot` of line `ly`.
+    fn run_to(p: &mut Ppu, ly: u8, dot: u32) {
+        while (p.ly, p.dot) != (ly, dot) {
+            p.tick(1);
+        }
+    }
+
+    #[test]
+    fn line_153_shows_153_for_only_4_dots_on_both_consoles() {
+        // LY moves on to 153 4 dots before line 152 ends, as on every line,
+        // but reads 0 from line 153's first dot (CPU CGB C and the original;
+        // later Colors hold 153 a little longer).
+        for mut p in [Ppu::new(), Ppu::with_model(Model::Cgb)] {
+            p.lcdc = 0x91;
+            run_to(&mut p, 152, 451);
+            assert_eq!(p.read_reg(0xFF44), 152);
+            p.tick(1);
+            assert_eq!(p.read_reg(0xFF44), 153, "{:?}", p.model);
+            run_to(&mut p, 153, 0);
+            assert_eq!(p.read_reg(0xFF44), 0, "{:?}", p.model);
+            run_to(&mut p, 153, 300);
+            assert_eq!(p.read_reg(0xFF44), 0);
+        }
+    }
+
+    #[test]
+    fn on_line_153_lyc_matches_153_for_4_dots_then_0() {
+        // LYC = 153: the flag is set for line 153's first 4 dots. LYC = 0:
+        // set from dot 8, through to line 0 (no gap at the frame's turn).
+        let flag_at = |lyc: u8, ly: u8, dot: u32| {
+            let mut p = Ppu::new();
+            p.lyc = lyc;
+            run_to(&mut p, ly, dot);
+            p.stat & 0x04 != 0
+        };
+        assert!(flag_at(153, 153, 0));
+        assert!(flag_at(153, 153, 3));
+        assert!(!flag_at(153, 153, 4));
+        assert!(!flag_at(0, 153, 7));
+        assert!(flag_at(0, 153, 8));
+        assert!(flag_at(0, 153, 455), "and on into line 0");
+        assert!(flag_at(0, 0, 0));
+    }
+
+    #[test]
+    fn the_original_shows_mode_0_for_a_dot_before_line_0() {
+        // VBlank's mode 1 ends a dot early on the original, which shows
+        // mode 0 for it; the Color goes straight on to line 0's mode 2.
+        for (mut p, mode) in [(Ppu::new(), 0), (Ppu::with_model(Model::Cgb), 1)] {
+            p.lcdc = 0x91;
+            run_to(&mut p, 153, 454);
+            assert_eq!(p.stat & 0x03, 1);
+            p.tick(1);
+            assert_eq!(p.stat & 0x03, mode, "{:?}", p.model);
+            p.tick(1);
+            assert_eq!((p.ly, p.stat & 0x03), (0, 2));
+        }
+    }
+
+    #[test]
+    fn in_a_lines_last_4_dots_ly_lyc_reads_0_on_the_original_and_holds_on_the_color() {
+        // LYC = 2. On the original the flag reads 0 for line 2's last 4
+        // dots; on the Color it keeps its value there, and a new LYC isn't
+        // compared until line 3 starts.
+        for (mut p, held) in [(Ppu::new(), false), (Ppu::with_model(Model::Cgb), true)] {
+            p.lcdc = 0x91;
+            p.lyc = 2;
+            run_to(&mut p, 2, 451);
+            assert_ne!(p.stat & 0x04, 0);
+            p.tick(1);
+            assert_eq!(p.stat & 0x04 != 0, held, "{:?}", p.model);
+        }
+        let mut p = Ppu::with_model(Model::Cgb);
+        p.lcdc = 0x91;
+        p.lyc = 0xF0;
+        run_to(&mut p, 2, 452);
+        p.write_reg(0xFF45, 2);
+        assert_eq!(p.stat & 0x04, 0, "no match this late");
+        assert_eq!(p.pending_irq, 0);
     }
 
     /// A Color running an original game: the original's way of drawing (so

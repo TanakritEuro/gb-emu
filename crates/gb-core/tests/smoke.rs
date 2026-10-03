@@ -159,6 +159,24 @@ fn a_breakpoint_stops_before_its_instruction_and_resuming_runs_it() {
 }
 
 #[test]
+fn ld_b_b_can_be_a_breakpoint_anywhere() {
+    // $0150 LD A,1 ; $0152 LD B,B ; $0153 INC A ; $0154 JR $0152
+    let program = [0x3E, 0x01, 0x40, 0x3C, 0x18, 0xFC];
+    let mut gb = GameBoy::new(rom(&program)).unwrap();
+    assert_eq!(gb.run_frame(), Ok(FrameEnd::Done), "off by default");
+    let mut gb = GameBoy::new(rom(&program)).unwrap();
+    gb.set_ld_b_b_breakpoint(true);
+    assert_eq!(gb.run_frame(), Ok(FrameEnd::Breakpoint));
+    assert_eq!((gb.cpu().regs.pc, gb.cpu().regs.a), (0x0152, 1));
+    assert_eq!(gb.run_frame(), Ok(FrameEnd::Breakpoint));
+    assert_eq!(
+        (gb.cpu().regs.pc, gb.cpu().regs.a),
+        (0x0152, 2),
+        "once round"
+    );
+}
+
+#[test]
 fn a_breakpoint_on_the_first_instruction_of_a_frame_still_stops() {
     // Games that wait for VBlank start every frame at the same PC, so a run
     // must only skip the check when the debugger stopped it there.
