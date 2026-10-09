@@ -397,7 +397,11 @@ say what to work on next.
       116 -> 140 of 229. An HBlank block runs once the CPU's instruction is done, and one whose
       HBlank began with the CPU halted runs when it wakes, if still in HBlank: 159 of 229. Left: HDMA
       around speed switches, and a few HALT edges
-- [ ] The next largest groups (window, `arg`, sound, serial, mode 1, mode 0, LCD offset)
+- [ ] The next largest groups. Done so far: illegal opcodes lock the CPU up (`undef_ops` 20/20); the
+      Color's boot ROM hands over at line 144, dot 163 (`display_startstate` 10/10); WY is looked at
+      again a few dots after a write (`window` 368 -> 409 of 476). Whole suite: 4321 -> 4689 of 5225.
+      Left, largest first: VRAM DMA around speed switches, serial, sound, mode 1, STAT IRQ
+      timings (`miscmstatirq`, `lycEnable`, `m0enable`, `m2enable`), LCD offset, `cgbpal_m3`
 
 **Done when:** the OAM and VRAM DMA groups pass, and each other group is either fixed or
 understood. Before and after counts go here.
