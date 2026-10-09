@@ -13,14 +13,14 @@
 //! `LD B,B` without the pass registers) but no verdict.
 
 use gb_core::cpu::CpuError;
-use gb_core::{FrameEnd, GameBoy, Model, CYCLES_PER_FRAME, SCREEN_HEIGHT, SCREEN_WIDTH};
+use gb_core::{Button, FrameEnd, GameBoy, Model, CYCLES_PER_FRAME, SCREEN_HEIGHT, SCREEN_WIDTH};
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::process::ExitCode;
 
 const USAGE: &str = "\
 usage: gb-cli <rom.gb> [--frames N] [--model dmg|cgb] [--doctor TRACE_FILE] [--wav AUDIO_FILE]
-              [--screenshot IMAGE_FILE]
+              [--screenshot IMAGE_FILE] [--press FRAME:BUTTONS]...
 
   --frames N            stop after N frames (default 3600, about a minute of Game Boy time)
   --model dmg|cgb       run on the original or the Color (default: the Color for games whose
@@ -29,6 +29,9 @@ usage: gb-cli <rom.gb> [--frames N] [--model dmg|cgb] [--doctor TRACE_FILE] [--w
   --wav AUDIO_FILE      record the sound to a 48 kHz stereo WAV file
   --screenshot IMAGE_FILE  save the last frame as a PPM image (e.g. to compare with
                         dmg-acid2's or cgb-acid2's reference picture)
+  --press FRAME:BUTTONS hold buttons for 5 frames from frame FRAME, for tests that want
+                        input: a, b, select, start, up, down, left, right, joined with +
+                        (e.g. --press 30:a --press 40:start+select); give it more than once
 
 examples:
   cargo run --release -p gb-cli -- \"roms/blargg/cpu_instrs/individual/06-ld r,r.gb\"
@@ -41,6 +44,43 @@ struct Args {
     doctor: Option<String>,
     wav: Option<String>,
     screenshot: Option<String>,
+    presses: Vec<Press>,
+}
+
+/// Buttons held by --press: from `frame` for `PRESS_FRAMES` frames.
+#[derive(Debug, PartialEq)]
+struct Press {
+    frame: u64,
+    buttons: Vec<Button>,
+}
+
+/// How long a --press holds its buttons: long enough for games that read
+/// the joypad once a frame.
+const PRESS_FRAMES: u64 = 5;
+
+/// "FRAME:BUTTON+BUTTON..." for --press.
+fn parse_press(spec: &str) -> Result<Press, String> {
+    let (frame, buttons) = spec
+        .split_once(':')
+        .ok_or_else(|| format!("--press needs FRAME:BUTTONS, not {spec:?}"))?;
+    let frame = frame
+        .parse()
+        .map_err(|_| format!("bad frame in --press: {frame}"))?;
+    let buttons = buttons
+        .split('+')
+        .map(|b| match b.to_ascii_lowercase().as_str() {
+            "a" => Ok(Button::A),
+            "b" => Ok(Button::B),
+            "select" => Ok(Button::Select),
+            "start" => Ok(Button::Start),
+            "up" => Ok(Button::Up),
+            "down" => Ok(Button::Down),
+            "left" => Ok(Button::Left),
+            "right" => Ok(Button::Right),
+            other => Err(format!("unknown button in --press: {other:?}")),
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(Press { frame, buttons })
 }
 
 /// Sample rate for --wav.
@@ -53,6 +93,7 @@ fn parse_args() -> Result<Option<Args>, String> {
     let mut doctor = None;
     let mut wav = None;
     let mut screenshot = None;
+    let mut presses = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -69,6 +110,9 @@ fn parse_args() -> Result<Option<Args>, String> {
                     other => return Err(format!("--model needs dmg or cgb, not {other:?}")),
                 }
             }
+            "--press" => presses.push(parse_press(
+                &args.next().ok_or("--press needs FRAME:BUTTONS")?,
+            )?),
             "--frames" => {
                 let n = args.next().ok_or("--frames needs a number")?;
                 frames = n.parse().map_err(|_| format!("bad frame count: {n}"))?;
@@ -85,6 +129,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         doctor,
         wav,
         screenshot,
+        presses,
     }))
 }
 
@@ -142,6 +187,14 @@ fn main() -> ExitCode {
 
     let verdict = 'run: {
         for frame in 1..=args.frames {
+            for press in &args.presses {
+                let held = (press.frame..press.frame + PRESS_FRAMES).contains(&frame);
+                if frame == press.frame || frame == press.frame + PRESS_FRAMES {
+                    for &b in &press.buttons {
+                        gb.set_button_during_frame(b, held);
+                    }
+                }
+            }
             let result = match trace.as_mut() {
                 Some(t) => run_frame_traced(&mut gb, t).map(|()| false),
                 None => run_frame_checked(&mut gb, &mut ld_b_b_seen),
@@ -342,6 +395,20 @@ fn run_frame_traced(gb: &mut GameBoy, out: &mut impl Write) -> Result<(), gb_cor
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn press_takes_a_frame_and_buttons() {
+        assert_eq!(
+            parse_press("30:a+Start"),
+            Ok(Press {
+                frame: 30,
+                buttons: vec![Button::A, Button::Start]
+            })
+        );
+        assert!(parse_press("30").is_err());
+        assert!(parse_press("x:a").is_err());
+        assert!(parse_press("30:turbo").is_err());
+    }
 
     /// A ROM that runs `code` from $0150.
     fn rom(code: &[u8]) -> Vec<u8> {

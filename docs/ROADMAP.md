@@ -349,7 +349,7 @@ impossible: `halt_op_dupe_delay` reads DIV as $55 about 63 M-cycles after resett
 
 ---
 
-## Milestone 16 — The small suites
+## Milestone 16 — The small suites ✅
 
 Most of the small picture-based test ROMs in `roms/` already match their reference screenshots
 (cgb-acid-hell, turtle-tests, scribbltests, little-things' firstwhite). Four don't.
@@ -366,9 +366,13 @@ Most of the small picture-based test ROMs in `roms/` already match their referen
       just copied and its writes go astray (cartridge and WRAM share a bus on the original, WRAM has
       its own on the Color); and the copy's first byte comes in the M-cycle it takes OAM. `bully`
       matches
-- [ ] Button presses from gb-cli, for tests that need them (little-things' Telling LYs)
+- [x] Input during the frame: a player's press lands at a pseudo-random point of the next frame
+      (seeded from the ROM), not always on the line where the frontend runs the next frame, so
+      games that seed their random numbers from LY at a press get varied seeds; gb-cli's
+      `--press FRAME:BUTTONS` presses buttons for tests. Telling LYs passes on both consoles
 
-**Done when:** all four match their reference screenshots.
+**Done when:** all four match their reference screenshots. (Before: 0 of mbc3-tester,
+strikethrough, bully and Telling LYs. After: all four, on both consoles where they run on both.)
 
 ---
 

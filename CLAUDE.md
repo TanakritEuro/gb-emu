@@ -57,6 +57,7 @@ cargo run --release -p gb-cli -- <rom.gb> --doctor trace.log   # CPU trace for G
 cargo run --release -p gb-cli -- <rom.gb> --wav out.wav        # record the sound (48 kHz WAV)
 cargo run --release -p gb-cli -- <rom.gb> --model dmg           # force a model (dmg or cgb)
 cargo run --release -p gb-cli -- <rom.gb> --screenshot out.ppm  # save the last frame (PPM)
+cargo run --release -p gb-cli -- <rom.gb> --press 30:a+start    # hold buttons 5 frames from frame 30
 ./scripts/build-web.ps1                                 # build the browser version (Windows)
 node scripts/serve.js                                   # serve it at http://localhost:8765
 node scripts/build-homebrew.js                          # build homebrew/ into web/games/ (needs RGBDS)

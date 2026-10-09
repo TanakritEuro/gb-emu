@@ -123,10 +123,12 @@ impl Emulator {
     }
 
     /// `button` is the index of a `gb_core::Button`:
-    /// 0 Right, 1 Left, 2 Up, 3 Down, 4 A, 5 B, 6 Select, 7 Start.
+    /// 0 Right, 1 Left, 2 Up, 3 Down, 4 A, 5 B, 6 Select, 7 Start. The change
+    /// lands somewhere in the next frame, as a real press would
+    /// (`GameBoy::set_button_during_frame`).
     pub fn set_button(&mut self, button: u8, pressed: bool) {
         if let Some(b) = Button::from_index(button) {
-            self.gb.set_button(b, pressed);
+            self.gb.set_button_during_frame(b, pressed);
         }
     }
 

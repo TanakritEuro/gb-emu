@@ -1,6 +1,8 @@
 //! End-to-end checks through the public API.
 
-use gb_core::{cpu::CpuError, FrameEnd, GameBoy, Model, Rewind, StateError, CYCLES_PER_FRAME};
+use gb_core::{
+    cpu::CpuError, Button, FrameEnd, GameBoy, Model, Rewind, StateError, CYCLES_PER_FRAME,
+};
 
 /// A 32 KiB ROM-only cartridge with a valid header and `code` at $0150.
 /// The entry point at $0100 is NOP; JP $0150, like real games.
@@ -462,6 +464,24 @@ fn a_state_saved_during_oam_dma_carries_on_the_copy() {
     let mut fresh = GameBoy::new(rom(&[0x3E, 0x80, 0xE0, 0x46])).unwrap();
     fresh.load_state(&saved).unwrap();
     assert!(after(&mut fresh) == original);
+}
+
+#[test]
+fn a_players_press_lands_during_the_next_frame() {
+    // LD A,$10 ; LDH ($00),A (read the A/B/Select/Start row) ; JR -2
+    let mut gb = GameBoy::new(rom(&[0x3E, 0x10, 0xE0, 0x00, 0x18, 0xFE])).unwrap();
+    gb.run_frame().unwrap();
+    let a_held = |gb: &GameBoy| gb.peek(0xFF00) & 0x01 == 0;
+    gb.set_button_during_frame(Button::A, true);
+    assert!(!a_held(&gb), "not yet");
+    gb.run_frame().unwrap();
+    assert!(a_held(&gb), "somewhere in the frame");
+    // A release queued after a press lands after it, whatever the delays.
+    gb.set_button_during_frame(Button::A, false);
+    gb.set_button_during_frame(Button::A, true);
+    gb.set_button_during_frame(Button::A, false);
+    gb.run_frame().unwrap();
+    assert!(!a_held(&gb));
 }
 
 fn run_frames(gb: &mut GameBoy, n: usize) {

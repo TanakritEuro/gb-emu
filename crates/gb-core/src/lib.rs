@@ -57,6 +57,12 @@ pub struct GameBoy {
     /// Compatibility mode palettes the host picked over the boot ROM's
     /// (see [`set_compat_palettes`](Self::set_compat_palettes)).
     chosen_palettes: Option<CompatPalettes>,
+    /// Button changes from [`set_button_during_frame`](Self::set_button_during_frame),
+    /// in order: each lands once [`run_frame`](Self::run_frame) has run
+    /// that many more normal-speed T-cycles.
+    pending_buttons: Vec<(u32, Button, bool)>,
+    /// Picks when those land: xorshift, seeded from the ROM.
+    input_rng: u64,
 }
 
 /// Which console to be.
@@ -110,6 +116,7 @@ impl GameBoy {
     pub fn with_model(rom: Vec<u8>, model: Option<Model>) -> Result<Self, CartridgeError> {
         let cart = Cartridge::from_rom(rom)?;
         let model = model.unwrap_or_else(|| Model::for_cartridge(&cart));
+        let input_rng = cart.rom_hash() | 1;
         let bus = Bus::new(cart, model);
         let mut cpu = Cpu::new();
         cpu.reset_post_boot(model);
@@ -124,6 +131,8 @@ impl GameBoy {
             resume_here: false,
             frame_elapsed: 0,
             chosen_palettes: None,
+            pending_buttons: Vec::new(),
+            input_rng,
         })
     }
 
@@ -207,7 +216,9 @@ impl GameBoy {
                 return Ok(FrameEnd::Breakpoint);
             }
             let cycles = self.step()?;
-            self.frame_elapsed += self.bus.real_cycles(cycles);
+            let real = self.bus.real_cycles(cycles);
+            self.frame_elapsed += real;
+            self.land_buttons(real);
         }
         self.frame_elapsed = 0;
         Ok(FrameEnd::Done)
@@ -298,9 +309,44 @@ impl GameBoy {
         self.bus.ppu.framebuffer()
     }
 
+    /// Presses or releases a button now, between instructions.
     pub fn set_button(&mut self, button: Button, pressed: bool) {
         if self.bus.joypad.set(button, pressed) {
             self.bus.if_reg |= interrupt::JOYPAD;
+        }
+    }
+
+    /// A player's press or release: it lands at some point during the next
+    /// frame's worth of [`run_frame`](Self::run_frame), as a real one can
+    /// come at any line. Frontends run whole frames between input events, so
+    /// applying them at once would always land on the same line, and games
+    /// that seed their random numbers from LY at a press would always get
+    /// the same seed (Telling LYs checks). Where in the frame is
+    /// pseudo-random, seeded from the ROM, so runs stay reproducible; changes
+    /// land in the order they were made.
+    pub fn set_button_during_frame(&mut self, button: Button, pressed: bool) {
+        let x = &mut self.input_rng;
+        *x ^= *x << 13;
+        *x ^= *x >> 7;
+        *x ^= *x << 17;
+        let mut delay = (*x % u64::from(CYCLES_PER_FRAME)) as u32;
+        if let Some(&(last, ..)) = self.pending_buttons.last() {
+            delay = delay.max(last);
+        }
+        self.pending_buttons.push((delay, button, pressed));
+    }
+
+    /// Counts `cycles` off the pending button changes, applying those due.
+    fn land_buttons(&mut self, cycles: u32) {
+        if self.pending_buttons.is_empty() {
+            return;
+        }
+        for pending in &mut self.pending_buttons {
+            pending.0 = pending.0.saturating_sub(cycles);
+        }
+        while let Some(&(0, button, pressed)) = self.pending_buttons.first() {
+            self.pending_buttons.remove(0);
+            self.set_button(button, pressed);
         }
     }
 
