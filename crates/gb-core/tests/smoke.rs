@@ -444,12 +444,13 @@ fn a_chosen_palette_sticks_through_save_states_and_rewind() {
 
 #[test]
 fn a_state_saved_during_oam_dma_carries_on_the_copy() {
-    // LD A,$C0 ; LDH ($46),A ; then NOPs: DMA from $C000 runs under them.
-    let mut gb = GameBoy::new(rom(&[0x3E, 0xC0, 0xE0, 0x46])).unwrap();
+    // LD A,$80 ; LDH ($46),A ; then NOPs: DMA from VRAM runs under them.
+    // (From WRAM it would take the bus the NOPs come from on the original.)
+    let mut gb = GameBoy::new(rom(&[0x3E, 0x80, 0xE0, 0x46])).unwrap();
     for _ in 0..6 {
         gb.step().unwrap(); // NOP, JP, LD, LDH, two NOPs: mid-copy
     }
-    assert_eq!(gb.peek(0xFF46), 0xC0);
+    assert_eq!(gb.peek(0xFF46), 0x80);
     let saved = gb.save_state();
     let after = |gb: &mut GameBoy| {
         for _ in 0..200 {
@@ -458,7 +459,7 @@ fn a_state_saved_during_oam_dma_carries_on_the_copy() {
         gb.save_state()
     };
     let original = after(&mut gb);
-    let mut fresh = GameBoy::new(rom(&[0x3E, 0xC0, 0xE0, 0x46])).unwrap();
+    let mut fresh = GameBoy::new(rom(&[0x3E, 0x80, 0xE0, 0x46])).unwrap();
     fresh.load_state(&saved).unwrap();
     assert!(after(&mut fresh) == original);
 }
