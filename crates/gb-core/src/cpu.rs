@@ -140,6 +140,9 @@ struct Illegal;
 
 const ILLEGAL: Result<u32, Illegal> = Err(Illegal);
 
+/// T-cycles (at the new speed) the CPU pauses after a speed switch.
+const SWITCH_PAUSE: u32 = 0x20008;
+
 #[derive(Debug, Clone, Default)]
 pub struct Cpu {
     pub regs: Registers,
@@ -160,6 +163,9 @@ pub struct Cpu {
     /// HALT just put the CPU to sleep: its first halted M-cycle doesn't
     /// look for interrupts (see `halted_m_cycle`).
     just_halted: bool,
+    /// T-cycles left of the pause after a speed switch, which the CPU
+    /// spends halted (see the STOP arm in `execute`).
+    switch_pause: u32,
 }
 
 impl Cpu {
@@ -215,6 +221,7 @@ impl Cpu {
         w.bool(self.halted);
         w.bool(self.halt_bug);
         w.bool(self.just_halted);
+        w.u32(self.switch_pause);
     }
 
     pub(crate) fn load_state(&mut self, r: &mut StateReader) -> Result<(), StateError> {
@@ -239,6 +246,7 @@ impl Cpu {
         self.halted = r.bool()?;
         self.halt_bug = r.bool()?;
         self.just_halted = r.bool()?;
+        self.switch_pause = r.u32()?.min(SWITCH_PAUSE);
         Ok(())
     }
 
@@ -685,6 +693,7 @@ impl Cpu {
         self.ticked = 0;
         if self.halted && !self.just_halted && bus.pending_interrupts() != 0 {
             self.halted = false; // HALT began with one already pending
+            self.switch_pause = 0;
         }
         bus.cpu_halted = self.halted && !self.just_halted;
 
@@ -695,9 +704,16 @@ impl Cpu {
         // In HALT the CPU spends M-cycles like this one until an interrupt is
         // pending; the one in which it arrives carries on as the fetch.
         if self.halted {
-            if !self.halted_m_cycle(bus) {
+            let woke = self.halted_m_cycle(bus);
+            // The speed switch's pause also ends on its own, and the
+            // M-cycle it runs out in serves as the fetch too.
+            let paused = std::mem::take(&mut self.switch_pause);
+            let pause_over = paused > 0 && paused <= self.ticked;
+            if !woke && !pause_over {
+                self.switch_pause = paused.saturating_sub(self.ticked);
                 return Ok(self.ticked);
             }
+            self.switch_pause = 0;
             self.halted = false;
             bus.cpu_halted = false;
         } else {
@@ -756,12 +772,33 @@ impl Cpu {
                     // TODO(accuracy): a DMG really stops the CPU, timer and LCD
                     // until a button is pressed, and in some situations (Pan
                     // Docs' STOP flowchart) acts as 1 byte. Few games rely on it.
-                    // TODO(accuracy): a speed switch pauses the CPU for 2050
-                    // M-cycles, with DIV not ticking; here it's instant.
+                    2 if bus.speed_switch_armed() => {
+                        // A Color with KEY1 armed switches speed instead. If
+                        // no interrupt is pending, STOP reads its second byte
+                        // and the CPU then pauses (halted, so an interrupt
+                        // can end it) while the clocks settle; the timer runs
+                        // on. If one is, it goes straight on, and the second
+                        // byte runs as an instruction. As in SameBoy
+                        // (Core/sm83_cpu.c, stop), whose pause the AGE
+                        // speed-switch tests confirm (TIMA keeps counting).
+                        let pausing = bus.pending_interrupts() == 0;
+                        bus.timer.stop_reset(!self.ime);
+                        let cycles = if pausing {
+                            self.fetch8(bus);
+                            8
+                        } else {
+                            4
+                        };
+                        bus.switch_speed(pausing);
+                        if pausing {
+                            self.halted = true;
+                            self.switch_pause = SWITCH_PAUSE;
+                        }
+                        Ok(cycles)
+                    }
                     2 => {
                         self.regs.pc = self.regs.pc.wrapping_add(1);
                         bus.write(0xFF04, 0);
-                        bus.speed_switch();
                         Ok(4)
                     }
                     // JR e8
@@ -1313,6 +1350,66 @@ mod tests {
         assert_eq!(bus.read(0xFF04), 0);
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.regs.a, 1, "execution carries on after STOP");
+    }
+
+    /// A Color running `program`, with KEY1 armed for a speed switch.
+    fn setup_switch(program: &[u8]) -> (Cpu, Bus) {
+        let mut rom = rom_with_program(program);
+        rom[0x143] = 0x80;
+        rom[0x14D] = crate::cartridge::header_checksum(&rom);
+        let mut cpu = Cpu::new();
+        cpu.reset_post_boot(Model::Cgb);
+        let mut bus = Bus::new(Cartridge::from_rom(rom).unwrap(), Model::Cgb);
+        bus.write(0xFF0F, 0);
+        bus.write(0xFF4D, 0x01);
+        (cpu, bus)
+    }
+
+    #[test]
+    fn a_speed_switch_pauses_the_cpu_for_0x20008_cycles() {
+        // STOP $00 ; INC A
+        let (mut cpu, mut bus) = setup_switch(&[0x10, 0x00, 0x3C]);
+        cpu.regs.a = 0;
+        assert_eq!(cpu.step(&mut bus), Ok(8), "STOP reads its second byte");
+        assert_eq!(cpu.regs.pc, 0x0102);
+        let mut paused = 0;
+        while cpu.regs.a == 0 {
+            paused += cpu.step(&mut bus).unwrap();
+        }
+        // INC A's fetch is the pause's last M-cycle.
+        assert_eq!(paused, 0x20008);
+        assert_eq!(bus.read(0xFF4D), 0xFE, "double speed, no longer armed");
+    }
+
+    #[test]
+    fn an_interrupt_ends_the_switch_pause() {
+        let (mut cpu, mut bus) = setup_switch(&[0x10, 0x00, 0x3C]);
+        cpu.regs.a = 0;
+        cpu.step(&mut bus).unwrap();
+        bus.write(0xFFFF, 0x04);
+        for _ in 0..10 {
+            cpu.step(&mut bus).unwrap();
+        }
+        assert!(cpu.halted);
+        bus.write(0xFF0F, 0x04); // IME is off: the CPU just wakes
+        cpu.step(&mut bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.regs.a, 1);
+    }
+
+    #[test]
+    fn with_an_interrupt_pending_a_speed_switch_runs_stops_second_byte() {
+        // STOP ; INC A ; INC A
+        let (mut cpu, mut bus) = setup_switch(&[0x10, 0x3C, 0x3C]);
+        bus.write(0xFFFF, 0x04);
+        bus.write(0xFF0F, 0x04);
+        cpu.regs.a = 0;
+        assert_eq!(cpu.step(&mut bus), Ok(4));
+        assert_eq!(cpu.regs.pc, 0x0101);
+        cpu.step(&mut bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.regs.a, 2, "no pause; the second byte runs");
+        assert_eq!(bus.read(0xFF4D), 0xFE);
     }
 
     /// A CPU with distinct values in every register and HL pointing at
@@ -2348,9 +2445,9 @@ mod tests {
     #[test]
     fn each_access_sees_the_hardware_at_its_own_m_cycle() {
         // LDH A,($44) reads LY in its third M-cycle, 12 T-cycles in, and LY
-        // reads 1 from dot 452 of line 0. The boot ROM leaves the PPU 3 dots
+        // reads 1 from dot 454 of line 0. The boot ROM leaves the PPU 3 dots
         // into line 0.
-        for (head_start, ly) in [(452 - 3 - 12, 1), (452 - 3 - 13, 0)] {
+        for (head_start, ly) in [(454 - 3 - 12, 1), (454 - 3 - 13, 0)] {
             let (mut cpu, mut bus) = setup_wram(&[0xF0, 0x44]);
             bus.tick(head_start);
             cpu.step(&mut bus).unwrap();

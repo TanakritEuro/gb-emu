@@ -141,6 +141,14 @@ pub struct Bus {
     /// KEY1 bit 7: the CPU, timer, serial and OAM DMA run twice as fast; the
     /// PPU, sound and cartridge clock don't. Color only.
     pub double_speed: bool,
+    /// CPU T-cycles until a switch to double speed takes effect (0: none).
+    switch_in: u8,
+    /// CPU T-cycles the PPU, sound and cartridge clock still don't see: they
+    /// stand still for a moment as the speed switches.
+    ppu_freeze: u8,
+    /// Double speed: half a dot of CPU time the PPU hasn't had yet (two CPU
+    /// T-cycles make one dot).
+    half_dot: bool,
     hdma: Hdma,
     oam_dma: OamDma,
     /// CPU T-cycles the CPU must wait for VRAM DMA; `GameBoy::step` runs
@@ -182,6 +190,9 @@ impl Bus {
             svbk: 0,
             speed_armed: false,
             double_speed: false,
+            switch_in: 0,
+            ppu_freeze: 0,
+            half_dot: false,
             hdma: Hdma::default(),
             oam_dma: OamDma::default(),
             dma_stall: 0,
@@ -204,6 +215,7 @@ impl Bus {
         w.u8(self.svbk);
         w.bool(self.speed_armed);
         w.bool(self.double_speed);
+        w.bytes(&[self.switch_in, self.ppu_freeze, u8::from(self.half_dot)]);
         w.u16(self.hdma.src);
         w.u16(self.hdma.dst);
         w.bool(self.hdma.active);
@@ -243,6 +255,13 @@ impl Bus {
         self.svbk = r.u8()? & 7;
         self.speed_armed = r.bool()?;
         self.double_speed = r.bool()?;
+        let mut switch = [0; 3];
+        r.bytes(&mut switch)?;
+        let [switch_in, ppu_freeze, half_dot] = switch;
+        if switch_in > 6 || ppu_freeze > 5 {
+            return Err(StateError::Corrupt("speed switch"));
+        }
+        (self.switch_in, self.ppu_freeze, self.half_dot) = (switch_in, ppu_freeze, half_dot != 0);
         self.hdma = Hdma {
             src: r.u16()? & 0xFFF0,
             dst: r.u16()? & 0x1FF0,
@@ -250,6 +269,7 @@ impl Bus {
             remaining: r.u8()? & 0x7F,
         };
         self.timer.set_double_speed(self.double_speed);
+        self.ppu.double_speed = self.double_speed;
         let active = r.bool()?;
         let mut dma = [0; 5];
         r.bytes(&mut dma)?;
@@ -304,16 +324,49 @@ impl Bus {
         }
     }
 
-    /// STOP calls this: with KEY1 armed, a Color switches speed instead of
-    /// stopping. Returns whether it did.
+    /// Whether a STOP now would switch speed: a Color with KEY1 armed, and
+    /// no button held (that ends STOP before anything happens).
     /// https://gbdev.io/pandocs/CGB_Registers.html#ff4d--key1-cgb-mode-only-prepare-speed-switch
+    pub fn speed_switch_armed(&self) -> bool {
+        self.cgb() && self.speed_armed && self.joypad.read() & 0x0F == 0x0F
+    }
+
+    /// STOP switches speed (see [`speed_switch_armed`](Self::speed_switch_armed)).
+    /// Into double speed the change takes 6 CPU T-cycles to land; back to
+    /// normal speed it's at once (SameBoy, Core/sm83_cpu.c, stop). Once it
+    /// has, the PPU and sound stand still for 2 CPU T-cycles (1 if the CPU
+    /// doesn't then pause: `pausing` says no interrupt was pending), which
+    /// leaves them where AGE's spsw-mode0 finds them after switching each
+    /// way.
+    pub fn switch_speed(&mut self, pausing: bool) {
+        self.speed_armed = false;
+        if self.double_speed {
+            self.set_double_speed(false);
+        } else {
+            self.switch_in = 6;
+        }
+        self.ppu_freeze = if pausing { 2 } else { 1 };
+    }
+
+    fn set_double_speed(&mut self, on: bool) {
+        self.double_speed = on;
+        self.ppu.double_speed = on;
+        self.timer.set_double_speed(on);
+        // TODO(accuracy): a switch can leave the CPU half a dot off the
+        // PPU in normal speed ("odd mode", which SameBoy doesn't do either):
+        // LY then reads as old AND new as it changes (AGE's lcd-align-ly).
+        self.half_dot = false;
+    }
+
+    /// For tests: switch speed at once, as if the switch had long finished.
+    #[cfg(test)]
     pub fn speed_switch(&mut self) -> bool {
-        if !(self.cgb() && self.speed_armed) {
+        if !self.speed_switch_armed() {
             return false;
         }
         self.speed_armed = false;
-        self.double_speed = !self.double_speed;
-        self.timer.set_double_speed(self.double_speed);
+        let on = !self.double_speed;
+        self.set_double_speed(on);
         true
     }
 
@@ -639,6 +692,20 @@ impl Bus {
     /// T-cycles, collecting any interrupts they raise. In double speed the
     /// timer keeps pace with the CPU, but the PPU, sound and clock see half.
     pub fn tick(&mut self, cycles: u32) {
+        if self.switch_in > 0 {
+            let before = u32::from(self.switch_in).min(cycles);
+            self.switch_in -= before as u8;
+            self.run(before);
+            if self.switch_in == 0 {
+                self.set_double_speed(true);
+            }
+            self.run(cycles - before);
+        } else {
+            self.run(cycles);
+        }
+    }
+
+    fn run(&mut self, cycles: u32) {
         if self.oam_dma.active || self.oam_dma.starting > 0 {
             let mut total = u32::from(self.oam_dma.cycles) + cycles;
             while total >= 4 && (self.oam_dma.active || self.oam_dma.starting > 0) {
@@ -653,7 +720,21 @@ impl Bus {
         if self.serial.tick(cycles) {
             self.if_reg |= interrupt::SERIAL;
         }
-        let real = self.real_cycles(cycles);
+        // The freeze starts once the switch has landed.
+        let frozen = if self.switch_in > 0 {
+            0
+        } else {
+            u32::from(self.ppu_freeze).min(cycles)
+        };
+        self.ppu_freeze -= frozen as u8;
+        let seen = cycles - frozen;
+        let real = if self.double_speed {
+            let halves = seen + u32::from(self.half_dot);
+            self.half_dot = halves % 2 == 1;
+            halves / 2
+        } else {
+            seen + u32::from(std::mem::take(&mut self.half_dot))
+        };
         self.if_reg |= self.ppu.tick(real);
         // An HBlank copy moves one block per HBlank, paused while the CPU
         // is halted. (Only the Color can start one.)
@@ -1055,6 +1136,36 @@ mod tests {
         assert_eq!(b.ppu.ly, ly, "456 CPU cycles is half a line now");
         b.tick(456);
         assert_eq!(b.ppu.ly, ly + 1);
+    }
+
+    #[test]
+    fn the_switch_into_double_speed_lands_6_cycles_on_and_back_at_once() {
+        let mut b = cgb_bus();
+        b.write(0xFF4D, 0x01);
+        b.switch_speed(false);
+        b.tick(5);
+        assert_eq!(b.read(0xFF4D), 0x7E, "not yet, and no longer armed");
+        b.tick(1);
+        assert_eq!(b.read(0xFF4D), 0xFE);
+        b.write(0xFF4D, 0x01);
+        b.switch_speed(false);
+        assert_eq!(b.read(0xFF4D), 0x7E);
+    }
+
+    #[test]
+    fn the_ppu_stands_still_for_a_moment_after_a_switch() {
+        // Back to normal speed: the PPU misses 2 CPU T-cycles (dots) if the
+        // CPU then pauses, 1 if it goes straight on.
+        for (pausing, frozen) in [(true, 2), (false, 1)] {
+            let mut b = cgb_bus();
+            b.write(0xFF4D, 0x01);
+            b.speed_switch();
+            b.write(0xFF4D, 0x01);
+            b.switch_speed(pausing);
+            let dot = b.ppu.dot;
+            b.tick(10);
+            assert_eq!(b.ppu.dot, dot + 10 - frozen, "pausing: {pausing}");
+        }
     }
 
     #[test]

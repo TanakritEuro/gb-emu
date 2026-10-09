@@ -112,7 +112,7 @@ pub struct Ppu {
     pub wy: u8,
     pub wx: u8,
     /// Position within the current scanline, 0..456.
-    dot: u32,
+    pub(crate) dot: u32,
     /// Set once WY == LY at the start of a line; cleared at VBlank.
     wy_triggered: bool,
     /// The dot where this line's mode 3 ends and HBlank begins.
@@ -126,6 +126,9 @@ pub struct Ppu {
     window_y: u8,
     /// Mode 3's fetcher and FIFOs, mid-line.
     m3: fifo::Mode3,
+    /// The Color's CPU runs at double speed (the bus keeps this up to
+    /// date): some edges fall differently against it.
+    pub(crate) double_speed: bool,
     /// The STAT interrupt line as of the last check, for edge detection.
     stat_line: bool,
     /// IF bits raised by register writes, handed over on the next `tick`.
@@ -235,6 +238,7 @@ impl Ppu {
             first_line: false,
             window_y: 0xFF,
             m3: fifo::Mode3::default(),
+            double_speed: false,
             stat_line: false,
             pending_irq: 0,
             hblanks: 0,
@@ -437,13 +441,19 @@ impl Ppu {
         let next_scans = self.ly + 1 < VBLANK_LINE || self.ly == LINES_PER_FRAME - 1;
         if self.ly >= VBLANK_LINE || self.dot >= self.hblank_dot {
             // Reads meet the next line's OAM scan before it starts, and on
-            // the Color writes do too (AGE's oam-write-cgbBCE).
-            return (!write || self.model == Model::Cgb)
-                && next_scans
-                && self.dot >= DOTS_PER_LINE - 4;
+            // the Color writes do too (AGE's oam-write-cgbBCE). In double
+            // speed reads don't, and writes only in the line's last 2 dots
+            // (AGE's oam-read and oam-write; SameBoy).
+            let from = match (write, self.double_speed) {
+                (false, false) => DOTS_PER_LINE - 4,
+                (true, false) if self.model == Model::Cgb => DOTS_PER_LINE - 4,
+                (true, true) => DOTS_PER_LINE - 2,
+                _ => return false,
+            };
+            return next_scans && self.dot >= from;
         }
         if self.first_line {
-            self.dot >= MODE3_DOT
+            self.dot >= if write { MODE3_DOT } else { self.mode3_start() }
         } else {
             !write || !(MODE3_DOT - 4..MODE3_DOT).contains(&self.dot)
         }
@@ -470,7 +480,13 @@ impl Ppu {
     /// line after switching on, from `first_line_delay` dots into it.
     fn mode3_locked(&self, write: bool, first_line_delay: u32) -> bool {
         let from = match (self.model, self.first_line) {
-            (Model::Cgb, true) => MODE3_DOT + first_line_delay,
+            (Model::Cgb, true) => {
+                if self.double_speed {
+                    self.mode3_start()
+                } else {
+                    MODE3_DOT + first_line_delay
+                }
+            }
             (Model::Cgb, false) => MODE3_DOT,
             (Model::Dmg, true) => MODE3_DOT,
             (Model::Dmg, false) if write => MODE3_DOT,
@@ -532,18 +548,33 @@ impl Ppu {
         }
     }
 
+    /// Where this line's mode 3 shows: dot 80, except on the first line
+    /// after switching on in double speed, 2 dots later (AGE's
+    /// stat-mode-ds, oam-read and vram-read).
+    fn mode3_start(&self) -> u32 {
+        if self.first_line && self.double_speed {
+            MODE3_DOT + 2
+        } else {
+            MODE3_DOT
+        }
+    }
+
     /// What LY ($FF44) reads: the line, except that it moves on to the next
-    /// one 4 dots before this one ends (Mooneye's hblank_ly_scx_timing times
-    /// it from the HBlank interrupt). And line 153 reads 0 from its first
-    /// dot, so 153 shows only in line 152's last 4 dots: the frame turns
-    /// over a line early as far as LY goes (Wilbert Pol's ly_lyc_153 and
-    /// ly_new_frame, AGE's ly). That's the original and CPU CGB C and
-    /// earlier; later Colors read 153 for 4 dots more.
+    /// one 2 dots before this one ends. (Mooneye's hblank_ly_scx_timing
+    /// times it from the HBlank interrupt; in normal speed the CPU only
+    /// sees it to the M-cycle, so it's AGE's double-speed ly and its
+    /// spsw-mode0, which shifts the CPU against the LCD, that pin it to the
+    /// dot.) And line 153 reads 0 from its first dot, so 153 shows only in
+    /// line 152's last 2 dots: the frame turns over a line early as far as
+    /// LY goes (Wilbert Pol's ly_lyc_153 and ly_new_frame, AGE's ly). That's
+    /// the original and CPU CGB C and earlier, in normal speed; in double
+    /// speed, and on later Colors, 153 shows for 4 dots more.
     /// https://gbdev.io/pandocs/STAT.html#ff44--ly-lcd-y-coordinate-read-only
     fn ly_reg(&self) -> u8 {
-        if self.ly == LAST_LINE {
+        let zero_from = if self.double_speed { 4 } else { 0 };
+        if self.ly == LAST_LINE && self.dot >= zero_from {
             0
-        } else if self.dot >= DOTS_PER_LINE - 4 {
+        } else if self.dot >= DOTS_PER_LINE - 2 {
             (self.ly + 1) % LINES_PER_FRAME
         } else {
             self.ly
@@ -635,7 +666,12 @@ impl Ppu {
     /// The Color's first line differs in other ways too (lcdon_timing fails
     /// on it); otherwise it's treated like the original's here.
     fn turn_on(&mut self) {
-        self.dot = if self.model == Model::Dmg { 2 } else { 3 };
+        self.dot = match (self.model, self.double_speed) {
+            (Model::Dmg, _) => 2,
+            (Model::Cgb, false) => 3,
+            // In double speed a dot behind (AGE's ly, stat-mode-ds, stat-int).
+            (Model::Cgb, true) => 2,
+        };
         self.first_line = true;
         self.hblank_dot = HBLANK_DOT;
         self.update_stat_bits();
@@ -698,7 +734,7 @@ impl Ppu {
             0
         } else if self.ly >= VBLANK_LINE {
             1
-        } else if self.dot < MODE3_DOT {
+        } else if self.dot < MODE3_DOT || (self.first_line && self.dot < self.mode3_start()) {
             if self.first_line {
                 0
             } else {
@@ -755,7 +791,15 @@ impl Ppu {
             return;
         }
         let mode = self.stat & 0x03;
-        let mode2_pulse = match (self.ly, self.dot) {
+        // In double speed the pulse comes a dot earlier still (AGE's
+        // stat-int).
+        let early_dot = if self.double_speed { 454 } else { 455 };
+        let dot = match self.dot {
+            d if d == early_dot => 455,
+            455 => 0xFFFF,
+            d => d,
+        };
+        let mode2_pulse = match (self.ly, dot) {
             (0, 0) => mode == 2, // not on the first line after switching on
             (143, 452) => self.model == Model::Cgb,
             (143, 455) => self.model == Model::Dmg,
@@ -768,7 +812,7 @@ impl Ppu {
             || (self.stat & 0x08 != 0
                 && mode == 0
                 && self.ly < VBLANK_LINE
-                && self.dot != self.hblank_dot
+                && (self.dot != self.hblank_dot || self.double_speed)
                 && !(self.first_line && self.dot < MODE3_DOT));
         if line && !self.stat_line {
             self.pending_irq |= interrupt::STAT;
@@ -2227,14 +2271,14 @@ mod tests {
     }
 
     #[test]
-    fn ly_moves_on_4_dots_before_the_line_ends() {
+    fn ly_moves_on_2_dots_before_the_line_ends() {
         let mut p = Ppu::new();
-        p.tick(451);
+        p.tick(453);
         assert_eq!(p.read_reg(0xFF44), 0);
         p.tick(1);
         assert_eq!(p.read_reg(0xFF44), 1);
         assert_eq!((p.ly, p.stat & 0x03), (0, 0), "still line 0's HBlank");
-        p.tick(456 * 153);
+        p.tick(456 * 153 - 2);
         assert_eq!((p.ly, p.read_reg(0xFF44)), (153, 0), "and from 153 to 0");
     }
 
@@ -2246,17 +2290,86 @@ mod tests {
     }
 
     #[test]
-    fn line_153_shows_153_for_only_4_dots_on_both_consoles() {
-        // LY moves on to 153 4 dots before line 152 ends, as on every line,
-        // but reads 0 from line 153's first dot (CPU CGB C and the original;
-        // later Colors hold 153 a little longer).
-        for mut p in [Ppu::new(), Ppu::with_model(Model::Cgb)] {
+    fn in_double_speed_the_first_lines_mode_3_and_the_oam_locks_shift() {
+        // Switched on in double speed, line 0 starts a dot later than in
+        // normal speed, at dot 2, and its mode 3 shows 2 dots late, OAM
+        // reads held with it; writes are held from dot 80 as ever (AGE's
+        // stat-mode-ds and oam-read/oam-write).
+        let mut p = Ppu::with_model(Model::Cgb);
+        p.double_speed = true;
+        p.write_reg(0xFF40, 0x11);
+        p.write_reg(0xFF40, 0x91);
+        assert_eq!(p.dot, 2);
+        run_to(&mut p, 0, 81);
+        assert_eq!(
+            (p.stat & 0x03, p.oam_locked(false), p.oam_locked(true)),
+            (0, false, true)
+        );
+        p.tick(1);
+        assert_eq!((p.stat & 0x03, p.oam_locked(false)), (3, true), "dot 82");
+
+        // Before the next line's OAM scan, reads aren't held at all, and
+        // writes only in the line's last 2 dots.
+        run_to(&mut p, 1, 453);
+        assert_eq!((p.oam_locked(false), p.oam_locked(true)), (false, false));
+        p.tick(1);
+        assert_eq!((p.oam_locked(false), p.oam_locked(true)), (false, true));
+    }
+
+    #[test]
+    fn in_double_speed_the_mode_2_and_hblank_sources_fire_a_dot_early() {
+        // The mode 2 source fires at dot 454 of the line before (455 in
+        // normal speed); HBlank's in the dot STAT shows mode 0 (a dot after
+        // in normal speed). AGE's stat-int.
+        for (double, mode2_dot, hblank_after) in [(false, 455, 1), (true, 454, 0)] {
+            let mut p = Ppu::with_model(Model::Cgb);
+            p.double_speed = double;
             p.lcdc = 0x91;
-            run_to(&mut p, 152, 451);
+            p.write_reg(0xFF41, 0x20);
+            run_to(&mut p, 1, mode2_dot - 1);
+            assert_eq!(p.tick(1) & interrupt::STAT, interrupt::STAT);
+            p.tick(10);
+            p.write_reg(0xFF41, 0x08);
+            let mut mode0 = None;
+            let fired = loop {
+                let irq = p.tick(1);
+                if p.stat & 0x03 == 0 {
+                    mode0.get_or_insert(p.dot);
+                }
+                if irq & interrupt::STAT != 0 {
+                    break p.dot;
+                }
+            };
+            assert_eq!(
+                mode0.map(|m| fired - m),
+                Some(hblank_after),
+                "double: {double}, {mode0:?} {fired}"
+            );
+        }
+    }
+
+    #[test]
+    fn line_153_shows_153_for_only_2_dots_in_normal_speed() {
+        // LY moves on to 153 2 dots before line 152 ends, as on every line,
+        // but reads 0 from line 153's first dot (CPU CGB C and the original;
+        // later Colors hold 153 a little longer). In double speed it holds
+        // for 4 dots more (AGE's ly).
+        for (mut p, zero_from) in [
+            (Ppu::new(), 0),
+            (Ppu::with_model(Model::Cgb), 0),
+            (Ppu::with_model(Model::Cgb), 4),
+        ] {
+            p.double_speed = zero_from > 0;
+            p.lcdc = 0x91;
+            run_to(&mut p, 152, 453);
             assert_eq!(p.read_reg(0xFF44), 152);
             p.tick(1);
             assert_eq!(p.read_reg(0xFF44), 153, "{:?}", p.model);
-            run_to(&mut p, 153, 0);
+            if zero_from > 0 {
+                run_to(&mut p, 153, zero_from - 1);
+                assert_eq!(p.read_reg(0xFF44), 153, "double speed");
+            }
+            run_to(&mut p, 153, zero_from);
             assert_eq!(p.read_reg(0xFF44), 0, "{:?}", p.model);
             run_to(&mut p, 153, 300);
             assert_eq!(p.read_reg(0xFF44), 0);
@@ -2386,6 +2499,22 @@ mod tests {
             [1, 1, 1, 1, 1, 1, 1, 1, 0],
             "{line:?}"
         );
+    }
+
+    #[test]
+    fn in_double_speed_clearing_tile_select_doesnt_glitch() {
+        // As in the test above, but the Color in double speed reads the
+        // tile like the original: $8010's low byte, $9010's high byte, so
+        // color 1 all along (AGE's m3-bg-lcdc-ds).
+        let mut p = compat_ppu();
+        p.double_speed = true;
+        put_tile(&mut p, 0x8010, striped(0xFF, 0xFF));
+        for col in 0..32 {
+            p.write_vram(0x9800 + col, 1);
+        }
+        let line = write_lcdc_before_a_low_byte_read(&mut p, 0x81);
+        let mixed = line.iter().position(|&i| i == 1).expect("the mixed tile");
+        assert_eq!(line[mixed..mixed + 8], [1; 8], "{line:?}");
     }
 
     #[test]

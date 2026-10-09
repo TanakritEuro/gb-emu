@@ -258,9 +258,11 @@ impl Ppu {
     }
 
     /// LCDC bit 4 changed. On the Color, a tile data read in the next dot
-    /// glitches (see [`read_tile_data`](Self::read_tile_data)).
+    /// glitches (see [`read_tile_data`](Self::read_tile_data)); not in
+    /// double speed, where AGE's m3-bg-lcdc-ds shows plain reads (SameBoy
+    /// has a glitch there too).
     pub(super) fn tile_sel_changed(&mut self, set: bool) {
-        if self.color_hw() {
+        if self.color_hw() && !self.double_speed {
             self.m3.tile_sel_glitch = Some(set);
         }
     }

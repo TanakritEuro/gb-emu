@@ -40,7 +40,9 @@ const MAGIC: &[u8; 4] = b"GBST";
 /// 10: mid-line glitches: whether the window's blank pixel is off for the rest
 /// of the line, LCDC bit 4 as the tile data address was worked out, and the
 /// Color's tile-select latch.
-pub const VERSION: u16 = 10;
+/// 11: the speed switch under way (its pause, the PPU freeze), double
+/// speed's half dot.
+pub const VERSION: u16 = 11;
 /// Bytes before the payload: magic, version, fingerprint, length.
 const HEADER_LEN: usize = 4 + 2 + 8 + 4;
 

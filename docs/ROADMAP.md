@@ -240,6 +240,35 @@ rest double speed, CPU CGB E, or the one row above.)
 
 ---
 
+## Milestone 12 — The Color's double speed ✅
+
+STOP with KEY1 armed switches the Color's CPU between 4 and 8 MHz. The switch isn't instant: the
+CPU sits still for a while as the clocks change over, the timer keeps counting, and afterwards the
+PPU and sound (which stay at normal speed) meet the CPU on half-dot boundaries. The AGE tests
+(`roms/age-test-roms`) measure the switch and repeat their PPU tests in double speed.
+
+- [x] The speed switch: into double speed it lands 6 T-cycles after STOP, back at once; with no
+      interrupt pending STOP reads its second byte and the CPU pauses, halted, for $20008
+      T-cycles (an interrupt ends it early), else the second byte runs. STOP's DIV reset lands 8
+      T-cycles later (4 with interrupts on) and only bumps a 4096 Hz TIMA if its bit was set 4
+      T-cycles before too; the PPU stands still for a T-cycle or two. AGE `speed-switch`: 4/5
+      (`spsw-ch2-lc-delay` is the sound's length counter, left for the sound)
+- [x] The PPU in double speed: a CPU T-cycle is half a dot, carried over between M-cycles. LY
+      moves on 2 dots before a line ends (4 in the old model; only double speed sees the
+      difference) and line 153 shows 153 for 4 dots more; switching on starts a dot later, the
+      first line's mode 3 shows 2 dots later, the mode 2 and HBlank sources fire a dot earlier,
+      OAM reads aren't held before a line and writes only in its last 2 dots, and LCDC's tile
+      select doesn't glitch. AGE `ly`, `stat-mode`, `stat-int`, `oam`, `vram` and the `-ds` tests
+      pass for CPU CGB B/C. Left: `lcd-align-ly` (a switch can leave the CPU half a dot off the
+      PPU in normal speed, so LY reads old and new as it changes; SameBoy doesn't do it either)
+
+**Done when:** AGE's tests for CPU CGB B/C pass in double speed as well as single.
+(Before: AGE 24/55 by register plus 8 screenshot tests. After: 36/55 plus all 10; for CPU CGB
+B/C only `lcd-align-ly` and `spsw-ch2-lc-delay` are left, the rest being CPU CGB E or
+`oam-write-dmgC`'s row. Wilbert Pol unchanged at 109/121.)
+
+---
+
 ## References
 
 - [Pan Docs](https://gbdev.io/pandocs/) — the hardware reference

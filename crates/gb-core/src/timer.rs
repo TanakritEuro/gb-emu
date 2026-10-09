@@ -38,6 +38,10 @@ pub struct Timer {
     /// from DIV bit 5 (counter bit 13) to stay at 512 Hz.
     /// https://gbdev.io/pandocs/Audio_details.html#div-apu
     double_speed: bool,
+    /// T-cycles until STOP's DIV reset lands (see [`Timer::stop_reset`]).
+    reset_in: u8,
+    /// The 4096 Hz input (counter bit 9) 4 T-cycles before that reset.
+    bit9_before: bool,
 }
 
 impl Timer {
@@ -83,6 +87,7 @@ impl Timer {
         };
         w.bytes(&[stage, left]);
         w.u32(self.div_apu);
+        w.bytes(&[self.reset_in, u8::from(self.bit9_before)]);
     }
 
     pub(crate) fn load_state(&mut self, r: &mut StateReader) -> Result<(), StateError> {
@@ -99,6 +104,8 @@ impl Timer {
             _ => return Err(StateError::Corrupt("timer reload stage")),
         };
         self.div_apu = r.u32()?;
+        self.reset_in = r.u8()?.min(8);
+        self.bit9_before = r.u8()? != 0;
         Ok(())
     }
 
@@ -163,8 +170,42 @@ impl Timer {
                 Reload::Reloading(n) => Reload::Reloading(n - 1),
             };
             self.update(|t| t.counter = t.counter.wrapping_add(1));
+            if self.reset_in > 0 {
+                self.reset_in -= 1;
+                match self.reset_in {
+                    4 => self.bit9_before = self.counter & 0x200 != 0,
+                    0 => self.stop_reset_lands(),
+                    _ => {}
+                }
+            }
         }
         irq
+    }
+
+    /// STOP resets DIV, 8 T-cycles on with interrupts off (4 with them on,
+    /// as SameBoy has it). Like any DIV reset it can bump TIMA, except that
+    /// the 4096 Hz input must also have been set 4 T-cycles earlier. Measured
+    /// on CPU CGB B/C by AGE's spsw-div (when DIV first ticks after a speed
+    /// switch) and spsw-tima (which resets bump TIMA).
+    pub fn stop_reset(&mut self, ime_off: bool) {
+        self.reset_in = if ime_off { 8 } else { 4 };
+        self.bit9_before = self.counter & 0x200 != 0;
+    }
+
+    fn stop_reset_lands(&mut self) {
+        if self.tac & 0x07 == 0x04 {
+            // 4096 Hz: the input must have been set 4 T-cycles before too.
+            let tima_bumps = self.bit9_before && self.counter & 0x200 != 0;
+            self.counter = 0;
+            if tima_bumps {
+                self.increment_tima();
+            }
+            if self.counter & self.div_apu_bit() != 0 {
+                self.div_apu += 1;
+            }
+        } else {
+            self.write(0xFF04, 0);
+        }
     }
 
     pub fn read(&self, addr: u16) -> u8 {
@@ -257,6 +298,33 @@ mod tests {
         t.tick(4095);
         t.write(0xFF04, 0); // bit 12 was 0: no edge
         assert_eq!(t.take_div_apu_ticks(), 0);
+    }
+
+    #[test]
+    fn stop_resets_div_8_cycles_on_or_4_with_interrupts_on() {
+        for (ime_off, delay) in [(true, 8), (false, 4)] {
+            let mut t = Timer::new();
+            t.tick(0x500);
+            t.stop_reset(ime_off);
+            t.tick(delay - 1);
+            assert_ne!(t.read(0xFF04), 0, "not yet");
+            t.tick(1);
+            assert_eq!(t.read(0xFF04), 0, "{delay} cycles on");
+        }
+    }
+
+    #[test]
+    fn stops_reset_bumps_a_4096_hz_tima_only_if_its_bit_was_set_4_cycles_before() {
+        // Counter bit 9 is the 4096 Hz input. A plain DIV reset bumps TIMA
+        // whenever it's set; STOP's also needs it set 4 T-cycles earlier.
+        for (start, bumps) in [(0x200, true), (0x1FA, false)] {
+            let mut t = Timer::new();
+            t.write(0xFF07, 0b100);
+            t.counter = start;
+            t.stop_reset(true);
+            t.tick(8);
+            assert_eq!(t.read(0xFF05), u8::from(bumps), "from {start:#x}");
+        }
     }
 
     #[test]
