@@ -385,7 +385,13 @@ say what to work on next.
 
 - [x] A harness: `gambatte-tests` (in gb-cli) runs them as Gambatte's testrunner.cpp does. First
       count: 4321/5225 checks (the Color 2703/3352, the original 1618/1873)
-- [ ] OAM DMA (`oamdma`: 285 failing)
+- [x] OAM DMA, after Gambatte (its tests check it on hardware): a CPU access on the bus the copy
+      reads from gets the byte just copied, and a write lands in that OAM byte instead (ANDed with it
+      on the original when copying from WRAM); on the Color WRAM stays reachable during a copy from
+      elsewhere, and a copy from $E000 up reads $FF. The copy stands still while the CPU is halted.
+      $FEA0-$FEFF reads $00 on the original and is 72 bytes of RAM on CPU CGB C. `oamdma`: 526 -> 772
+      of 811. Left: copies from $FE00/$FF00 on the original, a sprite timing edge after a late copy
+      (`late_sp*_2`), and a halt that catches the copy's last M-cycle (`late_halt_stat_2`)
 - [ ] The Color's VRAM DMA (`dma`: 113 failing)
 - [ ] The next largest groups (window, `arg`, sound, serial, mode 1, mode 0, LCD offset)
 

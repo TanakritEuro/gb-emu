@@ -49,7 +49,7 @@ fn main() -> ExitCode {
     for rom in &roms {
         for (model, check) in checks(rom) {
             let console = if model == Model::Dmg { "dmg" } else { "cgb" };
-            let pass = run(rom, model, &check).unwrap_or(false);
+            let (pass, shown) = run(rom, model, &check).unwrap_or((false, String::new()));
             let dir = rom
                 .parent()
                 .and_then(Path::file_name)
@@ -60,7 +60,7 @@ fn main() -> ExitCode {
             if pass {
                 t.0 += 1;
             } else {
-                failures.push(format!("{console} {}", rom.display()));
+                failures.push(format!("{console} {} {shown}", rom.display()));
             }
         }
     }
@@ -153,19 +153,24 @@ fn checks(rom: &Path) -> Vec<(Model, Check)> {
     runs
 }
 
-/// Runs `rom` for 15 frames on `model` and checks the result.
-fn run(rom: &Path, model: Model, check: &Check) -> Option<bool> {
+/// Runs `rom` for 15 frames on `model` and checks the result. Also
+/// returns what a hex test showed (`?` for a tile that's no digit).
+fn run(rom: &Path, model: Model, check: &Check) -> Option<(bool, String)> {
     let mut gb = GameBoy::with_model(std::fs::read(rom).ok()?, Some(model)).ok()?;
     gb.set_high_pass_filter(false);
     let mut audio = Vec::new();
     for _ in 0..FRAMES {
         if gb.run_frame().is_err() {
-            return Some(false);
+            return Some((false, "error".into()));
         }
         audio = gb.take_audio();
     }
     let screen = gambatte_colors(&gb, model);
-    Some(match check {
+    let shown = match check {
+        Check::Hex(digits) => read_digits(&screen, digits.len()),
+        _ => String::new(),
+    };
+    let pass = match check {
         Check::Hex(digits) => digits_match(&screen, digits),
         Check::Audio(sound) => {
             let first = audio.first().copied().unwrap_or(0.0);
@@ -179,7 +184,20 @@ fn run(rom: &Path, model: Model, check: &Check) -> Option<bool> {
                 .all(|(a, b)| (a ^ b) & 0xF8F8F8 == 0),
             None => false,
         },
-    })
+    };
+    Some((pass, shown))
+}
+
+/// The hex digits the first `n` tiles of the top row show.
+fn read_digits(screen: &[u32], n: usize) -> String {
+    (0..n)
+        .map(|i| {
+            (0..16u32)
+                .find(|&d| digits_match_at(screen, i, d))
+                .and_then(|d| char::from_digit(d, 16))
+                .map_or('?', |c| c.to_ascii_uppercase())
+        })
+        .collect()
 }
 
 /// The screen as Gambatte's testrunner sees it: 0xRRGGBB per pixel.
@@ -229,15 +247,18 @@ const DIGITS: [[u8; 8]; 16] = [
 /// Whether the screen's first tiles of the top row show `digits`.
 fn digits_match(screen: &[u32], digits: &str) -> bool {
     digits.chars().enumerate().all(|(i, c)| {
-        let Some(d) = c.to_digit(16) else {
-            return false;
-        };
-        (0..8).all(|y| {
-            (0..8).all(|x| {
-                let px = screen[y * SCREEN_WIDTH + i * 8 + x] & 0xF8F8F8;
-                let black = DIGITS[d as usize][y] & (0x80 >> x) != 0;
-                px == if black { 0 } else { 0xF8F8F8 }
-            })
+        c.to_digit(16)
+            .is_some_and(|d| digits_match_at(screen, i, d))
+    })
+}
+
+/// Whether tile `i` of the top row shows hex digit `d`.
+fn digits_match_at(screen: &[u32], i: usize, d: u32) -> bool {
+    (0..8).all(|y| {
+        (0..8).all(|x| {
+            let px = screen[y * SCREEN_WIDTH + i * 8 + x] & 0xF8F8F8;
+            let black = DIGITS[d as usize][y] & (0x80 >> x) != 0;
+            px == if black { 0 } else { 0xF8F8F8 }
         })
     })
 }
@@ -488,13 +509,22 @@ mod tests {
     use super::*;
 
     fn models(name: &str) -> Vec<Model> {
-        checks(Path::new(name)).into_iter().map(|(m, _)| m).collect()
+        checks(Path::new(name))
+            .into_iter()
+            .map(|(m, _)| m)
+            .collect()
     }
 
     #[test]
     fn file_names_say_which_consoles_and_what_to_expect() {
-        assert_eq!(models("x/a_dmg08_cgb04c_out3.gbc"), [Model::Cgb, Model::Dmg]);
-        assert_eq!(models("x/a_dmg08_out1_cgb04c_out2.gbc"), [Model::Cgb, Model::Dmg]);
+        assert_eq!(
+            models("x/a_dmg08_cgb04c_out3.gbc"),
+            [Model::Cgb, Model::Dmg]
+        );
+        assert_eq!(
+            models("x/a_dmg08_out1_cgb04c_out2.gbc"),
+            [Model::Cgb, Model::Dmg]
+        );
         assert_eq!(models("x/a_cgb04c_outE0.gbc"), [Model::Cgb]);
         assert_eq!(models("x/a_ds_1_out0.gbc"), [Model::Cgb]);
         assert!(models("x/dumper.gbc").is_empty());
@@ -523,7 +553,10 @@ mod tests {
 
     #[test]
     fn inflate_reads_stored_fixed_and_dynamic_blocks() {
-        assert_eq!(inflate(&[0x01, 0x02, 0x00, 0xFD, 0xFF, 0x68, 0x69]).unwrap(), b"hi");
+        assert_eq!(
+            inflate(&[0x01, 0x02, 0x00, 0xFD, 0xFF, 0x68, 0x69]).unwrap(),
+            b"hi"
+        );
         let fixed = [0xCB, 0x48, 0xCD, 0xC9, 0xC9, 0x57, 0xC8, 0x40, 0x90, 0x00];
         assert_eq!(inflate(&fixed).unwrap(), b"hello hello hello");
         #[rustfmt::skip]

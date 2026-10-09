@@ -47,7 +47,8 @@ const MAGIC: &[u8; 4] = b"GBST";
 /// timer passes it both DIV-APU edges.
 /// 13: the OAM scan under way (the sprites found so far, the Y and X on its
 /// bus).
-pub const VERSION: u16 = 13;
+/// 14: the Color's $FEA0-$FEFF bytes.
+pub const VERSION: u16 = 14;
 /// Bytes before the payload: magic, version, fingerprint, length.
 const HEADER_LEN: usize = 4 + 2 + 8 + 4;
 
