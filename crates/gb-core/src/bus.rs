@@ -741,6 +741,8 @@ impl Bus {
             }
             self.oam_dma.cycles = (total % 4) as u8;
         }
+        self.ppu.oam_dma_busy = self.oam_dma.active || self.oam_dma.starting > 0;
+        self.ppu.oam_dma_dest = self.oam_dma.active.then_some(self.oam_dma.copied);
         // The timer and the APU go an M-cycle at a time, the APU taking each
         // DIV-APU edge before its ticks, as SameBoy has it (Core/timing.c).
         self.apu.begin_cycles();

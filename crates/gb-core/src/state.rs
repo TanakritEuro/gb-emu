@@ -45,7 +45,9 @@ const MAGIC: &[u8; 4] = b"GBST";
 /// 12: the APU counts in its own 2 MHz ticks, as SameBoy does (the channels'
 /// counters, the frame sequencer's divider, the sweep's calculation); the
 /// timer passes it both DIV-APU edges.
-pub const VERSION: u16 = 12;
+/// 13: the OAM scan under way (the sprites found so far, the Y and X on its
+/// bus).
+pub const VERSION: u16 = 13;
 /// Bytes before the payload: magic, version, fingerprint, length.
 const HEADER_LEN: usize = 4 + 2 + 8 + 4;
 

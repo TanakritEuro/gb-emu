@@ -192,6 +192,12 @@ pub(super) struct Mode3 {
     window_tile_x: u8,
     /// The window just started; the fine scroll has a quirk for it.
     window_fetching: bool,
+    /// The OAM scan under way (mode 2): the sprites found so far, in OAM
+    /// order, and the Y and X it read last.
+    scan: [Sprite; 10],
+    scan_count: u8,
+    y_bus: u8,
+    x_bus: u8,
     /// Sprites on this line, by X then OAM index; `next` is the next one.
     sprites: [Sprite; 10],
     sprite_count: u8,
@@ -316,7 +322,17 @@ impl Ppu {
         if self.ly == self.wy && self.lcdc & 0x20 != 0 {
             self.wy_triggered = true;
         }
-        let (sprites, count) = self.scan_oam();
+        // The scan found them during mode 2; the first line after switching
+        // on has no mode 2, and the scan is done here instead.
+        // TODO(accuracy): SameBoy finds no sprites at all on that line.
+        let (sprites, count) = if self.first_line {
+            self.scan_oam()
+        } else {
+            let mut found = self.m3.scan;
+            let count = self.m3.scan_count;
+            found[..usize::from(count)].sort_by_key(|s| s.x); // stable: OAM order breaks ties
+            (found, count)
+        };
         let m = &mut self.m3;
         m.bg.clear();
         m.sprites_fifo.clear();
@@ -336,7 +352,59 @@ impl Ppu {
         m.wait = if self.first_line { 7 } else { 5 };
     }
 
-    /// The OAM scan: in OAM order, the first 10 sprites whose rows cover LY
+    /// One step of the OAM scan: object `index`'s Y and X are read, and it
+    /// is kept if its rows cover LY, up to 10 (in OAM order; X doesn't
+    /// matter). While an OAM DMA copies, the PPU can't read OAM: the Y and X
+    /// it read last stay on its bus, so every object scanned then looks like
+    /// that one, at its X (strikethrough; SameBoy's add_object_from_index).
+    /// Tile and attributes are read later, as the sprite is fetched.
+    /// TODO(accuracy): with the CPU halted the PPU does read OAM during a
+    /// DMA, and on the original finds nothing (SameBoy).
+    pub(super) fn scan_object(&mut self, index: u8) {
+        let base = usize::from(index) * 4;
+        let height = self.sprite_height();
+        if index == 0 {
+            self.m3.scan_count = 0;
+        }
+        if !self.oam_dma_busy {
+            self.m3.y_bus = self.oam[base];
+            self.m3.x_bus = self.oam[base + 1];
+        }
+        let m = &mut self.m3;
+        let top = i16::from(m.y_bus) - 16;
+        if m.scan_count < 10 && (top..top + height).contains(&i16::from(self.ly)) {
+            m.scan[usize::from(m.scan_count)] = Sprite {
+                y: m.y_bus,
+                x: m.x_bus,
+                tile: self.oam[base + 2],
+                attrs: self.oam[base + 3],
+                index,
+            };
+            m.scan_count += 1;
+        }
+    }
+
+    /// The fetcher reading a sprite's tile or attributes from OAM. While an
+    /// OAM DMA copies, the read lands on the pair of bytes the DMA is
+    /// writing, the address's low bit picking one (SameBoy's oam_read).
+    /// For tests: this line's sprites as (OAM index, X), in fetch order.
+    #[cfg(test)]
+    pub(super) fn line_sprites(&self) -> Vec<(u8, u8)> {
+        let m = &self.m3;
+        m.sprites[..usize::from(m.sprite_count)]
+            .iter()
+            .map(|s| (s.index, s.x))
+            .collect()
+    }
+
+    pub(super) fn oam_fetch(&self, addr: usize) -> u8 {
+        match self.oam_dma_dest {
+            Some(dest @ 1..0xA0) => self.oam[usize::from(dest & !1) | (addr & 1)],
+            _ => self.oam[addr],
+        }
+    }
+
+    /// The OAM scan all at once: in OAM order, the first 10 sprites whose rows cover LY
     /// (X doesn't matter, so off-screen ones use up slots too), then sorted
     /// by X, OAM order breaking ties, which is the order the fetcher meets
     /// them in. https://gbdev.io/pandocs/OAM.html
@@ -422,8 +490,8 @@ impl Ppu {
                     self.advance_fetcher();
                     let s = self.m3.sprites[usize::from(self.m3.next)];
                     let base = usize::from(s.index) * 4;
-                    self.m3.sprite_tile = self.oam[base + 2];
-                    self.m3.sprite_attrs = self.oam[base + 3];
+                    self.m3.sprite_tile = self.oam_fetch(base + 2);
+                    self.m3.sprite_attrs = self.oam_fetch(base + 3);
                     self.m3.step = Step::SpriteLow;
                     return self.sleep(2);
                 }
@@ -863,9 +931,10 @@ impl Ppu {
         w.u16(m.tile_data_addr);
         m.bg.save(w);
         m.sprites_fifo.save(w);
-        for s in m.sprites {
+        for s in m.sprites.iter().chain(&m.scan) {
             w.bytes(&[s.y, s.x, s.tile, s.attrs, s.index]);
         }
+        w.bytes(&[m.scan_count, m.y_bus, m.x_bus]);
     }
 
     pub(super) fn load_mode3(&mut self, r: &mut StateReader) -> Result<(), StateError> {
@@ -928,7 +997,7 @@ impl Ppu {
         m.tile_data_addr = r.u16()? & 0x3FFF;
         m.bg.load(r)?;
         m.sprites_fifo.load(r)?;
-        for s in &mut m.sprites {
+        for s in m.sprites.iter_mut().chain(&mut m.scan) {
             let mut e = [0u8; 5];
             r.bytes(&mut e)?;
             let [y, x, tile, attrs, index] = e;
@@ -943,6 +1012,9 @@ impl Ppu {
                 index,
             };
         }
+        m.scan_count = r.u8()?.min(10);
+        m.y_bus = r.u8()?;
+        m.x_bus = r.u8()?;
         Ok(())
     }
 }

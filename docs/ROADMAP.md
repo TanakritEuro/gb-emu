@@ -357,7 +357,10 @@ Most of the small picture-based test ROMs in `roms/` already match their referen
 - [x] MBC30: a 4 MB MBC3 (the Japanese Pokémon Crystal's chip) has an 8-bit ROM bank register and
       8 RAM banks. `mbc3-tester` matches on both consoles (by shade on the Color, whose reference
       uses other compatibility colors)
-- [ ] strikethrough: OAM DMA's odd behavior (`strikethrough`)
+- [x] OAM DMA and the PPU: the OAM scan reads each object's Y and X in mode 2, 2 dots apart; while a
+      DMA copies it can't, and keeps seeing the last pair it read, so every object scanned then looks
+      like that one. The sprite fetcher's tile and attribute reads land on the bytes the DMA is
+      writing. `strikethrough` matches on both consoles
 - [ ] Power-on RAM: real RAM starts out random, which `bully` checks for; seeded, so runs stay
       reproducible
 - [ ] Button presses from gb-cli, for tests that need them (little-things' Telling LYs)

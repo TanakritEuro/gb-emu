@@ -121,6 +121,11 @@ pub struct Ppu {
     /// The LCD was just switched on and line 0 hasn't finished: a line with
     /// no OAM scan. See [`Ppu::turn_on`].
     first_line: bool,
+    /// An OAM DMA is starting or copying: the OAM scan can't read OAM (the
+    /// bus keeps this up to date).
+    pub(crate) oam_dma_busy: bool,
+    /// While it copies, the OAM byte it writes next.
+    pub(crate) oam_dma_dest: Option<u8>,
     /// The window's own line counter: the row it last drew, $FF before
     /// its first line of the frame. It counts only lines it shows on, so
     /// hiding it for a while doesn't skip any of its rows.
@@ -244,6 +249,8 @@ impl Ppu {
             wy_triggered: false,
             hblank_dot: HBLANK_DOT,
             first_line: false,
+            oam_dma_busy: false,
+            oam_dma_dest: None,
             window_y: 0xFF,
             m3: fifo::Mode3::default(),
             double_speed: false,
@@ -696,6 +703,7 @@ impl Ppu {
         }
         for _ in 0..cycles {
             self.dot += 1;
+            self.oam_scan_dot();
             // Mode 3 draws the line pixel by pixel and lasts as long as that
             // takes; HBlank (and a Color's HBlank DMA block) follows.
             if self.ly < VBLANK_LINE {
@@ -712,6 +720,7 @@ impl Ppu {
                 self.dot = 0;
                 self.ly = (self.ly + 1) % LINES_PER_FRAME;
                 self.first_line = false;
+                self.oam_scan_dot();
                 if self.ly == VBLANK_LINE {
                     irq |= interrupt::VBLANK;
                     self.wy_triggered = false;
@@ -722,6 +731,24 @@ impl Ppu {
             self.check_stat_line();
         }
         irq | std::mem::take(&mut self.pending_irq)
+    }
+
+    /// Mode 2 reads an object's Y and X every 2 dots: on the original as
+    /// each pair of dots ends (object i at dot 2i + 2), on the Color as it
+    /// begins (dot 2i), as SameBoy has them.
+    fn oam_scan_dot(&mut self) {
+        if self.ly >= VBLANK_LINE || self.first_line || self.dot % 2 == 1 {
+            return;
+        }
+        let offset = if self.model == Model::Dmg { 2 } else { 0 };
+        if let Some(index) = self
+            .dot
+            .checked_sub(offset)
+            .map(|d| d / 2)
+            .filter(|&i| i < 40)
+        {
+            self.scan_object(index as u8);
+        }
     }
 
     /// Sets STAT's mode bits and LY == LYC flag. Each line is mode 2 (OAM
@@ -984,6 +1011,7 @@ mod tests {
         /// HBlank.
         fn render_scanline(&mut self) {
             self.dot = 0;
+            self.oam_scan_dot(); // the Color reads object 0 at dot 0
             for _ in 0..DOTS_PER_LINE - 1 {
                 self.tick(1);
                 if self.dot > MODE3_DOT && self.m3.step == fifo::Step::Idle {
@@ -1851,6 +1879,13 @@ mod tests {
         p.write_oam(base + 3, attrs);
     }
 
+    /// Starts the line over from dot 0, for sprites put in place just now
+    /// (the Color reads object 0 at dot 0).
+    fn begin_line(p: &mut Ppu) {
+        p.dot = 0;
+        p.oam_scan_dot();
+    }
+
     fn draw_line(p: &mut Ppu, ly: u8) {
         p.ly = ly;
         p.render_scanline();
@@ -2189,6 +2224,37 @@ mod tests {
     }
 
     #[test]
+    fn during_an_oam_dma_the_scan_sees_the_last_object_it_read_again_and_again() {
+        // Object 4 is on line 1, the rest off-screen. A DMA starts as the
+        // scan reaches object 5: from then on the scan keeps seeing object
+        // 4's Y and X, so objects 5-13 join it, all at its X.
+        let mut p = sprite_ppu();
+        put_sprite(&mut p, 4, 40, 1, 1, 0);
+        run_to(&mut p, 1, 11);
+        p.oam_dma_busy = true;
+        run_to(&mut p, 1, MODE3_DOT);
+        let expected: Vec<(u8, u8)> = (4..14).map(|i| (i, 48)).collect();
+        assert_eq!(p.line_sprites(), expected);
+    }
+
+    #[test]
+    fn during_an_oam_dma_the_fetcher_reads_where_it_writes() {
+        // The DMA writes byte $11 next: a sprite's tile read gets byte $10,
+        // its attributes byte $11, whichever sprite it is.
+        let mut p = sprite_ppu();
+        for (i, b) in p.oam.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        p.oam_dma_dest = Some(0x11);
+        assert_eq!(
+            (p.oam_fetch(4 * 7 + 2), p.oam_fetch(4 * 7 + 3)),
+            (0x10, 0x11)
+        );
+        p.oam_dma_dest = None;
+        assert_eq!(p.oam_fetch(4 * 7 + 2), 30);
+    }
+
+    #[test]
     fn sprites_off_mid_fetch_cut_the_fetch_short_on_the_original() {
         // A sprite at the line's start costs 11 dots. Turning sprites off a
         // dot into its fetch: the original drops the rest of it (2 dots
@@ -2196,6 +2262,7 @@ mod tests {
         // not, carries on.
         for (mut p, saved) in [(sprite_ppu(), 9), (cgb_sprite_ppu(), 0)] {
             put_sprite(&mut p, 0, 0, 0, 1, 0);
+            begin_line(&mut p);
             let full = run_to_hblank(&mut p.clone());
             while !p.fetching_sprite() {
                 p.tick(1);
@@ -2552,6 +2619,7 @@ mod tests {
             p.write_vram(0x9800 + col, 1);
         }
         put_sprite(&mut p, 0, 0, 0, 2, 0);
+        begin_line(&mut p);
         let line = write_lcdc_before_a_low_byte_read(&mut p, 0x91);
         let glitched = line.iter().position(|&i| i == 3).expect("a glitched tile");
         assert_eq!(line[glitched - 4..glitched + 4], [2, 2, 2, 2, 3, 3, 3, 3]);
