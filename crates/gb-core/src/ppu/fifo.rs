@@ -10,7 +10,7 @@
 //! SameBoy's PPU (Core/display.c, https://github.com/LIJI32/SameBoy, MIT),
 //! which matches Mealybug Tearoom's pictures of real hardware.
 
-use super::{Ppu, Sprite, DMG_PALETTE, SCREEN_WIDTH};
+use super::{WindowFromStart, Ppu, Sprite, DMG_PALETTE, SCREEN_WIDTH};
 use crate::state::{StateError, StateReader, StateWriter};
 use crate::Model;
 
@@ -341,6 +341,15 @@ impl Ppu {
         m.position = START;
         m.fetch = FetchStep::TileAddr;
         m.window_active = false;
+        let armed = std::mem::replace(&mut self.window_from_start, WindowFromStart::No);
+        if armed != WindowFromStart::No && self.lcdc & 0x20 != 0 {
+            m.window_active = true;
+            m.window_tile_x = 1;
+            if armed == WindowFromStart::Armed {
+                self.window_y = self.window_y.wrapping_add(1);
+            }
+        }
+        let m = &mut self.m3;
         m.window_fetching = false;
         m.insert_pixel = false;
         m.no_window_glitch = false;
@@ -587,6 +596,11 @@ impl Ppu {
                     || (pos == START && self.scx & 7 != 0)
                     || (0u8.wrapping_sub(15)..=0u8.wrapping_sub(8)).contains(&pos)
             } else if self.wx >= 166 + u8::from(color) {
+                // WX 166 on the original never starts it mid-line, though
+                // its line counter still moves on at that spot (SameBoy).
+                if !color && self.wx == 166 && pos == 159 {
+                    self.window_y = self.window_y.wrapping_add(1);
+                }
                 false
             } else if self.wx == pos.wrapping_add(7) {
                 true
@@ -897,6 +911,18 @@ impl Ppu {
         self.m3.position = START;
         self.m3.step = Step::Idle;
         self.m3.window_active = false;
+        // WX 166 on the original: the window is on as the line ends, so the
+        // next line starts on it, from its second tile, as Pan Docs' "spans
+        // the entirety of the following scanline" (SameBoy).
+        // https://gbdev.io/pandocs/Window.html#wx-values-0-and-166
+        if !self.color_hw() && self.wy_triggered && self.wx == 166 {
+            self.window_from_start = if self.lcdc & 0x20 != 0 {
+                self.window_y = self.window_y.wrapping_add(1);
+                WindowFromStart::Counted
+            } else {
+                WindowFromStart::Armed
+            };
+        }
     }
 
     pub(super) fn save_mode3(&self, w: &mut StateWriter) {

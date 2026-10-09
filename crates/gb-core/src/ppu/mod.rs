@@ -73,6 +73,18 @@ const LAST_LINE: u8 = 153;
 const LYC_153_UNTIL: u32 = 4;
 const LYC_0_FROM: u32 = 8;
 
+/// WX = 166 on the original, as a line ends (see `Ppu::finish_line`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowFromStart {
+    No,
+    /// The window starts the next line if it's on by then, and its line
+    /// counter moves on then.
+    Armed,
+    /// As Armed, but the window was on as the line ended and the counter
+    /// moved on already.
+    Counted,
+}
+
 #[derive(Clone)]
 pub struct Ppu {
     model: Model,
@@ -116,6 +128,9 @@ pub struct Ppu {
     pub(crate) dot: u32,
     /// Set once WY == LY at the start of a line; cleared at VBlank.
     wy_triggered: bool,
+    /// The original with WX = 166: the window is on from the next line's
+    /// first pixel (see `Ppu::finish_line`).
+    window_from_start: WindowFromStart,
     /// The dot where this line's mode 3 ends and HBlank begins.
     hblank_dot: u32,
     /// The LCD was just switched on and line 0 hasn't finished: a line with
@@ -139,6 +154,11 @@ pub struct Ppu {
     pub(crate) double_speed: bool,
     /// The STAT interrupt line as of the last check, for edge detection.
     stat_line: bool,
+    /// The LY == LYC source of that line. It follows the comparison, and
+    /// holds while there's none (as LY changes), where the STAT flag may read
+    /// 0 (SameBoy's lyc_interrupt_line). So a match on one line still masks
+    /// the next line's mode 2 interrupt.
+    lyc_line: bool,
     /// IF bits raised by register writes, handed over on the next `tick`.
     pending_irq: u8,
     /// HBlanks (of lines 0-143) begun since the bus last asked: the Color's
@@ -257,6 +277,7 @@ impl Ppu {
             wx: 0,
             dot: 0,
             wy_triggered: false,
+            window_from_start: WindowFromStart::No,
             hblank_dot: HBLANK_DOT,
             first_line: false,
             wy_check_in: 0,
@@ -266,6 +287,7 @@ impl Ppu {
             m3: fifo::Mode3::default(),
             double_speed: false,
             stat_line: false,
+            lyc_line: false,
             pending_irq: 0,
             hblanks: 0,
             hblank_in: 0,
@@ -290,12 +312,14 @@ impl Ppu {
         ]);
         w.u32(self.dot);
         w.bool(self.wy_triggered);
+        w.u8(self.window_from_start as u8);
         w.u8(self.wy_check_in as u8);
         w.u8(self.hblank_in);
         w.u16(self.hblank_dot as u16);
         w.bool(self.first_line);
         w.u8(self.window_y);
         w.bool(self.stat_line);
+        w.bool(self.lyc_line);
         w.u8(self.pending_irq);
         w.bytes(&self.bg_palettes);
         w.bytes(&self.obj_palettes);
@@ -337,6 +361,12 @@ impl Ppu {
             return Err(StateError::Corrupt("PPU position"));
         }
         self.wy_triggered = r.bool()?;
+        self.window_from_start = match r.u8()? {
+            0 => WindowFromStart::No,
+            1 => WindowFromStart::Armed,
+            2 => WindowFromStart::Counted,
+            _ => return Err(StateError::Corrupt("window from start")),
+        };
         self.wy_check_in = u32::from(r.u8()?.min(6));
         self.hblank_in = r.u8()?.min(2);
         self.hblank_dot = u32::from(r.u16()?);
@@ -346,6 +376,7 @@ impl Ppu {
         self.first_line = r.bool()?;
         self.window_y = r.u8()?;
         self.stat_line = r.bool()?;
+        self.lyc_line = r.bool()?;
         self.pending_irq = r.u8()?;
         r.bytes(&mut self.bg_palettes)?;
         r.bytes(&mut self.obj_palettes)?;
@@ -688,6 +719,7 @@ impl Ppu {
         self.m3 = fifo::Mode3::default(); // a line cut short
         self.wy_triggered = false;
         self.window_y = 0xFF;
+        self.window_from_start = WindowFromStart::No;
         // Blank it in place: the buffer's address must not change.
         for px in self.framebuffer.as_chunks_mut::<4>().0 {
             *px = DMG_PALETTE[0];
@@ -767,7 +799,14 @@ impl Ppu {
                 if self.ly == VBLANK_LINE {
                     irq |= interrupt::VBLANK;
                     self.wy_triggered = false;
+                    // A window armed by WX 166 as line 143 ended carries on
+                    // through VBlank: line 0 starts on its row 0 (SameBoy).
                     self.window_y = 0xFF;
+                    // One armed as line 143 ended carries on through VBlank
+                    // to line 0, which counts from the reset (SameBoy).
+                    if self.window_from_start == WindowFromStart::Counted {
+                        self.window_from_start = WindowFromStart::Armed;
+                    }
                 }
             }
             self.update_stat_bits();
@@ -843,6 +882,17 @@ impl Ppu {
             0
         };
         self.stat = (self.stat & !0x07) | coincide | mode;
+        if self.lcd_on() {
+            if self.ly == VBLANK_LINE - 1 && self.dot == DOTS_PER_LINE - 1 {
+                // A match on line 143 ends a dot before VBlank begins, just
+                // before the mode 1 source comes on: a fresh interrupt
+                // (Gambatte's lycint143_m1irq). A match on 144 still comes
+                // with VBlank (Wilbert Pol's ly_lyc_144).
+                self.lyc_line = false;
+            } else if let Some(ly) = compared {
+                self.lyc_line = ly == self.lyc;
+            }
+        }
     }
 
     /// The four STAT sources, each gated by its enable bit (6: LY == LYC,
@@ -884,7 +934,7 @@ impl Ppu {
             (ly, 455) => ly < VBLANK_LINE - 1,
             _ => false,
         };
-        let line = (self.stat & 0x40 != 0 && self.stat & 0x04 != 0)
+        let line = (self.stat & 0x40 != 0 && self.lyc_line)
             || (self.stat & 0x20 != 0 && mode2_pulse)
             || (self.stat & 0x10 != 0 && mode == 1)
             || (self.stat & 0x08 != 0
@@ -1250,6 +1300,29 @@ mod tests {
         assert_eq!(p.read_reg(0xFF41) & 0x04, 0x04, "LY 0 == LYC 0");
         p.tick(1);
         assert_eq!(p.read_reg(0xFF41) & 0x04, 0, "LY reads 1 now");
+    }
+
+    #[test]
+    fn a_lyc_match_masks_the_next_lines_mode_2_interrupt() {
+        // The LY == LYC source holds while LY changes, so the line is still
+        // high as line 2's mode 2 pulse comes.
+        let mut p = stat_ppu(0x60);
+        p.write_reg(0xFF45, 1);
+        assert_eq!(count_stat(&mut p, 456), 1, "LY == LYC on line 1");
+        assert_eq!(count_stat(&mut p, 456), 0, "line 2's mode 2: masked");
+        assert_eq!(count_stat(&mut p, 456), 1, "line 3's mode 2");
+    }
+
+    #[test]
+    fn a_lyc_match_on_line_143_ends_just_before_vblank_for_a_fresh_interrupt() {
+        let mut p = stat_ppu(0x50);
+        p.write_reg(0xFF45, 143);
+        assert_eq!(count_stat(&mut p, 143 * 456), 1, "LY == LYC on line 143");
+        while (p.ly, p.dot) != (143, 455) {
+            p.tick(1);
+        }
+        assert_eq!(p.tick(1) & interrupt::STAT, interrupt::STAT, "mode 1");
+        assert_eq!(p.ly, 144);
     }
 
     #[test]
@@ -1804,6 +1877,21 @@ mod tests {
     /// Runs whole scanlines (each is drawn as it finishes).
     fn lines(p: &mut Ppu, n: u32) {
         p.tick(456 * n);
+    }
+
+    #[test]
+    fn wx_166_on_the_original_spans_the_following_lines() {
+        let mut p = window_ppu(166, 0);
+        lines(&mut p, 9);
+        assert_eq!(shade_at(&p, 0, 0), 0, "line 0: background");
+        assert_eq!(shade_at(&p, 159, 0), 0, "not even the last pixel");
+        // Each line after starts on the window; line 0 moved its counter on
+        // twice, so line 1 shows its row 1, and line 8 its row 8.
+        for x in [0, 80, 159] {
+            assert_eq!(shade_at(&p, x, 1), 1, "line 1, x {x}");
+            assert_eq!(shade_at(&p, x, 7), 1, "line 7, x {x}");
+            assert_eq!(shade_at(&p, x, 8), 2, "line 8: map row 1, x {x}");
+        }
     }
 
     #[test]
