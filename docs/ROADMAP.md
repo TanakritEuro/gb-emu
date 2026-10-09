@@ -361,8 +361,11 @@ Most of the small picture-based test ROMs in `roms/` already match their referen
       DMA copies it can't, and keeps seeing the last pair it read, so every object scanned then looks
       like that one. The sprite fetcher's tile and attribute reads land on the bytes the DMA is
       writing. `strikethrough` matches on both consoles
-- [ ] Power-on RAM: real RAM starts out random, which `bully` checks for; seeded, so runs stay
-      reproducible
+- [x] bully: RAM powers up scrambled (pseudo-random, seeded from the ROM so runs stay
+      reproducible); OAM DMA takes the bus it reads from, so the CPU's reads there get the byte it
+      just copied and its writes go astray (cartridge and WRAM share a bus on the original, WRAM has
+      its own on the Color); and the copy's first byte comes in the M-cycle it takes OAM. `bully`
+      matches
 - [ ] Button presses from gb-cli, for tests that need them (little-things' Telling LYs)
 
 **Done when:** all four match their reference screenshots.

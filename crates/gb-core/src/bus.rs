@@ -33,19 +33,29 @@ impl Default for Hdma {
     }
 }
 
+/// What a CPU access on OAM DMA's bus meets (see [`Bus::dma_conflict`]).
+#[derive(Debug, Clone, Copy)]
+enum DmaConflict {
+    /// It lands at this address instead.
+    At(u16),
+    /// It goes nowhere (reads $FF).
+    Lost,
+}
+
 /// OAM DMA, started by writing a source page to $FF46: after an M-cycle to
 /// start up, it copies $XX00-$XX9F to OAM one byte per M-cycle, 160 in all
 /// (640 T-cycles, at the CPU's speed). While it copies, OAM belongs to it:
-/// the CPU reads $FF there and its writes are lost. Writing $FF46 again
-/// restarts it; the old copy carries on (and keeps OAM) until the new one
-/// starts. https://gbdev.io/pandocs/OAM_DMA_Transfer.html
+/// the CPU reads $FF there and its writes are lost; the bus it reads from
+/// is taken too (see [`Bus::dma_conflict`]). Writing $FF46 again restarts
+/// it; the old copy carries on (and keeps OAM) until the new one starts.
+/// https://gbdev.io/pandocs/OAM_DMA_Transfer.html
 #[derive(Debug, Clone, Copy, Default)]
 struct OamDma {
     /// A copy is running.
     active: bool,
     /// Source page of the running copy.
     page: u8,
-    /// Bytes it has copied, 0-159.
+    /// Bytes it has copied, 0-160 (160: done, letting go of OAM).
     copied: u8,
     /// A copy asked for by a write to $FF46: it starts once `starting`
     /// M-cycles pass (0: none waiting).
@@ -166,9 +176,29 @@ pub struct Bus {
     pub doctor_mode: bool,
 }
 
+/// What RAM holds at power-on. Real RAM comes up with whatever charge its
+/// cells were left with: neither all zeros nor anything a game can count on
+/// (bully checks it isn't uniform). Here pseudo-random bytes (xorshift),
+/// seeded from the ROM, so a game starts out the same way every time and
+/// runs stay reproducible.
+fn power_on_ram(seed: u64, ram: &mut [u8]) {
+    let mut x = seed | 1;
+    for b in ram {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *b = (x >> 32) as u8;
+    }
+}
+
 impl Bus {
     pub fn new(cart: Cartridge, model: Model) -> Self {
         let compat = model == Model::Cgb && !cart.header.cgb;
+        let seed = cart.rom_hash();
+        let mut wram = Box::new([0; 0x8000]);
+        power_on_ram(seed, &mut wram[..]);
+        let mut hram = [0; 0x7F];
+        power_on_ram(!seed, &mut hram);
         let mut ppu = Ppu::post_boot(model);
         if model == Model::Dmg {
             let logo = std::array::from_fn(|i| cart.read_rom(0x0104 + i as u16));
@@ -186,7 +216,7 @@ impl Bus {
             apu: Apu::new(model == Model::Cgb),
             model,
             compat,
-            wram: Box::new([0; 0x8000]),
+            wram,
             svbk: 0,
             speed_armed: false,
             double_speed: false,
@@ -197,7 +227,7 @@ impl Bus {
             oam_dma: OamDma::default(),
             dma_stall: 0,
             cpu_halted: false,
-            hram: [0; 0x7F],
+            hram,
             io: [0; 0x80],
             if_reg: 0xE1,
             ie_reg: 0,
@@ -274,7 +304,7 @@ impl Bus {
         let mut dma = [0; 5];
         r.bytes(&mut dma)?;
         let [page, copied, starting, next_page, cycles] = dma;
-        if copied >= 0xA0 || starting > OAM_DMA_START || cycles >= 4 {
+        if copied > 0xA0 || starting > OAM_DMA_START || cycles >= 4 {
             return Err(StateError::Corrupt("OAM DMA"));
         }
         self.oam_dma = OamDma {
@@ -442,9 +472,7 @@ impl Bus {
     /// while OAM DMA copies or the PPU scans and draws (modes 2 and 3), VRAM
     /// and the Color's palette data while the PPU draws (mode 3).
     /// https://gbdev.io/pandocs/Rendering.html#ppu-modes
-    /// TODO(accuracy): during OAM DMA the DMG's CPU can't use the bus the copy
-    /// reads from either (cartridge and WRAM, or VRAM): it gets the byte being
-    /// copied. Code waiting for DMA runs from HRAM, so games don't notice.
+    /// (The bus OAM DMA reads from is taken too: see [`Bus::dma_conflict`].)
     /// The PPU's edges differ a little for reads and writes: see
     /// [`Ppu::oam_locked`].
     fn cpu_locked_out(&self, addr: u16, write: bool) -> bool {
@@ -543,7 +571,88 @@ impl Bus {
         if self.cpu_locked_out(addr, false) {
             return 0xFF;
         }
-        self.read(addr)
+        match self.dma_conflict(addr) {
+            Some(DmaConflict::Lost) => 0xFF,
+            Some(DmaConflict::At(target)) => self.read(target),
+            None => self.read(addr),
+        }
+    }
+
+    /// The bus OAM DMA reads from, if the CPU wants it too. While a copy
+    /// runs, the CPU can't use the bus the copy reads from: on the original
+    /// cartridge and WRAM share one, on the Color WRAM has its own; VRAM has
+    /// its own on both. The CPU's access lands where the copy just read
+    /// (on the Color, in WRAM, at the same offset of the bank half the copy
+    /// is in). As SameBoy has it (Core/memory.c, is_addr_in_dma_use), for
+    /// the original and CPU CGB C. https://gbdev.io/pandocs/OAM_DMA_Transfer.html
+    fn dma_conflict(&self, addr: u16) -> Option<DmaConflict> {
+        let d = &self.oam_dma;
+        if !d.active || d.copied == 0 || addr >= 0xFE00 {
+            return None;
+        }
+        let src = u16::from_be_bytes([d.page, d.copied]);
+        if src == addr || (src >= 0xE000 && src & !0x2000 == addr) {
+            return None;
+        }
+        let cgb = self.model == Model::Cgb;
+        #[derive(PartialEq)]
+        enum Line {
+            Main,
+            Ram,
+            Vram,
+        }
+        let bus = |a: u16| match a {
+            0x8000..=0x9FFF => Line::Vram,
+            0xC000.. if cgb => Line::Ram,
+            _ => Line::Main,
+        };
+        let conflict = if cgb && addr >= 0xC000 {
+            bus(src) != Line::Vram
+        } else if cgb && src >= 0xE000 {
+            bus(addr) != Line::Vram
+        } else {
+            bus(addr) == bus(src)
+        };
+        if !conflict {
+            return None;
+        }
+        if cgb && bus(addr) == Line::Main && src >= 0xE000 {
+            return Some(DmaConflict::Lost);
+        }
+        let last = src.wrapping_sub(1);
+        Some(DmaConflict::At(
+            if cgb && addr >= 0xC000 && (bus(src) != Line::Ram || src >= 0xE000) {
+                (last & 0x1000) | (addr & 0x0FFF) | 0xC000
+            } else {
+                last
+            },
+        ))
+    }
+
+    /// A CPU write on the bus OAM DMA is using (see [`Bus::dma_conflict`]).
+    /// On the original it goes where the copy just read: into a cartridge
+    /// register there; at $A000 and up it's lost and ANDed into the OAM
+    /// byte just copied. On the Color (CPU CGB C) a write to WRAM while the
+    /// copy reads elsewhere lands in WRAM; any other is lost, clearing that
+    /// OAM byte if the copy reads below $A000.
+    fn conflicting_write(&mut self, addr: u16, val: u8, conflict: DmaConflict) {
+        let DmaConflict::At(target) = conflict else {
+            return;
+        };
+        let src = u16::from_be_bytes([self.oam_dma.page, self.oam_dma.copied]);
+        let just_copied = 0xFE00 + u16::from(self.oam_dma.copied) - 1;
+        if self.model == Model::Cgb {
+            if addr >= 0xC000 && !(0xC000..0xE000).contains(&src) {
+                self.write(target, val);
+            } else if target < 0xA000 {
+                self.ppu.write_oam(just_copied, 0);
+            }
+        } else if target >= 0xA000 {
+            let old = self.ppu.read_oam(just_copied);
+            self.ppu.write_oam(just_copied, old & val);
+        } else {
+            self.write(target, val);
+        }
     }
 
     /// The original's OAM bug: a 16-bit increment or decrement by the CPU
@@ -558,7 +667,9 @@ impl Bus {
     /// A write by the CPU: lost where it's locked out (though a palette
     /// write still moves the palette index on).
     pub fn cpu_write(&mut self, addr: u16, val: u8) {
-        if self.cpu_locked_out(addr, true) {
+        if let Some(conflict) = self.dma_conflict(addr) {
+            self.conflicting_write(addr, val, conflict);
+        } else if self.cpu_locked_out(addr, true) {
             if matches!(addr, 0xFF69 | 0xFF6B) {
                 self.ppu.lost_palette_write(addr);
             }
@@ -691,18 +802,17 @@ impl Bus {
     /// asked for gets closer to starting. Sources $E000 and up read WRAM
     /// ($FE00 copies from $DE00), as on the original.
     /// TODO(accuracy): the Color reads other things from $E000 up.
+    /// One M-cycle of OAM DMA: a byte copied, from the M-cycle the copy
+    /// takes OAM to the one before it lets go (SameBoy's timing, which
+    /// bully's bus conflict test pins).
     fn oam_dma_m_cycle(&mut self) {
         let dma = &mut self.oam_dma;
         if dma.active {
-            let mut src = u16::from_be_bytes([dma.page, dma.copied]);
-            if src >= 0xE000 {
-                src -= 0x2000;
+            if dma.copied == 0xA0 {
+                dma.active = false; // all copied: OAM is free again
+            } else {
+                self.oam_dma_copy();
             }
-            let i = u16::from(dma.copied);
-            dma.copied += 1;
-            dma.active = dma.copied < 0xA0;
-            let byte = self.read(src);
-            self.ppu.write_oam(0xFE00 + i, byte);
         }
         let dma = &mut self.oam_dma;
         if dma.starting > 0 {
@@ -711,8 +821,21 @@ impl Bus {
                 dma.active = true;
                 dma.page = dma.next_page;
                 dma.copied = 0;
+                self.oam_dma_copy();
             }
         }
+    }
+
+    fn oam_dma_copy(&mut self) {
+        let dma = &mut self.oam_dma;
+        let mut src = u16::from_be_bytes([dma.page, dma.copied]);
+        if src >= 0xE000 {
+            src -= 0x2000;
+        }
+        let i = u16::from(dma.copied);
+        dma.copied += 1;
+        let byte = self.read(src);
+        self.ppu.write_oam(0xFE00 + i, byte);
     }
 
     /// Advances timer, PPU, cartridge clock and APU by `cycles` CPU
@@ -864,15 +987,57 @@ mod tests {
         assert_eq!(b.cpu_read(0xFE00), 0x99, "an M-cycle to start up");
         b.tick(4);
         assert_eq!(b.cpu_read(0xFE00), 0xFF, "OAM belongs to the copy");
+        assert_eq!(b.read(0xFE00), 0x10, "the first byte, as it takes OAM");
+        assert_eq!(b.read(0xFE01), 0x00, "not the second yet");
         b.cpu_write(0xFE00, 0x55); // lost
         b.tick(4);
-        assert_eq!(b.read(0xFE00), 0x10, "the first byte");
-        assert_eq!(b.read(0xFE01), 0x00, "not the second yet");
+        assert_eq!(b.read(0xFE01), 0x11);
         b.tick(4 * 158);
         assert_eq!(b.cpu_read(0xFE9F), 0xFF, "still copying");
         b.tick(4);
         assert_eq!(b.cpu_read(0xFE9F), 0x10 + 0x9F, "done: 160 M-cycles held");
         assert_eq!(b.cpu_read(0xFE00), 0x10, "the CPU's write was lost");
+    }
+
+    #[test]
+    fn ram_powers_up_scrambled_but_the_same_every_time() {
+        let wram = |b: &Bus| (0xC000..0xE000).map(|a| b.read(a)).collect::<Vec<u8>>();
+        let (a, b) = (bus(), bus());
+        assert_eq!(wram(&a), wram(&b), "the same ROM, the same RAM");
+        assert!(wram(&a).windows(2).any(|w| w[0] != w[1]), "not uniform");
+        assert!((0xFF80..0xFFFF).any(|addr| a.read(addr) != 0), "HRAM too");
+    }
+
+    #[test]
+    fn oam_dma_takes_the_bus_it_reads_from() {
+        // A copy from WRAM ($C100: $10, $11, ..). On the original the
+        // cartridge shares WRAM's bus: reading ROM gets the byte the copy
+        // just read. VRAM and HRAM have buses of their own. On the Color,
+        // WRAM has its own, so ROM is free and WRAM is taken.
+        for model in [Model::Dmg, Model::Cgb] {
+            let mut b = if model == Model::Dmg {
+                bus()
+            } else {
+                cgb_bus()
+            };
+            b.write(0xFF40, 0x00);
+            for i in 0..0xA0u16 {
+                b.write(0xC100 + i, 0x10 + i as u8);
+            }
+            b.write(0x8000, 0x77);
+            b.write(0xFF90, 0x66);
+            let rom = b.read(0x0150);
+            b.cpu_write(0xFF46, 0xC1);
+            b.tick(4 * 4); // bytes 0-2 copied
+            let (expect_rom, expect_wram) = match model {
+                Model::Dmg => (0x12, 0x12),
+                Model::Cgb => (rom, 0x12),
+            };
+            assert_eq!(b.cpu_read(0x0150), expect_rom, "ROM, {model:?}");
+            assert_eq!(b.cpu_read(0xD000), expect_wram, "WRAM, {model:?}");
+            assert_eq!(b.cpu_read(0x8000), 0x77, "VRAM is free");
+            assert_eq!(b.cpu_read(0xFF90), 0x66, "HRAM is free");
+        }
     }
 
     #[test]
