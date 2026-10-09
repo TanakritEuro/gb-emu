@@ -376,6 +376,24 @@ strikethrough, bully and Telling LYs. After: all four, on both consoles where th
 
 ---
 
+## Milestone 17 — Gambatte's test suite
+
+Gambatte's tests (`roms/gambatte`, about 3500 ROMs, checked on an original and a CPU CGB C) each
+run 15 frames and then show a hex result on screen, match a screenshot, or make sound or not, as
+their file names say. They're the broadest suite left: grouped by what they test, the failures
+say what to work on next.
+
+- [x] A harness: `gambatte-tests` (in gb-cli) runs them as Gambatte's testrunner.cpp does. First
+      count: 4321/5225 checks (the Color 2703/3352, the original 1618/1873)
+- [ ] OAM DMA (`oamdma`: 285 failing)
+- [ ] The Color's VRAM DMA (`dma`: 113 failing)
+- [ ] The next largest groups (window, `arg`, sound, serial, mode 1, mode 0, LCD offset)
+
+**Done when:** the OAM and VRAM DMA groups pass, and each other group is either fixed or
+understood. Before and after counts go here.
+
+---
+
 ## References
 
 - [Pan Docs](https://gbdev.io/pandocs/) — the hardware reference

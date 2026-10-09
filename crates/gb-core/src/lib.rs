@@ -399,6 +399,12 @@ impl GameBoy {
         self.bus.apu.set_sample_rate(hz);
     }
 
+    /// Turns the sound's high-pass filter (the capacitor that removes the
+    /// DC offset) off, for the mixer's raw output, or on again.
+    pub fn set_high_pass_filter(&mut self, on: bool) {
+        self.bus.apu.set_high_pass_filter(on);
+    }
+
     /// Audio made since the last call: interleaved left/right f32 samples in
     /// roughly -1..1, at the rate set by `set_sample_rate`.
     pub fn take_audio(&mut self) -> Vec<f32> {

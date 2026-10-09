@@ -319,6 +319,9 @@ pub struct Apu {
     /// for one sample.
     capacitor: [f32; 2],
     charge_factor: f32,
+    /// The high-pass filter is on (the host can turn it off for the raw
+    /// mixer output).
+    high_pass: bool,
     /// Interleaved left/right output, waiting for the frontend.
     samples_out: Vec<f32>,
 }
@@ -557,6 +560,7 @@ impl Apu {
             acc_cycles: 0,
             capacitor: [0.0; 2],
             charge_factor: 0.0,
+            high_pass: true,
             samples_out: Vec::new(),
         };
         apu.set_sample_rate(48_000);
@@ -586,6 +590,12 @@ impl Apu {
         // Pan Docs: charge factor 0.999958 per T-cycle on DMG.
         self.charge_factor =
             0.999958f64.powf(f64::from(CPU_HZ) / f64::from(self.sample_rate)) as f32;
+    }
+
+    /// Turns the high-pass filter off (or on again): samples are then the
+    /// mixer's output as it is, DC offset and all.
+    pub fn set_high_pass_filter(&mut self, on: bool) {
+        self.high_pass = on;
     }
 
     /// Takes the samples made so far: interleaved left, right, as f32 in
@@ -1759,8 +1769,11 @@ impl Apu {
         let cycles = self.acc_cycles.max(1) as f32;
         for side in 0..2 {
             let input = self.acc[side] / cycles;
-            let out = input - self.capacitor[side];
+            let mut out = input - self.capacitor[side];
             self.capacitor[side] = input - out * self.charge_factor;
+            if !self.high_pass {
+                out = input;
+            }
             if self.samples_out.len() < MAX_BUFFERED {
                 self.samples_out.push(out);
             }
@@ -2020,6 +2033,19 @@ mod tests {
         a.set_sample_rate(44_100);
         let n = run(&mut a, 1.0).0.len();
         assert!((44_099..=44_101).contains(&n), "{n}");
+    }
+
+    #[test]
+    fn without_the_high_pass_filter_a_quiet_dac_holds_its_dc_level() {
+        // CH2's DAC on at volume 0: digital 0 is analog +1, a DC level the
+        // filter drains away. Without the filter it stays.
+        let mut a = apu();
+        a.set_high_pass_filter(false);
+        write_all(&mut a, &[(0xFF25, 0x22), (0xFF17, 0x08), (0xFF19, 0x80)]);
+        let (left, _) = run(&mut a, 0.5);
+        let last = *left.last().unwrap();
+        assert!(last > 0.01, "{last}");
+        assert!(left[left.len() / 2..].iter().all(|&s| s == last));
     }
 
     #[test]

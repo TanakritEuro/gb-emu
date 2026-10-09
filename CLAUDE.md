@@ -31,7 +31,8 @@ A Game Boy (DMG) and Game Boy Color (CGB) emulator in Rust that runs in the brow
   - `state.rs` save state format; each component has `save_state`/`load_state` next to its
     fields. Adding state to a component means adding it there too and bumping `state::VERSION`
   - `tests/smoke.rs` end-to-end tests through the public `GameBoy` API
-- `crates/gb-cli/` — headless runner for test ROMs; `--doctor` writes Gameboy Doctor traces, `--wav` records audio
+- `crates/gb-cli/` — headless runner for test ROMs; `--doctor` writes Gameboy Doctor traces, `--wav` records audio;
+  `src/bin/gambatte-tests.rs` runs Gambatte's suite the way its testrunner does
 - `crates/gb-wasm/` — wasm-bindgen wrapper (`Emulator` class) used by `web/`
 - `web/` — static frontend (`index.html`, `main.js`, `style.css`; `input.js` maps keyboard/gamepad/touch to buttons, `timing.js` paces frames, `saves.js` keeps battery saves in localStorage, `states.js` save state slots in IndexedDB, `console.js` the Console panel (which console original games run on, the Color's palettes for them), `link.js` the link cable (carries bytes to a partner), `rtc.js` its WebRTC connection (invite/reply codes), `audio.js` + `audio-worklet.js` + `audio-queue.js` play sound, `debugger.js` + `memview.js` + `vramview.js` + `breakpoints.js` are the debugger panel); `web/pkg/` is generated
 - `scripts/build-web.ps1` / `build-web.sh` — build `web/pkg`
@@ -61,6 +62,7 @@ cargo run --release -p gb-cli -- <rom.gb> --press 30:a+start    # hold buttons 5
 ./scripts/build-web.ps1                                 # build the browser version (Windows)
 node scripts/serve.js                                   # serve it at http://localhost:8765
 node scripts/build-homebrew.js                          # build homebrew/ into web/games/ (needs RGBDS)
+cargo run --release -p gb-cli --bin gambatte-tests -- roms/gambatte   # Gambatte's suite: pass counts per directory
 ```
 
 gb-cli exit codes: 0 passed, 1 failed (Blargg "Failed" over serial or a failure code at $A000, or Mooneye
