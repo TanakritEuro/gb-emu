@@ -165,17 +165,20 @@ impl Ppu {
     /// M-cycles from boot, and its first mode 2 comes 64 dots later. Within
     /// the M-cycle the phase is pinned by Mooneye's tests that run from boot
     /// without switching the LCD off (hblank_ly_scx_timing, di_timing,
-    /// halt_ime1_timing2, intr_1_2_timing).
-    /// TODO(accuracy): the Color's boot ROM takes another time; it's given
-    /// line 0's dot 3, the original's phase.
+    /// halt_ime1_timing2, intr_1_2_timing). The Color's boot ROM hands over
+    /// just after VBlank begins, at line 144's dot 163: Gambatte's
+    /// display_startstate tests read LY and STAT from there, and the dot
+    /// keeps the phase AGE's and Mooneye's Color tests pin.
     pub fn post_boot(model: Model) -> Self {
         let mut p = Self::with_model(model);
         if model == Model::Dmg {
             p.ly = LAST_LINE;
             p.dot = 395;
         } else {
-            p.dot = 3;
+            p.ly = VBLANK_LINE;
+            p.dot = 163;
         }
+        p.update_stat_bits();
         p
     }
 
@@ -1134,7 +1137,12 @@ mod tests {
         assert_eq!(p.stat & 0x03, 0, "dot 455");
         p.tick(1);
         assert_eq!((p.ly, p.dot, p.stat & 0x03), (0, 0, 2));
-        assert_eq!(Ppu::post_boot(Model::Cgb).dot, 3, "the Color: line 0");
+        let p = Ppu::post_boot(Model::Cgb);
+        assert_eq!(
+            (p.ly, p.dot, p.stat & 0x03),
+            (144, 163, 1),
+            "the Color: VBlank"
+        );
     }
 
     #[test]

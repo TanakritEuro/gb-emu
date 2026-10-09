@@ -1390,6 +1390,10 @@ mod tests {
         b.write(0xFF52, 0x0F); // low 4 bits ignored: $C000
         b.write(0xFF53, 0xE0); // only bits 12-8 count: $0000
         b.write(0xFF54, 0x0F); // low 4 bits ignored
+                               // From line 0's dot 3, as the tests below count.
+        while (b.ppu.ly, b.ppu.dot) != (0, 3) {
+            b.tick(1);
+        }
         b
     }
 
