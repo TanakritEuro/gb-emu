@@ -10,7 +10,7 @@
 //! SameBoy's PPU (Core/display.c, https://github.com/LIJI32/SameBoy, MIT),
 //! which matches Mealybug Tearoom's pictures of real hardware.
 
-use super::{WindowFromStart, Ppu, Sprite, DMG_PALETTE, SCREEN_WIDTH};
+use super::{Ppu, Sprite, WindowFromStart, DMG_PALETTE, SCREEN_WIDTH};
 use crate::state::{StateError, StateReader, StateWriter};
 use crate::Model;
 

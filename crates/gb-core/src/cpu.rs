@@ -2410,7 +2410,12 @@ mod tests {
         cpu.reset_post_boot(Model::Cgb);
         bus.write(0xC000, 0x34);
         bus.write(0xC001, 0x12);
-        for (reg, val) in [(0xFF51, 0xC0), (0xFF52, 0x00), (0xFF53, 0x00), (0xFF54, 0x00)] {
+        for (reg, val) in [
+            (0xFF51, 0xC0),
+            (0xFF52, 0x00),
+            (0xFF53, 0x00),
+            (0xFF54, 0x00),
+        ] {
             bus.write(reg, val);
         }
         while (bus.ppu.ly, bus.ppu.stat & 0x03) != (0, 3) {
@@ -2427,7 +2432,11 @@ mod tests {
         bus.if_reg |= interrupt::STAT;
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.regs.pc, 0x48, "dispatched");
-        assert_eq!((bus.read(0x8000), bus.read(0x8001)), (0x34, 0x12), "copied first");
+        assert_eq!(
+            (bus.read(0x8000), bus.read(0x8001)),
+            (0x34, 0x12),
+            "copied first"
+        );
         assert_ne!(bus.read(0xC000), 0x34, "then PC pushed");
     }
 

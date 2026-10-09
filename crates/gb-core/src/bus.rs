@@ -465,9 +465,8 @@ impl Bus {
                 h.active = true;
                 h.remaining = val & 0x7F;
                 let too_late = if self.double_speed { 3 } else { 4 };
-                let in_hblank = self.ppu.stat & 0x03 == 0
-                    && self.ppu.ly < 144
-                    && self.ppu.dot + too_late < 456;
+                let in_hblank =
+                    self.ppu.stat & 0x03 == 0 && self.ppu.ly < 144 && self.ppu.dot + too_late < 456;
                 if !self.ppu.lcd_on() || in_hblank {
                     self.hdma_requests += 1;
                 }
