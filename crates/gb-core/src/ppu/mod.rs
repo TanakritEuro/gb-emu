@@ -121,6 +121,8 @@ pub struct Ppu {
     /// The LCD was just switched on and line 0 hasn't finished: a line with
     /// no OAM scan. See [`Ppu::turn_on`].
     first_line: bool,
+    /// Dots until WY == LY is looked at again after a WY write.
+    wy_check_in: u32,
     /// An OAM DMA is starting or copying: the OAM scan can't read OAM (the
     /// bus keeps this up to date).
     pub(crate) oam_dma_busy: bool,
@@ -252,6 +254,7 @@ impl Ppu {
             wy_triggered: false,
             hblank_dot: HBLANK_DOT,
             first_line: false,
+            wy_check_in: 0,
             oam_dma_busy: false,
             oam_dma_dest: None,
             window_y: 0xFF,
@@ -281,6 +284,7 @@ impl Ppu {
         ]);
         w.u32(self.dot);
         w.bool(self.wy_triggered);
+        w.u8(self.wy_check_in as u8);
         w.u16(self.hblank_dot as u16);
         w.bool(self.first_line);
         w.u8(self.window_y);
@@ -326,6 +330,7 @@ impl Ppu {
             return Err(StateError::Corrupt("PPU position"));
         }
         self.wy_triggered = r.bool()?;
+        self.wy_check_in = u32::from(r.u8()?.min(6));
         self.hblank_dot = u32::from(r.u16()?);
         if !(HBLANK_DOT..=DOTS_PER_LINE).contains(&self.hblank_dot) {
             return Err(StateError::Corrupt("PPU mode 3 length"));
@@ -640,7 +645,18 @@ impl Ppu {
             0xFF47 => self.bgp = val,
             0xFF48 => self.obp0 = val,
             0xFF49 => self.obp1 = val,
-            0xFF4A => self.wy = val,
+            0xFF4A => {
+                // WY == LY is looked at again a few dots after a write, so a
+                // write mid-line can still start the window on this line if
+                // the fetcher hasn't passed WX (Gambatte's window/late_wy
+                // tests; SameBoy schedules the check on a 4-dot grid).
+                self.wy = val;
+                self.wy_check_in = match (self.model, self.double_speed) {
+                    (Model::Dmg, _) => 3,
+                    (Model::Cgb, false) => 6,
+                    (Model::Cgb, true) => 3,
+                };
+            }
             0xFF4B => {
                 self.wx = val;
                 self.wx_written();
@@ -705,6 +721,16 @@ impl Ppu {
             return irq;
         }
         for _ in 0..cycles {
+            if self.wy_check_in > 0 {
+                self.wy_check_in -= 1;
+                if self.wy_check_in == 0
+                    && self.ly < VBLANK_LINE
+                    && self.ly == self.wy
+                    && self.lcdc & 0x20 != 0
+                {
+                    self.wy_triggered = true;
+                }
+            }
             self.dot += 1;
             self.oam_scan_dot();
             // Mode 3 draws the line pixel by pixel and lasts as long as that
@@ -1813,6 +1839,25 @@ mod tests {
         let mut p = window_ppu(7, 200);
         lines(&mut p, 144);
         assert!((0..144).all(|y| shade_at(&p, 0, y) == 0));
+    }
+
+    #[test]
+    fn writing_wy_mid_line_looks_at_wy_and_ly_again_a_few_dots_later() {
+        // Line 2, mode 3 under way, window on, WY $FF: no match at the line's
+        // start. WY = 2 then matches 3 dots later on the original, 6 on the
+        // Color (Gambatte's window/late_wy).
+        for (model, after) in [(Model::Dmg, 3), (Model::Cgb, 6)] {
+            let mut p = Ppu::with_model(model);
+            p.lcdc = 0xB1;
+            p.wy = 0xFF;
+            run_to(&mut p, 2, 85);
+            assert!(!p.wy_triggered);
+            p.write_reg(0xFF4A, 2);
+            p.tick(after - 1);
+            assert!(!p.wy_triggered, "{model:?}: not yet");
+            p.tick(1);
+            assert!(p.wy_triggered, "{model:?}");
+        }
     }
 
     #[test]
