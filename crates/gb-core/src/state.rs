@@ -48,7 +48,8 @@ const MAGIC: &[u8; 4] = b"GBST";
 /// 13: the OAM scan under way (the sprites found so far, the Y and X on its
 /// bus).
 /// 14: the Color's $FEA0-$FEFF bytes.
-pub const VERSION: u16 = 14;
+/// 15: whether an illegal opcode locked the CPU up.
+pub const VERSION: u16 = 15;
 /// Bytes before the payload: magic, version, fingerprint, length.
 const HEADER_LEN: usize = 4 + 2 + 8 + 4;
 

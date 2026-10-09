@@ -160,9 +160,9 @@ fn run(rom: &Path, model: Model, check: &Check) -> Option<(bool, String)> {
     gb.set_high_pass_filter(false);
     let mut audio = Vec::new();
     for _ in 0..FRAMES {
-        if gb.run_frame().is_err() {
-            return Some((false, "error".into()));
-        }
+        // An illegal opcode is reported once; the CPU stays locked up and
+        // the rest runs on, as on hardware (undef_ops).
+        let _ = gb.run_frame();
         audio = gb.take_audio();
     }
     let screen = gambatte_colors(&gb, model);

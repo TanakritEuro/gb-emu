@@ -166,6 +166,10 @@ pub struct Cpu {
     /// T-cycles left of the pause after a speed switch, which the CPU
     /// spends halted (see the STOP arm in `execute`).
     switch_pause: u32,
+    /// An illegal opcode ran: the CPU has locked up for good, interrupts
+    /// and all, while the rest of the console runs on (Gambatte's
+    /// undef_ops tests). https://gbdev.io/pandocs/CPU_Instruction_Set.html
+    locked: bool,
 }
 
 impl Cpu {
@@ -177,6 +181,7 @@ impl Cpu {
     /// A = $11 is how a game tells it's running on a Game Boy Color.
     /// https://gbdev.io/pandocs/Power_Up_Sequence.html#cpu-registers
     pub fn reset_post_boot(&mut self, model: Model) {
+        self.locked = false;
         self.regs = match model {
             Model::Dmg => Registers {
                 a: 0x01,
@@ -222,6 +227,7 @@ impl Cpu {
         w.bool(self.halt_bug);
         w.bool(self.just_halted);
         w.u32(self.switch_pause);
+        w.bool(self.locked);
     }
 
     pub(crate) fn load_state(&mut self, r: &mut StateReader) -> Result<(), StateError> {
@@ -247,6 +253,7 @@ impl Cpu {
         self.halt_bug = r.bool()?;
         self.just_halted = r.bool()?;
         self.switch_pause = r.u32()?.min(SWITCH_PAUSE);
+        self.locked = r.bool()?;
         Ok(())
     }
 
@@ -701,6 +708,10 @@ impl Cpu {
     /// it took.
     pub fn step(&mut self, bus: &mut Bus) -> Result<u32, CpuError> {
         self.ticked = 0;
+        if self.locked {
+            self.idle(bus);
+            return Ok(self.ticked);
+        }
         if self.halted && !self.just_halted && bus.pending_interrupts() != 0 {
             self.halted = false; // HALT began with one already pending
             self.switch_pause = 0;
@@ -744,7 +755,12 @@ impl Cpu {
 
         let _cycles = match self.execute(Opcode::new(opcode), bus) {
             Ok(cycles) => cycles,
-            Err(Illegal) => return Err(CpuError::Illegal { opcode, pc }),
+            Err(Illegal) => {
+                // Reported once, so frontends can say what happened; a
+                // caller that runs on finds the CPU locked up, as hardware.
+                self.locked = true;
+                return Err(CpuError::Illegal { opcode, pc });
+            }
         };
         // The opcode table's count must match the M-cycles spent; checked on
         // every instruction the unit tests run.
@@ -1304,6 +1320,22 @@ mod tests {
             illegal,
             [0xD3, 0xDB, 0xDD, 0xE3, 0xE4, 0xEB, 0xEC, 0xED, 0xF4, 0xFC, 0xFD]
         );
+    }
+
+    #[test]
+    fn after_an_illegal_opcode_the_cpu_stays_locked_up() {
+        // EI is long done; an interrupt comes, but a locked CPU ignores it
+        // and only lets time pass.
+        let (mut cpu, mut bus) = setup(&[0xDD, 0x3C]);
+        cpu.ime = true;
+        bus.ie_reg = interrupt::TIMER;
+        assert!(cpu.step(&mut bus).is_err());
+        bus.if_reg |= interrupt::TIMER;
+        for _ in 0..10 {
+            assert_eq!(cpu.step(&mut bus), Ok(4));
+        }
+        assert_eq!(cpu.regs.pc, 0x0101, "never got further");
+        assert_ne!(cpu.regs.sp, 0xFFFC, "nor took the interrupt");
     }
 
     #[test]
