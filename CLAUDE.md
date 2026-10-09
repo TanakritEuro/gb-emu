@@ -18,7 +18,7 @@ A Game Boy (DMG) and Game Boy Color (CGB) emulator in Rust that runs in the brow
     `cgb()` means Color features are on, `model` which console it is (timing quirks)
   - `ppu/mod.rs` line timing, STAT/LY, OAM/VRAM locks, palettes, framebuffer; debugger pictures of
     VRAM (tile sheet, tile maps). `ppu/fifo.rs` mode 3: the fetcher and pixel FIFOs drawing a line
-    pixel by pixel (timings after SameBoy's PPU)
+    pixel by pixel (timings after SameBoy's PPU). `ppu/oam_bug.rs` the original's OAM corruption bug
   - `timer.rs` DIV/TIMA/TMA/TAC
   - `apu.rs` sound: four channels counting in the APU's own 2 MHz ticks (timings and quirks after
     SameBoy's APU), frame sequencer (length, envelope, sweep) on both DIV-APU edges, the Color's

@@ -305,6 +305,29 @@ CPU CGB B/C only `lcd-align-ly` is left.)
 
 ---
 
+## Milestone 14 — The OAM bug ✅
+
+On the original Game Boy, mode 2 reads OAM a row (8 bytes, two objects) at a time. If the CPU puts
+an OAM address on the bus then, by reading or writing it or by a 16-bit increment passing through
+it (INC rr, DEC rr, PUSH, CALL, RST, JR, an interrupt), the row being read is overwritten with a
+bitwise mix of itself and the rows before it. The Color fixed it. Patterns after SameBoy's DMG.
+https://gbdev.io/pandocs/OAM_Corruption_Bug.html
+
+- [x] Writes and increments: the row being scanned (row 0 just before the scan, then each pair of
+      objects' row) mixes its first word with the row before and copies the rest of it; the CPU's
+      internal M-cycles of INC/DEC rr, PUSH, CALL, RST, JR, LD SP,HL and interrupts put their
+      register on the bus. Blargg `oam_bug` 1-6
+- [x] Reads: a read mixes the scanned row into the row before (rows $00, $20 .. and $10, $30 ..
+      reaching further back), and reads just before the scan or in its last 4 dots, where OAM is held
+      for reads but not writes, mix the row read into the first or last row. Blargg `oam_bug` 7, 8
+
+**Done when:** Blargg's `oam_bug` passes on the original.
+(Before: 3/8. After: 8/8 in the combined ROM. The single `7-timing_effect` prints an OAM dump for
+every timing that corrupts, which overruns its 8 KB text buffer into the test's own code; the
+combined ROM checks the same results by CRC and passes.)
+
+---
+
 ## References
 
 - [Pan Docs](https://gbdev.io/pandocs/) — the hardware reference

@@ -527,13 +527,30 @@ impl Bus {
     }
 
     /// A read by the CPU: like [`read`](Self::read), but memory the CPU is
-    /// locked out of reads $FF.
+    /// locked out of reads $FF. On the original, reading OAM as the PPU
+    /// scans it corrupts it (see [`Bus::oam_bug_increment`]).
     pub fn cpu_read(&mut self, addr: u16) -> u8 {
         self.apu.address_bus = addr;
+        if (0xFE00..=0xFEFF).contains(&addr) && self.model == Model::Dmg {
+            if self.ppu.oam_locked(true) {
+                self.ppu.oam_bug_read(addr);
+            } else if !self.oam_dma.active && self.ppu.oam_locked(false) {
+                self.ppu.oam_bug_read_edge(addr);
+            }
+        }
         if self.cpu_locked_out(addr, false) {
             return 0xFF;
         }
         self.read(addr)
+    }
+
+    /// The original's OAM bug: a 16-bit increment or decrement by the CPU
+    /// (INC rr, DEC rr, PUSH, CALL, RST, JR, an interrupt) puts `addr` on
+    /// the bus in an M-cycle of its own; if that's OAM while the PPU scans
+    /// it, the row being scanned is corrupted.
+    /// https://gbdev.io/pandocs/OAM_Corruption_Bug.html
+    pub fn oam_bug_increment(&mut self, addr: u16) {
+        self.ppu.oam_bug_write(addr);
     }
 
     /// A write by the CPU: lost where it's locked out (though a palette
@@ -542,6 +559,9 @@ impl Bus {
         if self.cpu_locked_out(addr, true) {
             if matches!(addr, 0xFF69 | 0xFF6B) {
                 self.ppu.lost_palette_write(addr);
+            }
+            if self.ppu.oam_locked(true) {
+                self.ppu.oam_bug_write(addr);
             }
         } else {
             self.write(addr, val);

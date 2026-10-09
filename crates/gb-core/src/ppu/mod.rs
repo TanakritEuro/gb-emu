@@ -7,6 +7,7 @@
 //! Reference: https://gbdev.io/pandocs/Rendering.html
 
 mod fifo;
+mod oam_bug;
 
 use crate::bus::interrupt;
 use crate::compat::CompatPalettes;

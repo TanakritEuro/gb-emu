@@ -313,6 +313,14 @@ impl Cpu {
         }
     }
 
+    /// An internal M-cycle in which a 16-bit register is incremented or
+    /// decremented, its value going out on the address bus: on the original
+    /// that can corrupt OAM ([`Bus::oam_bug_increment`]).
+    fn idle_on_bus(&mut self, bus: &mut Bus, addr: u16) {
+        self.idle(bus);
+        bus.oam_bug_increment(addr);
+    }
+
     fn fetch8(&mut self, bus: &mut Bus) -> u8 {
         let v = self.read(bus, self.regs.pc);
         self.regs.pc = self.regs.pc.wrapping_add(1);
@@ -398,7 +406,7 @@ impl Cpu {
     /// stack grows downward.
     fn push16(&mut self, bus: &mut Bus, val: u16) {
         let [lo, hi] = val.to_le_bytes();
-        self.idle(bus);
+        self.idle_on_bus(bus, self.regs.sp);
         self.regs.sp = self.regs.sp.wrapping_sub(1);
         self.write(bus, self.regs.sp, hi);
         self.regs.sp = self.regs.sp.wrapping_sub(1);
@@ -576,7 +584,7 @@ impl Cpu {
     /// and counts from the address after the JR instruction, which is where
     /// PC already points.
     fn jr(&mut self, bus: &mut Bus, offset: u8) {
-        self.idle(bus);
+        self.idle_on_bus(bus, self.regs.pc);
         self.regs.pc = self.regs.pc.wrapping_add_signed(i16::from(offset as i8));
     }
 
@@ -632,7 +640,9 @@ impl Cpu {
             self.regs.pc
         };
         let [lo, hi] = ret.to_le_bytes();
-        self.idle(bus);
+        // PC (one past the dropped opcode) and SP both go out on the bus.
+        self.idle_on_bus(bus, self.regs.pc.wrapping_add(1));
+        bus.oam_bug_increment(self.regs.sp);
         self.regs.sp = self.regs.sp.wrapping_sub(1);
         self.write(bus, self.regs.sp, hi);
         let pending = bus.pending_interrupts();
@@ -844,18 +854,17 @@ impl Cpu {
                     }
                     Ok(8)
                 }
-                // q=0: INC rp[p]  q=1: DEC rp[p]. No flags.
-                // TODO(accuracy): with a pair pointing into OAM ($FE00-$FEFF)
-                // during PPU mode 2, the DMG corrupts OAM (the "OAM bug").
+                // q=0: INC rp[p]  q=1: DEC rp[p]. No flags. The pair goes
+                // out on the bus as it changes (the OAM bug).
                 3 => {
                     let val = self.read_rp(op.p);
+                    self.idle_on_bus(bus, val);
                     let r = if op.q == 0 {
                         val.wrapping_add(1)
                     } else {
                         val.wrapping_sub(1)
                     };
                     self.write_rp(op.p, r);
-                    self.idle(bus);
                     Ok(8)
                 }
                 // INC r[y]
@@ -1014,7 +1023,7 @@ impl Cpu {
                     // LD SP, HL
                     _ => {
                         self.regs.sp = self.regs.hl();
-                        self.idle(bus);
+                        self.idle_on_bus(bus, self.regs.sp);
                         Ok(8)
                     }
                 },
@@ -1350,6 +1359,34 @@ mod tests {
         assert_eq!(bus.read(0xFF04), 0);
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.regs.a, 1, "execution carries on after STOP");
+    }
+
+    #[test]
+    fn inc_rr_through_oam_during_its_scan_corrupts_it_on_the_original_only() {
+        for model in [Model::Dmg, Model::Cgb] {
+            // INC DE
+            let cart = Cartridge::from_rom(rom_with_program(&[0x13])).unwrap();
+            let mut cpu = Cpu::new();
+            cpu.reset_post_boot(model);
+            let mut bus = Bus::new(cart, model);
+            cpu.regs.set_de(0xFE00);
+            for i in 0..0xA0u16 {
+                bus.write(0xFE00 + i, i as u8);
+            }
+            while (bus.ppu.ly, bus.ppu.dot) != (1, 2) {
+                bus.tick(1);
+            }
+            cpu.step(&mut bus).unwrap();
+            assert_eq!(cpu.regs.de(), 0xFE01);
+            // DE goes out in INC's second M-cycle, at dot 10, as the scan
+            // reads row $18: on the original it becomes row $10's copy.
+            let row: Vec<u8> = (0x18..0x20).map(|i| bus.read(0xFE00 + i)).collect();
+            let expected: Vec<u8> = match model {
+                Model::Dmg => (0x10..0x18).collect(),
+                Model::Cgb => (0x18..0x20).collect(),
+            };
+            assert_eq!(row, expected, "{model:?}");
+        }
     }
 
     /// A Color running `program`, with KEY1 armed for a speed switch.
