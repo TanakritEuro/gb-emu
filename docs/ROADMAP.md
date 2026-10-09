@@ -394,14 +394,20 @@ say what to work on next.
       (`late_sp*_2`), and a halt that catches the copy's last M-cycle (`late_halt_stat_2`)
 - [ ] The Color's VRAM DMA (`dma`: 113 failing). Under way: each copy (a whole GDMA, or an HDMA
       block) ends with an M-cycle more, and a source in VRAM or from $FE00 up reads $FF (Gambatte):
-      116 -> 140 of 229. An HBlank block runs once the CPU's instruction is done, and one whose
-      HBlank began with the CPU halted runs when it wakes, if still in HBlank: 159 of 229. Left: HDMA
-      around speed switches, and a few HALT edges
+      116 -> 140 of 229. An HBlank block runs after the CPU's next opcode fetch, before that
+      instruction (and before an interrupt due then), 2 dots after mode 0 begins; HDMA5 written in
+      HBlank or with the LCD off copies a block at once; a CPU that slept from mode 0 gets no block
+      as it wakes (SameBoy): 190 of 229. Left: HDMA around speed switches, and a few HALT edges
 - [ ] The next largest groups. Done so far: illegal opcodes lock the CPU up (`undef_ops` 20/20); the
       Color's boot ROM hands over at line 144, dot 163 (`display_startstate` 10/10); WY is looked at
-      again a few dots after a write (`window` 368 -> 409 of 476). Whole suite: 4321 -> 4689 of 5225.
-      Left, largest first: VRAM DMA around speed switches, serial, sound, mode 1, STAT IRQ
-      timings (`miscmstatirq`, `lycEnable`, `m0enable`, `m2enable`), LCD offset, `cgbpal_m3`
+      again a few dots after a write, and WX 166 on the original spans the next line (`window`
+      368 -> 418 of 476); the serial clock comes from the divider and SB shifts a bit at a time
+      (`serial` 43 -> 80 of 82); the LY == LYC interrupt source holds while LY changes (STAT
+      groups +21); the Color's palettes stay locked a few dots into HBlank (`cgbpal_m3` 27 -> 42
+      of 44). Whole suite: 4321 -> 4813 of 5225. Left, largest first: STAT IRQ timings
+      (`miscmstatirq`, `lycEnable`, `m0enable`, `m2enable`, `m1`), sound (Gambatte and
+      SameBoy's APU disagree on some edges), VRAM DMA around speed switches, LCD offset (speed
+      switch round trips), the window switched off and on mid-line
 
 **Done when:** the OAM and VRAM DMA groups pass, and each other group is either fixed or
 understood. Before and after counts go here.
