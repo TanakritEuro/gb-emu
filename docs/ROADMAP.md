@@ -349,6 +349,23 @@ impossible: `halt_op_dupe_delay` reads DIV as $55 about 63 M-cycles after resett
 
 ---
 
+## Milestone 16 — The small suites
+
+Most of the small picture-based test ROMs in `roms/` already match their reference screenshots
+(cgb-acid-hell, turtle-tests, scribbltests, little-things' firstwhite). Four don't.
+
+- [x] MBC30: a 4 MB MBC3 (the Japanese Pokémon Crystal's chip) has an 8-bit ROM bank register and
+      8 RAM banks. `mbc3-tester` matches on both consoles (by shade on the Color, whose reference
+      uses other compatibility colors)
+- [ ] strikethrough: OAM DMA's odd behavior (`strikethrough`)
+- [ ] Power-on RAM: real RAM starts out random, which `bully` checks for; seeded, so runs stay
+      reproducible
+- [ ] Button presses from gb-cli, for tests that need them (little-things' Telling LYs)
+
+**Done when:** all four match their reference screenshots.
+
+---
+
 ## References
 
 - [Pan Docs](https://gbdev.io/pandocs/) — the hardware reference

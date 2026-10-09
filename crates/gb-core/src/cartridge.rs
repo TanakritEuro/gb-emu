@@ -97,14 +97,20 @@ enum Mbc {
     Mbc3 {
         /// RAM and the clock are enabled together, by writing $0A to $0000-$1FFF.
         ram_enabled: bool,
-        /// 7-bit register at $2000-$3FFF; 0 behaves as 1.
+        /// 7-bit register at $2000-$3FFF (8 bits on the MBC30); 0 behaves
+        /// as 1.
         rom_bank: u8,
-        /// $4000-$5FFF: $00-$03 picks a RAM bank, $08-$0C an RTC register.
+        /// $4000-$5FFF: $00-$03 picks a RAM bank ($00-$07 on the MBC30),
+        /// $08-$0C an RTC register.
         ram_select: u8,
         /// Last value written to $6000-$7FFF; $00 then $01 latches the clock.
         latch_prev: u8,
         /// Only cartridge types $0F and $10 have the clock.
         rtc: Option<Rtc>,
+        /// The MBC30 (the Japanese Pokémon Crystal's): 256 ROM banks (4 MB)
+        /// and 8 RAM banks. The header calls it an MBC3; only its ROM or RAM
+        /// size gives it away. https://gbdev.io/pandocs/MBC3.html
+        mbc30: bool,
     },
     /// 16 ROM banks and 512 four-bit RAM cells built into the chip.
     /// https://gbdev.io/pandocs/MBC2.html
@@ -334,6 +340,7 @@ impl Cartridge {
                 ram_select: 0,
                 latch_prev: 0xFF,
                 rtc: matches!(cart_type, 0x0F | 0x10).then(Rtc::default),
+                mbc30: rom.len() > 0x20_0000 || ram_size > 0x8000,
             },
             // $05 MBC2, $06 MBC2+BATTERY
             0x05 | 0x06 => Mbc::Mbc2 {
@@ -399,6 +406,7 @@ impl Cartridge {
                 ram_select,
                 latch_prev,
                 rtc,
+                ..
             } => {
                 w.u8(3);
                 w.bool(*ram_enabled);
@@ -461,6 +469,7 @@ impl Cartridge {
                 ram_select,
                 latch_prev,
                 rtc,
+                ..
             } if kind == 3 => {
                 *ram_enabled = r.bool()?;
                 [*rom_bank, *ram_select, *latch_prev] = [r.u8()?, r.u8()?, r.u8()?];
@@ -664,9 +673,10 @@ impl Cartridge {
                 ram_select,
                 latch_prev,
                 rtc,
+                mbc30,
             } => match addr {
                 0x0000..=0x1FFF => *ram_enabled = val & 0x0F == 0x0A,
-                0x2000..=0x3FFF => *rom_bank = (val & 0x7F).max(1),
+                0x2000..=0x3FFF => *rom_bank = (val & if *mbc30 { 0xFF } else { 0x7F }).max(1),
                 0x4000..=0x5FFF => *ram_select = val,
                 _ => {
                     // $00 then $01 copies the running clock into the
@@ -734,9 +744,13 @@ impl Cartridge {
                 }
             }
             Mbc::Mbc3 {
-                ram_select, rtc, ..
+                ram_select,
+                rtc,
+                mbc30,
+                ..
             } => match ram_select {
                 0x00..=0x03 => *ram_select as usize,
+                0x04..=0x07 if *mbc30 => *ram_select as usize,
                 0x08..=0x0C if rtc.is_some() => return RamTarget::Rtc(*ram_select),
                 _ => return RamTarget::None,
             },
@@ -1033,6 +1047,27 @@ pub(crate) mod tests {
         cart.write_rom(0x2000, 0);
         assert_eq!(cart.read_rom(0x4000), 1, "bank 0 request maps bank 1");
         assert_eq!(cart.read_rom(0x0000), 0, "$0000-$3FFF is always bank 0");
+    }
+
+    #[test]
+    fn a_4mb_mbc3_is_an_mbc30_with_8_bank_bits_and_8_ram_banks() {
+        let mut cart = Cartridge::from_rom(make_rom(0x11, 256, 0)).unwrap();
+        cart.write_rom(0x2000, 0x85);
+        assert_eq!(cart.read_rom(0x4000), 0x85, "all 8 bits");
+        cart.write_rom(0x2000, 0xFF);
+        assert_eq!(cart.read_rom(0x4000), 0xFF);
+
+        // 64 KB of RAM: banks 4-7 exist too.
+        let mut cart = Cartridge::from_rom(make_rom(0x13, 4, 0x05)).unwrap();
+        cart.write_rom(0x0000, 0x0A);
+        for bank in 0..8 {
+            cart.write_rom(0x4000, bank);
+            cart.write_ram(0xA000, 0x10 + bank);
+        }
+        for bank in 0..8 {
+            cart.write_rom(0x4000, bank);
+            assert_eq!(cart.read_ram(0xA000), 0x10 + bank, "bank {bank}");
+        }
     }
 
     #[test]
