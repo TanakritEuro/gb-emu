@@ -746,6 +746,9 @@ impl Cpu {
             self.dispatch_interrupt(bus);
             return Ok(self.ticked);
         }
+        // The Color's HBlank DMA copies a block due by now here, after the
+        // fetch and before the instruction runs (SameBoy), while the CPU waits.
+        let stalled = bus.hdma_after_fetch();
         let enable_ime_after = std::mem::take(&mut self.ime_pending);
         // After the HALT bug, PC isn't advanced past this opcode, so the
         // byte after HALT is read twice.
@@ -771,7 +774,7 @@ impl Cpu {
         if enable_ime_after && opcode != 0xF3 {
             self.ime = true;
         }
-        Ok(self.ticked)
+        Ok(self.ticked + stalled)
     }
 
     /// Runs one opcode whose byte has already been fetched. Returns T-cycles.
@@ -818,6 +821,7 @@ impl Cpu {
                         bus.switch_speed(pausing);
                         if pausing {
                             self.halted = true;
+                            bus.cpu_halting();
                             self.switch_pause = SWITCH_PAUSE;
                         }
                         Ok(cycles)
@@ -951,6 +955,7 @@ impl Cpu {
             // (github.com/nitro2k01/little-things-gb, not in the c-sp bundle).
             1 if op.y == 6 && op.z == 6 => {
                 self.halted = true;
+                bus.cpu_halting();
                 self.just_halted = true;
                 Ok(4)
             }

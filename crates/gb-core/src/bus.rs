@@ -171,6 +171,9 @@ pub struct Bus {
     /// An HBlank began with the CPU halted: its block runs when the CPU
     /// wakes, if that's still in HBlank.
     hdma_on_wake: bool,
+    /// STAT didn't read mode 0 when the CPU went to sleep: only then can a
+    /// block run as it wakes (SameBoy's allow_hdma_on_wake).
+    hdma_wake_allowed: bool,
     /// The CPU is asleep in HALT, which pauses HBlank DMA.
     pub(crate) cpu_halted: bool,
     hram: [u8; 0x7F],
@@ -239,6 +242,7 @@ impl Bus {
             dma_stall: 0,
             hdma_requests: 0,
             hdma_on_wake: false,
+            hdma_wake_allowed: false,
             cpu_halted: false,
             hram,
             unusable: [0; 0x48],
@@ -264,6 +268,9 @@ impl Bus {
         w.u16(self.hdma.dst);
         w.bool(self.hdma.active);
         w.u8(self.hdma.remaining);
+        w.u32(self.hdma_requests);
+        w.bool(self.hdma_on_wake);
+        w.bool(self.hdma_wake_allowed);
         let dma = &self.oam_dma;
         w.bool(dma.active);
         w.bytes(&[
@@ -313,6 +320,9 @@ impl Bus {
             active: r.bool()?,
             remaining: r.u8()? & 0x7F,
         };
+        self.hdma_requests = r.u32()?.min(2);
+        self.hdma_on_wake = r.bool()?;
+        self.hdma_wake_allowed = r.bool()?;
         self.ppu.double_speed = self.double_speed;
         self.apu.double_speed = self.double_speed;
         let active = r.bool()?;
@@ -447,12 +457,20 @@ impl Bus {
                 self.dma_stall += 4; // an M-cycle to finish (Gambatte's dma())
                 self.hdma.remaining = 0x7F; // reads $FF: done
             }
-            // Bit 7 = 1: a block of $10 bytes in each HBlank.
-            // TODO(accuracy): started with the LCD off, hardware copies one
-            // block straight away; here nothing happens until HBlanks resume.
+            // Bit 7 = 1: a block of $10 bytes in each HBlank. Started in an
+            // HBlank, or with the LCD off, the first block goes at once
+            // (SameBoy: STAT already reads mode 0), though not in the line's
+            // last 4 dots, 3 in double speed (Gambatte's hdma_late_enable).
             _ => {
                 h.active = true;
                 h.remaining = val & 0x7F;
+                let too_late = if self.double_speed { 3 } else { 4 };
+                let in_hblank = self.ppu.stat & 0x03 == 0
+                    && self.ppu.ly < 144
+                    && self.ppu.dot + too_late < 456;
+                if !self.ppu.lcd_on() || in_hblank {
+                    self.hdma_requests += 1;
+                }
             }
         }
     }
@@ -477,14 +495,12 @@ impl Bus {
         self.dma_stall += if self.double_speed { 64 } else { 32 };
     }
 
-    /// Runs the HBlank copy's blocks asked for during the instruction just
-    /// done: the copy waits for the CPU to finish it, then stops it while
-    /// it copies (as Gambatte has it: its DMA is an event between
-    /// instructions).
+    /// Runs the HBlank copy's blocks due (see [`Bus::hdma_after_fetch`]),
+    /// and the one a CPU waking from HALT in an HBlank is owed.
     pub fn run_hdma(&mut self) {
         if self.hdma_on_wake && !self.cpu_halted {
             self.hdma_on_wake = false;
-            if self.ppu.stat & 0x03 == 0 && self.ppu.ly < 144 {
+            if self.ppu.stat & 0x03 == 0 && self.ppu.ly < 144 && self.hdma_wake_allowed {
                 self.hdma_requests += 1;
             }
         }
@@ -501,6 +517,28 @@ impl Bus {
                 self.hdma.remaining -= 1;
             }
         }
+    }
+
+    /// Runs the HBlank copy's blocks due: the copy waits for the CPU's
+    /// next opcode fetch and goes before that instruction runs, the CPU
+    /// waiting while the rest of the hardware carries on (which can make the
+    /// next block due) (SameBoy). Returns those CPU T-cycles.
+    pub fn hdma_after_fetch(&mut self) -> u32 {
+        let mut stalled = 0;
+        loop {
+            self.run_hdma();
+            let stall = self.take_dma_stall();
+            if stall == 0 {
+                return stalled;
+            }
+            self.tick(stall);
+            stalled += stall;
+        }
+    }
+
+    /// The CPU is going to sleep (HALT, or a speed switch's pause).
+    pub(crate) fn cpu_halting(&mut self) {
+        self.hdma_wake_allowed = self.ppu.stat & 0x03 != 0;
     }
 
     /// CPU T-cycles the CPU now has to wait for VRAM DMA.
@@ -967,9 +1005,10 @@ impl Bus {
         };
         self.if_reg |= self.ppu.tick(real);
         // An HBlank copy moves one block per HBlank. (Only the Color can
-        // start one.) The block runs once the CPU's instruction is done:
-        // see [`Bus::run_hdma`]. If the CPU is halted it waits for it to
-        // wake, and happens then if HBlank isn't over (SameBoy, Gambatte).
+        // start one.) The block runs after the CPU's next opcode fetch: see
+        // [`Bus::hdma_after_fetch`]. If the CPU is halted it waits for it to
+        // wake, and happens then if HBlank isn't over and STAT didn't read
+        // mode 0 when it went to sleep (SameBoy).
         for _ in 0..self.ppu.take_hblanks() {
             if self.hdma.active && !self.cpu_halted {
                 self.hdma_requests += 1;
@@ -1463,16 +1502,54 @@ mod tests {
         assert_eq!(b.read(0x8020), 0, "no more after stopping");
     }
 
+    fn sleep(b: &mut Bus) {
+        b.cpu_halting();
+        b.cpu_halted = true;
+    }
+
+    #[test]
+    fn hblank_dma_skips_waking_if_the_cpu_went_to_sleep_in_hblank() {
+        let mut b = hdma_bus(&[0x11; 0x20]);
+        b.write(0xFF55, 0x81);
+        b.tick(252 + 20); // line 0's HBlank
+        b.run_hdma();
+        assert_eq!(b.read(0xFF55), 0x00, "one block to go");
+        sleep(&mut b); // still in that HBlank
+        b.tick(456); // line 1's HBlank
+        b.cpu_halted = false;
+        b.run_hdma();
+        assert_eq!(b.read(0xFF55), 0x00, "nothing on waking (SameBoy)");
+    }
+
+    #[test]
+    fn hblank_dma_started_in_hblank_or_with_the_lcd_off_copies_a_block_at_once() {
+        let mut b = hdma_bus(&[0x11; 0x20]);
+        b.tick(252 + 20); // line 0's HBlank
+        b.write(0xFF55, 0x81);
+        b.run_hdma();
+        assert_eq!(b.read(0xFF55), 0x00, "one block done");
+        let mut b = hdma_bus(&[0x11; 0x20]);
+        b.tick(456 - 3 - 4); // 4 dots before line 0 ends: too late
+        b.write(0xFF55, 0x81);
+        b.run_hdma();
+        assert_eq!(b.read(0xFF55), 0x01);
+        let mut b = hdma_bus(&[0x11; 0x20]);
+        b.write(0xFF40, 0x00);
+        b.write(0xFF55, 0x81);
+        b.run_hdma();
+        assert_eq!(b.read(0xFF55), 0x00, "LCD off");
+    }
+
     #[test]
     fn hblank_dma_waits_for_a_halted_cpu_to_wake_in_hblank() {
         let mut b = hdma_bus(&[0x11; 0x30]);
         b.write(0xFF55, 0x82); // 3 blocks
-        b.cpu_halted = true;
+        sleep(&mut b); // in mode 2
         b.tick(252 + 20); // line 0's HBlank begins, the CPU asleep
         b.cpu_halted = false;
         b.run_hdma();
         assert_eq!(vram_bytes(&b, 0x8000, 0x10), [0x11; 0x10], "woke in HBlank");
-        b.cpu_halted = true;
+        sleep(&mut b);
         b.tick(456 + 200); // asleep through line 1's HBlank, into line 2
         b.cpu_halted = false;
         b.run_hdma();

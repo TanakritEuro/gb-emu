@@ -174,10 +174,10 @@ impl GameBoy {
     pub fn step(&mut self) -> Result<u32, CpuError> {
         // The CPU runs the rest of the hardware as it goes, M-cycle by M-cycle.
         let mut cycles = self.cpu.step(&mut self.bus)?;
-        // While the Color's VRAM DMA copies, the CPU waits and the rest of
-        // the hardware carries on (which can start the next HBlank block).
+        // While the Color's general-purpose VRAM DMA copies, the CPU waits
+        // and the rest of the hardware carries on. (HBlank blocks run inside
+        // the CPU's step, after its opcode fetch.)
         loop {
-            self.bus.run_hdma();
             let stall = self.bus.take_dma_stall();
             if stall == 0 {
                 break;

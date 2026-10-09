@@ -144,6 +144,11 @@ pub struct Ppu {
     /// HBlanks (of lines 0-143) begun since the bus last asked: the Color's
     /// HBlank DMA copies a block in each.
     hblanks: u32,
+    /// Dots until the HBlank just begun counts for HBlank DMA: it's asked
+    /// for a little after STAT reads mode 0 (SameBoy has it 3 dots after its
+    /// mode 0, which starts a dot before ours; 2 in double speed). Gambatte's
+    /// hdma_start tests pin 2 here, 1 in double speed.
+    hblank_in: u8,
     /// RGBA, allocated once and never replaced: frontends may keep a pointer
     /// to it (the browser draws straight from wasm memory).
     framebuffer: Box<[u8]>,
@@ -263,6 +268,7 @@ impl Ppu {
             stat_line: false,
             pending_irq: 0,
             hblanks: 0,
+            hblank_in: 0,
             framebuffer: DMG_PALETTE[0]
                 .repeat(SCREEN_WIDTH * SCREEN_HEIGHT)
                 .into_boxed_slice(),
@@ -285,6 +291,7 @@ impl Ppu {
         w.u32(self.dot);
         w.bool(self.wy_triggered);
         w.u8(self.wy_check_in as u8);
+        w.u8(self.hblank_in);
         w.u16(self.hblank_dot as u16);
         w.bool(self.first_line);
         w.u8(self.window_y);
@@ -331,6 +338,7 @@ impl Ppu {
         }
         self.wy_triggered = r.bool()?;
         self.wy_check_in = u32::from(r.u8()?.min(6));
+        self.hblank_in = r.u8()?.min(2);
         self.hblank_dot = u32::from(r.u16()?);
         if !(HBLANK_DOT..=DOTS_PER_LINE).contains(&self.hblank_dot) {
             return Err(StateError::Corrupt("PPU mode 3 length"));
@@ -665,7 +673,7 @@ impl Ppu {
         }
     }
 
-    fn lcd_on(&self) -> bool {
+    pub(crate) fn lcd_on(&self) -> bool {
         self.lcdc & 0x80 != 0
     }
 
@@ -732,6 +740,12 @@ impl Ppu {
                 }
             }
             self.dot += 1;
+            if self.hblank_in > 0 {
+                self.hblank_in -= 1;
+                if self.hblank_in == 0 {
+                    self.hblanks += 1;
+                }
+            }
             self.oam_scan_dot();
             // Mode 3 draws the line pixel by pixel and lasts as long as that
             // takes; HBlank (and a Color's HBlank DMA block) follows.
@@ -741,7 +755,7 @@ impl Ppu {
                     self.start_mode3();
                 } else if self.mode3_dot() {
                     self.hblank_dot = self.dot;
-                    self.hblanks += 1;
+                    self.hblank_in = if self.double_speed { 1 } else { 2 };
                 }
             }
             self.end_dot();
@@ -1702,6 +1716,7 @@ mod tests {
         put_tile(&mut p, 0x8010, striped(0xFF, 0xFF)); // tile 1: color 3
         p.write_vram(0x9801, 1); // map column 1
         p.tick(HBLANK_DOT); // line 0 drawn now
+        p.tick(2);
         assert_eq!(p.take_hblanks(), 1);
         p.scx = 8; // during line 0's HBlank
         p.tick(DOTS_PER_LINE); // into line 1's HBlank
@@ -2406,7 +2421,11 @@ mod tests {
         let mut p = bg_ppu();
         p.scx = 5;
         p.tick(252 + 4);
-        assert_eq!(p.take_hblanks(), 0, "still drawing");
+        assert_eq!(p.stat & 0x03, 3, "still drawing");
+        p.tick(1);
+        assert_eq!(p.stat & 0x03, 0);
+        p.tick(1);
+        assert_eq!(p.take_hblanks(), 0, "HBlank DMA's block comes 2 dots in");
         p.tick(1);
         assert_eq!(p.take_hblanks(), 1);
     }
