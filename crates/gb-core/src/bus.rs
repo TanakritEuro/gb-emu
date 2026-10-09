@@ -947,7 +947,7 @@ impl Bus {
             self.apu.tick(chunk);
             left -= chunk;
         }
-        if self.serial.tick(cycles) {
+        if self.serial.divider_falls(self.timer.take_serial_falls()) {
             self.if_reg |= interrupt::SERIAL;
         }
         // The freeze starts once the switch has landed.

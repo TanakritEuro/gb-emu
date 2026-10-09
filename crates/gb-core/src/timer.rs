@@ -52,6 +52,10 @@ pub struct Timer {
     reset_in: u8,
     /// The 4096 Hz input (counter bit 9) 4 T-cycles before that reset.
     bit9_before: bool,
+    /// Falling edges of counter bits 7 and 2 not yet passed to the serial
+    /// port: they drive its internal clock (8192 Hz, or the Color's fast
+    /// 262144 Hz).
+    serial_falls: [u32; 2],
 }
 
 impl Timer {
@@ -119,6 +123,8 @@ impl Timer {
             speed_at_reset,
             u8::from(self.double_speed),
         ]);
+        w.u32(self.serial_falls[0]);
+        w.u32(self.serial_falls[1]);
     }
 
     pub(crate) fn load_state(&mut self, r: &mut StateReader) -> Result<(), StateError> {
@@ -147,6 +153,7 @@ impl Timer {
             _ => return Err(StateError::Corrupt("timer speed switch")),
         };
         self.double_speed = r.bool()?;
+        self.serial_falls = [r.u32()?, r.u32()?];
         Ok(())
     }
 
@@ -171,7 +178,9 @@ impl Timer {
         let before = self.signal();
         let apu_bit = self.div_apu_bit();
         let apu_bit_before = self.counter & apu_bit != 0;
+        let counter_before = self.counter;
         change(self);
+        self.count_serial_falls(counter_before);
         if before && !self.signal() {
             self.increment_tima();
         }
@@ -186,6 +195,21 @@ impl Timer {
             }
             _ => {}
         }
+    }
+
+    fn count_serial_falls(&mut self, before: u16) {
+        let fell = before & !self.counter;
+        for (n, bit) in self.serial_falls.iter_mut().zip([0x80, 0x04]) {
+            if fell & bit != 0 {
+                *n += 1;
+            }
+        }
+    }
+
+    /// Falling edges of counter bit 7 and of bit 2 since the last call,
+    /// which the bus forwards to the serial port.
+    pub fn take_serial_falls(&mut self) -> [u32; 2] {
+        std::mem::take(&mut self.serial_falls)
     }
 
     /// DIV-APU edges since the last call, which the bus forwards to the APU:
@@ -258,7 +282,9 @@ impl Timer {
             // 4096 Hz: the input must have been set 4 T-cycles before too.
             let tima_bumps = self.bit9_before && self.counter & 0x200 != 0;
             let apu_edge = self.counter & self.div_apu_bit() != 0;
+            let counter_before = self.counter;
             self.counter = 0;
+            self.count_serial_falls(counter_before);
             if tima_bumps {
                 self.increment_tima();
             }

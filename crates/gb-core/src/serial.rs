@@ -9,6 +9,12 @@
 //! SC bit 1 makes it 32x faster). With no cable, a master reads $FF.
 //! https://gbdev.io/pandocs/Serial_Data_Transfer_(Link_Cable).html
 //!
+//! That clock isn't a timer of its own: it comes from the free-running
+//! counter behind DIV. Each falling edge of counter bit 7 (bit 2 for the
+//! fast clock) flips it, and each time it goes low a master shifts one bit,
+//! so the first bit goes at the divider's next such edge, wherever SC was
+//! written (timings after SameBoy's serial port; Mooneye's boot_sclk_align).
+//!
 //! A partner is another emulator somewhere else, so its byte can't be
 //! known when a transfer starts: the host carries bytes across. As master,
 //! the byte to send waits in [`Serial::take_out`]; the partner's reply comes
@@ -24,8 +30,12 @@ pub struct Serial {
     cgb: bool,
     sb: u8,
     sc: u8,
-    /// CPU T-cycles until a master transfer's 8 bits are out; 0 when none.
-    cycles_left: u32,
+    /// Bits a master transfer has shifted so far (8 and still running:
+    /// waiting for the partner's byte).
+    bits: u8,
+    /// The internal serial clock's level: it flips at each falling edge of
+    /// the counter bit it comes from, and a bit shifts when it goes low.
+    clock_high: bool,
     /// A cable is in: master transfers swap with a partner instead of
     /// reading $FF.
     plugged: bool,
@@ -43,7 +53,8 @@ impl Serial {
             cgb,
             sb: 0,
             sc: 0,
-            cycles_left: 0,
+            bits: 0,
+            clock_high: false,
             plugged: false,
             reply: None,
             out: None,
@@ -61,70 +72,86 @@ impl Serial {
 
     pub fn write(&mut self, addr: u16, val: u8) {
         if addr == 0xFF01 {
-            // TODO(accuracy): writing SB mid-transfer changes the bits still
-            // to shift; here SB only changes as a whole, at the end.
+            // TODO(accuracy): with a cable in, SB changes as a whole when the
+            // partner's byte comes, not a bit at a time.
             self.sb = val;
             return;
         }
+        // A write restarts the bit count, and ends a high clock phase early,
+        // shifting a bit if a transfer was running (SameBoy).
+        self.bits = 0;
+        if self.clock_high {
+            self.clock_edge();
+        }
         self.sc = val & if self.cgb { 0x83 } else { 0x81 };
         if self.sc & 0x81 == 0x81 {
-            // Master: start clocking.
-            // TODO(accuracy): the internal clock comes from the free-running
-            // divider, so the first bit goes at its next edge rather than a
-            // whole bit time after this write (Mooneye's boot_sclk_align).
-            self.cycles_left = 8 * self.bit_cycles();
+            // Master: clocking starts at the divider's next edge.
             self.log.push(self.sb);
             self.reply = None;
             self.out = self.plugged.then_some(self.sb);
-        } else {
-            self.cycles_left = 0; // a slave waits to be clocked
         }
     }
 
-    /// CPU T-cycles per bit: 512 (8192 Hz), or 16 with the Color's fast
-    /// clock. The clock comes from the CPU's, so double speed halves the real
-    /// time but not these counts.
-    fn bit_cycles(&self) -> u32 {
-        if self.cgb && self.sc & 0x02 != 0 {
-            16
-        } else {
-            512
+    /// Falling edges of counter bits 7 and 2 (from the timer) since the
+    /// last call: the 8192 Hz clock comes from bit 7, the Color's fast one
+    /// from bit 2. The counter runs at the CPU's speed, so double speed
+    /// doubles the real rate. True when a transfer finished (a serial
+    /// interrupt is due).
+    pub fn divider_falls(&mut self, falls: [u32; 2]) -> bool {
+        let fast = self.cgb && self.sc & 0x02 != 0;
+        let mut done = false;
+        for _ in 0..falls[usize::from(fast)] {
+            done |= self.clock_edge();
         }
+        done
     }
 
-    /// Advances a master transfer by `cycles` CPU T-cycles. True when it
-    /// finishes (a serial interrupt is due).
-    pub fn tick(&mut self, cycles: u32) -> bool {
-        if self.cycles_left == 0 {
+    /// The internal clock flips; when it goes low, a master shifts a bit.
+    /// True when that finished a transfer.
+    fn clock_edge(&mut self) -> bool {
+        self.clock_high = !self.clock_high;
+        if self.clock_high || self.sc & 0x81 != 0x81 {
             return false;
         }
-        self.cycles_left = self.cycles_left.saturating_sub(cycles);
-        if self.cycles_left > 0 {
-            return false;
+        if self.plugged {
+            // The partner's byte comes whole (see answer()).
+            if self.bits == 8 {
+                return false; // waiting() for it
+            }
+            self.bits += 1;
+            if self.bits < 8 {
+                return false;
+            }
+            return match self.reply.take() {
+                Some(byte) => {
+                    self.finish(byte);
+                    true
+                }
+                None => false, // waiting(): it's still on its way
+            };
         }
-        if !self.plugged {
-            self.finish(0xFF); // nobody there: the input line reads 1s
+        // Nobody there: the input line reads 1s.
+        self.sb = self.sb << 1 | 1;
+        self.bits += 1;
+        if self.bits == 8 {
+            self.bits = 0;
+            self.sc &= 0x7F;
             return true;
         }
-        match self.reply.take() {
-            Some(byte) => {
-                self.finish(byte);
-                true
-            }
-            None => false, // waiting(): the partner's byte is still on its way
-        }
+        false
     }
 
     /// A master transfer's time is up but the partner's byte hasn't come:
     /// the machine should stop until [`answer`](Self::answer) brings it.
     pub fn waiting(&self) -> bool {
-        self.plugged && self.cycles_left == 0 && self.sc & 0x81 == 0x81
+        self.plugged && self.bits == 8 && self.sc & 0x81 == 0x81
     }
 
     fn finish(&mut self, received: u8) {
         self.sb = received;
         self.sc &= 0x7F;
         self.out = None;
+        self.bits = 0;
     }
 
     /// Plugs the cable in or pulls it out. Pulling it out ends a transfer
@@ -135,7 +162,7 @@ impl Serial {
         if !plugged {
             self.out = None;
             self.reply = None;
-            if self.sc & 0x81 == 0x81 && self.cycles_left == 0 {
+            if self.bits == 8 && self.sc & 0x81 == 0x81 {
                 self.finish(0xFF);
                 return true;
             }
@@ -156,7 +183,7 @@ impl Serial {
         if self.sc & 0x81 != 0x81 {
             return false; // no transfer to answer (it was cancelled)
         }
-        if self.cycles_left == 0 {
+        if self.bits == 8 {
             self.finish(byte);
             true
         } else {
@@ -190,15 +217,15 @@ impl Serial {
     /// and starts with nothing in flight.
     pub(crate) fn save_state(&self, w: &mut StateWriter) {
         w.tag(b"SIO ");
-        w.bytes(&[self.sb, self.sc]);
-        w.u32(self.cycles_left);
+        w.bytes(&[self.sb, self.sc, self.bits, u8::from(self.clock_high)]);
     }
 
     pub(crate) fn load_state(&mut self, r: &mut StateReader) -> Result<(), StateError> {
         r.tag(b"SIO ")?;
         self.sb = r.u8()?;
         self.sc = r.u8()? & 0x83;
-        self.cycles_left = r.u32()?;
+        self.bits = r.u8()?.min(8);
+        self.clock_high = r.bool()?;
         self.reply = None;
         self.out = None;
         Ok(())
@@ -214,13 +241,75 @@ mod tests {
         s.write(0xFF02, 0x81);
     }
 
+    /// The counter behind DIV, as the timer runs it.
+    struct Div(u16);
+
+    impl Div {
+        /// Runs it `cycles` T-cycles, passing its bit 7 and bit 2 falls on.
+        /// True if a transfer finished.
+        fn run(&mut self, s: &mut Serial, cycles: u32) -> bool {
+            let mut done = false;
+            for _ in 0..cycles {
+                let before = self.0;
+                self.0 = self.0.wrapping_add(1);
+                let fell = before & !self.0;
+                done |= s.divider_falls([(fell >> 7 & 1).into(), (fell >> 2 & 1).into()]);
+            }
+            done
+        }
+    }
+
+    #[test]
+    fn with_no_cable_sb_shifts_left_taking_1s_a_bit_at_a_time() {
+        let mut s = Serial::new(false);
+        let mut div = Div(0);
+        master(&mut s, 0x00);
+        div.run(&mut s, 512);
+        assert_eq!(s.read(0xFF01), 0x01);
+        div.run(&mut s, 3 * 512);
+        assert_eq!(s.read(0xFF01), 0x0F);
+        s.write(0xFF01, 0x80); // a write mid-transfer changes what's left
+        div.run(&mut s, 512);
+        assert_eq!(s.read(0xFF01), 0x01);
+    }
+
+    #[test]
+    fn the_first_bit_goes_at_the_dividers_next_edge() {
+        // Counter bit 7 falls at 256 (clock high), then at 512 (low: shift).
+        let mut s = Serial::new(false);
+        let mut div = Div(0);
+        div.run(&mut s, 100);
+        master(&mut s, 0x00);
+        div.run(&mut s, 411);
+        assert_eq!(s.read(0xFF01), 0x00);
+        div.run(&mut s, 1);
+        assert_eq!(s.read(0xFF01), 0x01, "412 cycles after SC, not 512");
+        assert!(!div.run(&mut s, 7 * 512 - 1));
+        assert!(div.run(&mut s, 1));
+    }
+
+    #[test]
+    fn writing_sc_while_the_clock_is_high_ends_that_half_early() {
+        let mut s = Serial::new(false);
+        let mut div = Div(0);
+        master(&mut s, 0x00);
+        div.run(&mut s, 256); // clock high
+        master(&mut s, 0x00); // goes low: the running transfer shifts
+        assert_eq!(s.read(0xFF01), 0x01, "and that bit counts for the new one");
+        div.run(&mut s, 512); // high at 512, low (a bit) at 768
+        assert_eq!(s.read(0xFF01), 0x03);
+        assert!(!div.run(&mut s, 6 * 512 - 1));
+        assert!(div.run(&mut s, 1));
+    }
+
     #[test]
     fn with_no_cable_a_master_reads_ff_after_8_bit_times() {
         let mut s = Serial::new(false);
+        let mut div = Div(0);
         master(&mut s, 0x42);
         assert_eq!(s.read(0xFF02), 0xFF, "bit 7 set while it runs");
-        assert!(!s.tick(8 * 512 - 1));
-        assert!(s.tick(1), "the interrupt is due");
+        assert!(!div.run(&mut s, 8 * 512 - 1));
+        assert!(div.run(&mut s, 1), "the interrupt is due");
         assert_eq!(s.read(0xFF01), 0xFF);
         assert_eq!(s.read(0xFF02), 0x7F, "bit 7 cleared");
         assert_eq!(s.take_log(), [0x42], "what went out");
@@ -231,24 +320,26 @@ mod tests {
     #[test]
     fn the_colors_fast_clock_is_32_times_quicker() {
         let mut s = Serial::new(true);
+        let mut div = Div(0);
         s.write(0xFF02, 0x83);
         assert_eq!(s.read(0xFF02), 0xFF);
-        assert!(s.tick(8 * 16));
+        assert!(div.run(&mut s, 8 * 16));
         assert_eq!(s.read(0xFF02), 0x7F, "bits 1 and 0 stay; only bit 7 clears");
         let mut dmg = Serial::new(false);
         dmg.write(0xFF02, 0x83);
-        assert!(!dmg.tick(8 * 16), "no fast clock on the original");
+        assert!(!div.run(&mut dmg, 8 * 16), "no fast clock on the original");
     }
 
     #[test]
     fn plugged_in_a_master_swaps_with_the_partner() {
         let mut s = Serial::new(false);
+        let mut div = Div(0);
         s.plug(true);
         master(&mut s, 0x42);
         assert_eq!(s.take_out(), Some(0x42));
         assert_eq!(s.take_out(), None, "once");
         assert!(!s.answer(0x99), "early: kept until the time is up");
-        assert!(s.tick(8 * 512));
+        assert!(div.run(&mut s, 8 * 512));
         assert_eq!(s.read(0xFF01), 0x99);
         assert!(!s.waiting());
     }
@@ -256,9 +347,10 @@ mod tests {
     #[test]
     fn a_late_answer_makes_the_master_wait_then_finishes_it() {
         let mut s = Serial::new(false);
+        let mut div = Div(0);
         s.plug(true);
         master(&mut s, 0x01);
-        assert!(!s.tick(8 * 512), "time's up, but no byte yet");
+        assert!(!div.run(&mut s, 8 * 512), "time's up, but no byte yet");
         assert!(s.waiting());
         assert_eq!(s.read(0xFF02) & 0x80, 0x80, "still running for the game");
         assert!(s.answer(0x55));
@@ -269,9 +361,10 @@ mod tests {
     #[test]
     fn pulling_the_cable_out_ends_a_waiting_transfer_with_ff() {
         let mut s = Serial::new(false);
+        let mut div = Div(0);
         s.plug(true);
         master(&mut s, 0x01);
-        s.tick(8 * 512);
+        div.run(&mut s, 8 * 512);
         assert!(s.plug(false));
         assert_eq!(s.read(0xFF01), 0xFF);
         assert!(!s.waiting());
@@ -280,11 +373,12 @@ mod tests {
     #[test]
     fn a_ready_slave_swaps_when_clocked_and_an_unready_one_sends_ff() {
         let mut s = Serial::new(false);
+        let mut div = Div(0);
         s.write(0xFF01, 0x77);
         assert_eq!(s.clocked(0x10), (0xFF, false), "SC bit 7 not set");
         assert_eq!(s.read(0xFF01), 0x77, "untouched");
         s.write(0xFF02, 0x80); // listen
-        assert!(!s.tick(100_000), "a slave doesn't time out");
+        assert!(!div.run(&mut s, 100_000), "a slave doesn't time out");
         assert_eq!(s.clocked(0x10), (0x77, true));
         assert_eq!((s.read(0xFF01), s.read(0xFF02)), (0x10, 0x7E));
         assert_eq!(s.take_log(), [] as [u8; 0], "a slave sends nothing itself");

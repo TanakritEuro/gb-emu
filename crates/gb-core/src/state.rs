@@ -50,7 +50,7 @@ const MAGIC: &[u8; 4] = b"GBST";
 /// 14: the Color's $FEA0-$FEFF bytes.
 /// 15: whether an illegal opcode locked the CPU up.
 /// 16: the PPU's WY check after a WY write.
-pub const VERSION: u16 = 16;
+pub const VERSION: u16 = 17;
 /// Bytes before the payload: magic, version, fingerprint, length.
 const HEADER_LEN: usize = 4 + 2 + 8 + 4;
 
