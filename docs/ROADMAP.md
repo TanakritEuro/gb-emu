@@ -392,7 +392,10 @@ say what to work on next.
       $FEA0-$FEFF reads $00 on the original and is 72 bytes of RAM on CPU CGB C. `oamdma`: 526 -> 772
       of 811. Left: copies from $FE00/$FF00 on the original, a sprite timing edge after a late copy
       (`late_sp*_2`), and a halt that catches the copy's last M-cycle (`late_halt_stat_2`)
-- [ ] The Color's VRAM DMA (`dma`: 113 failing)
+- [ ] The Color's VRAM DMA (`dma`: 113 failing). Under way: each copy (a whole GDMA, or an HDMA
+      block) ends with an M-cycle more, and a source in VRAM or from $FE00 up reads $FF (Gambatte):
+      116 -> 140 of 229. Left: when an HDMA block starts in HBlank, and HDMA with HALT and speed
+      switches
 - [ ] The next largest groups (window, `arg`, sound, serial, mode 1, mode 0, LCD offset)
 
 **Done when:** the OAM and VRAM DMA groups pass, and each other group is either fixed or

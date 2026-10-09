@@ -328,7 +328,11 @@ fn the_cpu_waits_while_general_purpose_dma_copies() {
     while gb.cpu().regs.pc != 0x0160 {
         gb.step().unwrap();
     }
-    assert_eq!(gb.step(), Ok(12 + 4 * 32), "LDH, then 8 µs per block");
+    assert_eq!(
+        gb.step(),
+        Ok(12 + 4 * 32 + 4),
+        "LDH, then 8 µs per block and an M-cycle to finish"
+    );
     assert_eq!(gb.peek(0xFF55), 0xFF);
 }
 

@@ -437,6 +437,7 @@ impl Bus {
                 for _ in 0..=val & 0x7F {
                     self.hdma_block();
                 }
+                self.dma_stall += 4; // an M-cycle to finish (Gambatte's dma())
                 self.hdma.remaining = 0x7F; // reads $FF: done
             }
             // Bit 7 = 1: a block of $10 bytes in each HBlank.
@@ -450,10 +451,17 @@ impl Bus {
     }
 
     /// Copies $10 bytes to VRAM (the bank VBK selects) and charges the CPU
-    /// the time: about 8 µs, which is 32 T-cycles, or 64 in double speed.
+    /// the time: 2 T-cycles a byte (4 in double speed), so 32 or 64 a block,
+    /// which is Pan Docs' 8 µs. A source in VRAM or from $FE00 up reads
+    /// $FF (Gambatte's dma()).
     fn hdma_block(&mut self) {
         for i in 0..0x10 {
-            let byte = self.read(self.hdma.src.wrapping_add(i));
+            let src = self.hdma.src.wrapping_add(i);
+            let byte = if (0x8000..0xA000).contains(&src) || src >= 0xFE00 {
+                0xFF
+            } else {
+                self.read(src)
+            };
             let dst = 0x8000 | ((self.hdma.dst + i) & 0x1FFF);
             self.ppu.write_vram(dst, byte);
         }
@@ -930,6 +938,7 @@ impl Bus {
         for _ in 0..self.ppu.take_hblanks() {
             if self.hdma.active && !self.cpu_halted {
                 self.hdma_block();
+                self.dma_stall += 4; // an M-cycle to finish each block
                 if self.hdma.remaining == 0 {
                     self.hdma.active = false;
                     self.hdma.remaining = 0x7F;
@@ -1367,7 +1376,11 @@ mod tests {
         assert_eq!(vram_bytes(&b, 0x8000, 0x20), data[..0x20]);
         assert_eq!(b.read(0x8020), 0, "no more than asked");
         assert_eq!(b.read(0xFF55), 0xFF, "done");
-        assert_eq!(b.take_dma_stall(), 2 * 32, "8 µs a block");
+        assert_eq!(
+            b.take_dma_stall(),
+            2 * 32 + 4,
+            "8 µs a block, and an M-cycle to finish"
+        );
         assert_eq!(b.read(0xFF51), 0xFF, "the address registers can't be read");
     }
 
@@ -1383,7 +1396,7 @@ mod tests {
         assert_eq!(b.read(0x8000), 0x00, "bank 0 untouched");
         assert_eq!(
             b.take_dma_stall(),
-            64,
+            64 + 4,
             "the same 8 µs is twice the CPU cycles"
         );
     }
@@ -1399,7 +1412,7 @@ mod tests {
         assert_eq!(vram_bytes(&b, 0x8000, 0x10), data[..0x10]);
         assert_eq!(b.read(0x8010), 0);
         assert_eq!(b.read(0xFF55), 0x02);
-        assert_eq!(b.take_dma_stall(), 32);
+        assert_eq!(b.take_dma_stall(), 32 + 4);
         b.tick(456);
         assert_eq!(vram_bytes(&b, 0x8000, 0x20), data[..0x20]);
         b.write(0xFF55, 0x00); // stop
