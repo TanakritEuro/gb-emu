@@ -20,7 +20,9 @@ A Game Boy (DMG) and Game Boy Color (CGB) emulator in Rust that runs in the brow
     VRAM (tile sheet, tile maps). `ppu/fifo.rs` mode 3: the fetcher and pixel FIFOs drawing a line
     pixel by pixel (timings after SameBoy's PPU)
   - `timer.rs` DIV/TIMA/TMA/TAC
-  - `apu.rs` sound: four channels, frame sequencer (length, envelope, sweep), mixer, high-pass filter
+  - `apu.rs` sound: four channels counting in the APU's own 2 MHz ticks (timings and quirks after
+    SameBoy's APU), frame sequencer (length, envelope, sweep) on both DIV-APU edges, the Color's
+    PCM12/PCM34, mixer, high-pass filter
   - `joypad.rs` $FF00
   - `serial.rs` SB/SC and the link cable: real transfer timing; the host carries bytes to a
     partner (`GameBoy::take_link_out` / `link_answer` / `link_clocked`, `FrameEnd::LinkWait`)

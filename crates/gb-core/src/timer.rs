@@ -34,6 +34,16 @@ pub struct Timer {
     /// Falling edges of DIV bit 4 (counter bit 12) not yet passed to the
     /// APU: they clock its frame sequencer ("DIV-APU", 512 Hz).
     div_apu: u32,
+    /// Rising edges of that bit not yet passed on: they arm the APU's
+    /// envelopes (see [`Apu::div_secondary_event`](crate::apu::Apu::div_secondary_event)).
+    div_apu_rises: u32,
+    /// The last falling edge came from a DIV write.
+    div_apu_by_write: bool,
+    /// T-cycles since the DIV-APU bit last rose (saturating).
+    since_rise: u8,
+    /// A speed switch waiting for STOP's DIV reset to move DIV-APU to
+    /// the other bit.
+    speed_at_reset: Option<bool>,
     /// Color double speed: the counter runs twice as fast, so DIV-APU comes
     /// from DIV bit 5 (counter bit 13) to stay at 512 Hz.
     /// https://gbdev.io/pandocs/Audio_details.html#div-apu
@@ -63,7 +73,15 @@ impl Timer {
         }
     }
 
+    /// The CPU switched speed. DIV-APU moves to the other counter bit when
+    /// STOP's DIV reset lands, not before, so a switch to normal speed with
+    /// bit 13 set and bit 12 clear is a falling edge to the APU (AGE's
+    /// spsw-ch2-lc-delay).
     pub fn set_double_speed(&mut self, on: bool) {
+        if self.reset_in > 0 {
+            self.speed_at_reset = Some(on);
+            return;
+        }
         self.double_speed = on;
     }
 
@@ -87,7 +105,20 @@ impl Timer {
         };
         w.bytes(&[stage, left]);
         w.u32(self.div_apu);
-        w.bytes(&[self.reset_in, u8::from(self.bit9_before)]);
+        w.u32(self.div_apu_rises);
+        let speed_at_reset = match self.speed_at_reset {
+            None => 0,
+            Some(false) => 1,
+            Some(true) => 2,
+        };
+        w.bytes(&[
+            self.reset_in,
+            u8::from(self.bit9_before),
+            u8::from(self.div_apu_by_write),
+            self.since_rise,
+            speed_at_reset,
+            u8::from(self.double_speed),
+        ]);
     }
 
     pub(crate) fn load_state(&mut self, r: &mut StateReader) -> Result<(), StateError> {
@@ -104,8 +135,18 @@ impl Timer {
             _ => return Err(StateError::Corrupt("timer reload stage")),
         };
         self.div_apu = r.u32()?;
+        self.div_apu_rises = r.u32()?;
         self.reset_in = r.u8()?.min(8);
         self.bit9_before = r.u8()? != 0;
+        self.div_apu_by_write = r.u8()? != 0;
+        self.since_rise = r.u8()?;
+        self.speed_at_reset = match r.u8()? {
+            0 => None,
+            1 => Some(false),
+            2 => Some(true),
+            _ => return Err(StateError::Corrupt("timer speed switch")),
+        };
+        self.double_speed = r.bool()?;
         Ok(())
     }
 
@@ -123,9 +164,9 @@ impl Timer {
     }
 
     /// Runs `change` and increments TIMA if it made the signal fall.
-    /// Also counts falling edges of counter bit 12 (13 in double speed) for
-    /// the APU, including the one a DIV write causes when the bit was set
-    /// (Pan Docs: Audio_details).
+    /// Also counts both edges of counter bit 12 (13 in double speed) for the
+    /// APU, including the falling one a DIV write causes when the bit was
+    /// set (Pan Docs: Audio_details).
     fn update(&mut self, change: impl FnOnce(&mut Self)) {
         let before = self.signal();
         let apu_bit = self.div_apu_bit();
@@ -134,14 +175,33 @@ impl Timer {
         if before && !self.signal() {
             self.increment_tima();
         }
-        if apu_bit_before && self.counter & apu_bit == 0 {
-            self.div_apu += 1;
+        match (apu_bit_before, self.counter & apu_bit != 0) {
+            (true, false) => {
+                self.div_apu += 1;
+                self.div_apu_by_write = false;
+            }
+            (false, true) => {
+                self.div_apu_rises += 1;
+                self.since_rise = 0;
+            }
+            _ => {}
         }
     }
 
-    /// DIV-APU events since the last call; the bus forwards them to the APU.
-    pub fn take_div_apu_ticks(&mut self) -> u32 {
-        std::mem::take(&mut self.div_apu)
+    /// DIV-APU edges since the last call, which the bus forwards to the APU:
+    /// (falling, rising, whether the last falling one was a DIV write).
+    pub fn take_div_apu_edges(&mut self) -> (u32, u32, bool) {
+        (
+            std::mem::take(&mut self.div_apu),
+            std::mem::take(&mut self.div_apu_rises),
+            std::mem::take(&mut self.div_apu_by_write),
+        )
+    }
+
+    /// Whether the DIV-APU bit is set now: the APU, switched on then, skips
+    /// its first event (SameBoy, Core/apu.c, GB_apu_init).
+    pub fn div_apu_bit_high(&self) -> bool {
+        self.counter & self.div_apu_bit() != 0
     }
 
     /// On overflow TIMA reads $00 for one M-cycle; the reload comes after.
@@ -169,6 +229,7 @@ impl Timer {
                 Reload::Reloading(1) => Reload::Idle,
                 Reload::Reloading(n) => Reload::Reloading(n - 1),
             };
+            self.since_rise = self.since_rise.saturating_add(1);
             self.update(|t| t.counter = t.counter.wrapping_add(1));
             if self.reset_in > 0 {
                 self.reset_in -= 1;
@@ -196,15 +257,41 @@ impl Timer {
         if self.tac & 0x07 == 0x04 {
             // 4096 Hz: the input must have been set 4 T-cycles before too.
             let tima_bumps = self.bit9_before && self.counter & 0x200 != 0;
+            let apu_edge = self.counter & self.div_apu_bit() != 0;
             self.counter = 0;
             if tima_bumps {
                 self.increment_tima();
             }
-            if self.counter & self.div_apu_bit() != 0 {
+            if apu_edge && self.since_rise > 0 {
                 self.div_apu += 1;
+                self.div_apu_by_write = true;
+            } else if apu_edge {
+                // See reset_div: the rise this count made never happened.
+                self.div_apu_rises = self.div_apu_rises.saturating_sub(1);
             }
         } else {
-            self.write(0xFF04, 0);
+            self.reset_div(true);
+        }
+        if let Some(on) = self.speed_at_reset.take() {
+            self.double_speed = on;
+        }
+    }
+
+    /// Resets DIV, by a write or STOP. STOP's reset takes the place of
+    /// that T-cycle's count: if the count raised the DIV-APU bit, the APU
+    /// sees neither that rise nor the reset's fall (AGE's
+    /// spsw-ch2-lc-delay).
+    fn reset_div(&mut self, stop: bool) {
+        let events = self.div_apu;
+        let replaces_rise = stop && self.since_rise == 0;
+        self.update(|t| t.counter = 0);
+        if self.div_apu > events {
+            if replaces_rise {
+                self.div_apu -= 1;
+                self.div_apu_rises = self.div_apu_rises.saturating_sub(1);
+            } else {
+                self.div_apu_by_write = true;
+            }
         }
     }
 
@@ -221,7 +308,7 @@ impl Timer {
     pub fn write(&mut self, addr: u16, val: u8) {
         match addr {
             // Resetting the counter can make the watched bit fall.
-            0xFF04 => self.update(|t| t.counter = 0),
+            0xFF04 => self.reset_div(false),
             0xFF05 => match self.reload {
                 Reload::Pending(_) => {
                     self.tima = val;
@@ -268,11 +355,11 @@ mod tests {
     fn div_bit_4_falling_clocks_the_apu_at_512_hz() {
         let mut t = Timer::new();
         t.tick(8192 - 1);
-        assert_eq!(t.take_div_apu_ticks(), 0);
+        assert_eq!(t.take_div_apu_edges().0, 0);
         t.tick(1);
-        assert_eq!(t.take_div_apu_ticks(), 1, "one per 8192 T-cycles");
+        assert_eq!(t.take_div_apu_edges().0, 1, "one per 8192 T-cycles");
         t.tick(crate::CPU_HZ);
-        assert_eq!(t.take_div_apu_ticks(), 512);
+        assert_eq!(t.take_div_apu_edges().0, 512);
     }
 
     #[test]
@@ -282,22 +369,56 @@ mod tests {
         let mut t = Timer::new();
         t.set_double_speed(true);
         t.tick(16384 - 1);
-        assert_eq!(t.take_div_apu_ticks(), 0, "not at 8192 any more");
+        assert_eq!(t.take_div_apu_edges().0, 0, "not at 8192 any more");
         t.tick(1);
-        assert_eq!(t.take_div_apu_ticks(), 1);
+        assert_eq!(t.take_div_apu_edges().0, 1);
         t.tick(2 * crate::CPU_HZ);
-        assert_eq!(t.take_div_apu_ticks(), 512);
+        assert_eq!(t.take_div_apu_edges().0, 512);
     }
 
     #[test]
     fn writing_div_can_clock_the_apu_early() {
         let mut t = Timer::new();
-        t.tick(4096); // counter bit 12 (DIV bit 4) is now 1
+        t.tick(4096); // counter bit 12 (DIV bit 4) rises
+        assert_eq!(t.take_div_apu_edges(), (0, 1, false));
         t.write(0xFF04, 0);
-        assert_eq!(t.take_div_apu_ticks(), 1, "the reset is a falling edge");
+        assert_eq!(
+            t.take_div_apu_edges(),
+            (1, 0, true),
+            "the reset is a falling edge"
+        );
         t.tick(4095);
         t.write(0xFF04, 0); // bit 12 was 0: no edge
-        assert_eq!(t.take_div_apu_ticks(), 0);
+        assert_eq!(t.take_div_apu_edges(), (0, 0, false));
+    }
+
+    #[test]
+    fn stops_reset_landing_as_the_apu_bit_would_rise_hides_both_edges() {
+        // The reset takes the place of that T-cycle's count: from $0FF8 the
+        // 8th count would make $1000. One T-cycle earlier, the bit rises and
+        // the reset is a falling edge as usual.
+        for (start, edges) in [(0x0FF8, (0, 0, false)), (0x0FF9, (1, 1, true))] {
+            let mut t = Timer::new();
+            t.counter = start;
+            t.stop_reset(true);
+            t.tick(8);
+            assert_eq!(t.take_div_apu_edges(), edges, "from {start:#06x}");
+        }
+    }
+
+    #[test]
+    fn div_apu_moves_to_the_other_bit_when_stops_reset_lands() {
+        // In double speed with bit 13 set and bit 12 clear: back to normal
+        // speed, the APU still watches bit 13 until STOP's reset clears it.
+        let mut t = Timer::new();
+        t.set_double_speed(true);
+        t.counter = 0x2000;
+        t.stop_reset(true);
+        t.set_double_speed(false);
+        assert!(t.double_speed, "not yet");
+        t.tick(8);
+        assert!(!t.double_speed);
+        assert_eq!(t.take_div_apu_edges(), (1, 0, true), "bit 13 fell");
     }
 
     #[test]

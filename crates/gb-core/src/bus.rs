@@ -183,7 +183,7 @@ impl Bus {
             ppu,
             timer: Timer::post_boot(model),
             joypad: Joypad::post_boot(model),
-            apu: Apu::new(),
+            apu: Apu::new(model == Model::Cgb),
             model,
             compat,
             wram: Box::new([0; 0x8000]),
@@ -268,8 +268,8 @@ impl Bus {
             active: r.bool()?,
             remaining: r.u8()? & 0x7F,
         };
-        self.timer.set_double_speed(self.double_speed);
         self.ppu.double_speed = self.double_speed;
+        self.apu.double_speed = self.double_speed;
         let active = r.bool()?;
         let mut dma = [0; 5];
         r.bytes(&mut dma)?;
@@ -352,6 +352,7 @@ impl Bus {
         self.double_speed = on;
         self.ppu.double_speed = on;
         self.timer.set_double_speed(on);
+        self.apu.speed_switched(on);
         // TODO(accuracy): a switch can leave the CPU half a dot off the
         // PPU in normal speed ("odd mode", which SameBoy doesn't do either):
         // LY then reads as old AND new as it changes (AGE's lcd-align-ly).
@@ -527,7 +528,8 @@ impl Bus {
 
     /// A read by the CPU: like [`read`](Self::read), but memory the CPU is
     /// locked out of reads $FF.
-    pub fn cpu_read(&self, addr: u16) -> u8 {
+    pub fn cpu_read(&mut self, addr: u16) -> u8 {
+        self.apu.address_bus = addr;
         if self.cpu_locked_out(addr, false) {
             return 0xFF;
         }
@@ -541,9 +543,10 @@ impl Bus {
             if matches!(addr, 0xFF69 | 0xFF6B) {
                 self.ppu.lost_palette_write(addr);
             }
-            return;
+        } else {
+            self.write(addr, val);
         }
-        self.write(addr, val);
+        self.apu.address_bus = addr;
     }
 
     /// Reads memory as it is, with no regard for who has the bus: for DMA,
@@ -587,8 +590,7 @@ impl Bus {
             0xFF74 if self.cgb() => self.io[0x74],
             0xFF75 if self.model == Model::Cgb => self.io[0x75] | 0x8F,
             // PCM12/PCM34: the channels' current output levels.
-            // TODO(accuracy): the real levels; 0 is what they read while silent.
-            0xFF76 | 0xFF77 if self.model == Model::Cgb => 0x00,
+            0xFF76 | 0xFF77 if self.model == Model::Cgb => self.apu.read_pcm(addr),
             // TODO(accuracy): the Color's infrared port; nothing to receive.
             0xFF56 if self.cgb() => self.io[0x56],
             // Nothing there: reads $FF.
@@ -626,7 +628,10 @@ impl Bus {
             0xFF00 => self.joypad.write(val),
             0xFF01 | 0xFF02 => self.serial.write(addr, val),
             0xFF04..=0xFF07 => self.timer.write(addr, val),
-            0xFF10..=0xFF3F => self.apu.write(addr, val),
+            0xFF10..=0xFF3F => {
+                self.apu.div_bit_high = self.timer.div_apu_bit_high();
+                self.apu.write(addr, val);
+            }
             0xFF0F => self.if_reg = val | 0xE0,
             0xFF46 => self.oam_dma(val),
             0xFF40..=0xFF4B => self.ppu.write_reg(addr, val),
@@ -714,8 +719,19 @@ impl Bus {
             }
             self.oam_dma.cycles = (total % 4) as u8;
         }
-        if self.timer.tick(cycles) {
-            self.if_reg |= interrupt::TIMER;
+        // The timer and the APU go an M-cycle at a time, the APU taking each
+        // DIV-APU edge before its ticks, as SameBoy has it (Core/timing.c).
+        self.apu.begin_cycles();
+        self.apu_edges();
+        let mut left = cycles;
+        while left > 0 {
+            let chunk = left.min(4);
+            if self.timer.tick(chunk) {
+                self.if_reg |= interrupt::TIMER;
+            }
+            self.apu_edges();
+            self.apu.tick(chunk);
+            left -= chunk;
         }
         if self.serial.tick(cycles) {
             self.if_reg |= interrupt::SERIAL;
@@ -750,10 +766,17 @@ impl Bus {
             }
         }
         self.cart.tick(real);
-        for _ in 0..self.timer.take_div_apu_ticks() {
-            self.apu.frame_sequencer_tick();
+    }
+
+    /// Passes DIV-APU edges, falling and rising, from the timer to the APU.
+    fn apu_edges(&mut self) {
+        let (falls, rises, by_write) = self.timer.take_div_apu_edges();
+        for _ in 0..falls {
+            self.apu.div_event(by_write);
         }
-        self.apu.tick(real);
+        for _ in 0..rises {
+            self.apu.div_secondary_event();
+        }
     }
 
     /// Interrupts that are both requested (IF) and enabled (IE).

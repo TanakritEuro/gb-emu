@@ -269,6 +269,42 @@ B/C only `lcd-align-ly` and `spsw-ch2-lc-delay` are left, the rest being CPU CGB
 
 ---
 
+## Milestone 13 — Sound to the tick ✅
+
+The APU runs on its own 2 MHz clock (the square and noise channels at 1 MHz), and every channel
+counts its period down in those ticks, so a trigger, a period write or a DIV write lands on a
+particular tick. Its frame sequencer follows both edges of DIV's bit 4, and many quirks fall out
+of how the counters are wired: wave RAM while channel 3 plays, NRx2 writes during a note ("zombie
+mode"), the sweep's delayed calculation. The Color's PCM12/PCM34 registers show each channel's
+level, which is how SameSuite (`roms/same-suite/apu`) measures them. The timings follow SameBoy's
+APU, for the original and CPU CGB C.
+
+- [x] The APU's own clock: the channels count in 2 MHz ticks, with their trigger delays (channel 3's
+      first sample (2047 - period) + 4 ticks after a trigger, the squares' first step after their
+      period plus a few ticks), the frame sequencer runs from DIV-APU's falling edge and arms
+      envelopes on its rising one, switching the APU on with DIV's bit set skips an event, and
+      PCM12/PCM34 read the levels (on CPU CGB C glitched in the M-cycle they change). SameSuite
+      `apu`: the 5 general tests and channel 3's, except the 2 for earlier Colors
+- [x] Wave RAM and power: while channel 3 plays the CPU reaches the byte it's reading (on the
+      original only in the tick it reads it), retriggering the original's channel 3 as it reads
+      corrupts wave RAM, a stopped channel 3 reads whatever is on the bus, and the Color's power
+      off clears the length timers. Blargg `dmg_sound` and `cgb_sound`: 12/12 each
+- [x] Envelopes, sweep and noise: NRx2 writes during a note move the volume, envelopes take their
+      direction and pace from NRx2 as they step, the sweep's overflow check comes a few 1 MHz ticks
+      after a trigger or sweep, NR10 and NR43 writes glitch as on CPU CGB C, and the noise counter's
+      start depends on its phase. In double speed, DIV-APU events arrive an M-cycle late after every
+      other switch, and DIV-APU only moves to the other DIV bit when STOP's DIV reset lands (AGE
+      `spsw-ch2-lc-delay`)
+
+**Done when:** blargg's sound tests pass, SameSuite's APU tests that a CPU CGB C passes on hardware
+(channel 3 and the general ones) pass, and AGE's `spsw-ch2-lc-delay`.
+(Before: blargg `dmg_sound` 9/12, `cgb_sound` 8/12, SameSuite `apu` 3/64. After: 12/12, 12/12,
+30/64: on CPU CGB C, PCM12/PCM34 read glitched for channels 1, 2 and 4 in ways not yet understood,
+so their tests fail on that console too, and some tests are for other revisions. AGE 37/55; for
+CPU CGB B/C only `lcd-align-ly` is left.)
+
+---
+
 ## References
 
 - [Pan Docs](https://gbdev.io/pandocs/) — the hardware reference

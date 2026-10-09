@@ -42,7 +42,10 @@ const MAGIC: &[u8; 4] = b"GBST";
 /// Color's tile-select latch.
 /// 11: the speed switch under way (its pause, the PPU freeze), double
 /// speed's half dot.
-pub const VERSION: u16 = 11;
+/// 12: the APU counts in its own 2 MHz ticks, as SameBoy does (the channels'
+/// counters, the frame sequencer's divider, the sweep's calculation); the
+/// timer passes it both DIV-APU edges.
+pub const VERSION: u16 = 12;
 /// Bytes before the payload: magic, version, fingerprint, length.
 const HEADER_LEN: usize = 4 + 2 + 8 + 4;
 
