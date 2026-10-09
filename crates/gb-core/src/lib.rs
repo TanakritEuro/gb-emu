@@ -177,6 +177,7 @@ impl GameBoy {
         // While the Color's VRAM DMA copies, the CPU waits and the rest of
         // the hardware carries on (which can start the next HBlank block).
         loop {
+            self.bus.run_hdma();
             let stall = self.bus.take_dma_stall();
             if stall == 0 {
                 break;

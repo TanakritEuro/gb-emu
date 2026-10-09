@@ -166,6 +166,11 @@ pub struct Bus {
     /// CPU T-cycles the CPU must wait for VRAM DMA; `GameBoy::step` runs
     /// the rest of the hardware through them.
     dma_stall: u32,
+    /// HBlank copy blocks due, run between instructions ([`Bus::run_hdma`]).
+    hdma_requests: u32,
+    /// An HBlank began with the CPU halted: its block runs when the CPU
+    /// wakes, if that's still in HBlank.
+    hdma_on_wake: bool,
     /// The CPU is asleep in HALT, which pauses HBlank DMA.
     pub(crate) cpu_halted: bool,
     hram: [u8; 0x7F],
@@ -232,6 +237,8 @@ impl Bus {
             hdma: Hdma::default(),
             oam_dma: OamDma::default(),
             dma_stall: 0,
+            hdma_requests: 0,
+            hdma_on_wake: false,
             cpu_halted: false,
             hram,
             unusable: [0; 0x48],
@@ -468,6 +475,32 @@ impl Bus {
         self.hdma.src = self.hdma.src.wrapping_add(0x10);
         self.hdma.dst = (self.hdma.dst + 0x10) & 0x1FF0;
         self.dma_stall += if self.double_speed { 64 } else { 32 };
+    }
+
+    /// Runs the HBlank copy's blocks asked for during the instruction just
+    /// done: the copy waits for the CPU to finish it, then stops it while
+    /// it copies (as Gambatte has it: its DMA is an event between
+    /// instructions).
+    pub fn run_hdma(&mut self) {
+        if self.hdma_on_wake && !self.cpu_halted {
+            self.hdma_on_wake = false;
+            if self.ppu.stat & 0x03 == 0 && self.ppu.ly < 144 {
+                self.hdma_requests += 1;
+            }
+        }
+        for _ in 0..std::mem::take(&mut self.hdma_requests) {
+            if !self.hdma.active {
+                break;
+            }
+            self.hdma_block();
+            self.dma_stall += 4; // an M-cycle to finish each block
+            if self.hdma.remaining == 0 {
+                self.hdma.active = false;
+                self.hdma.remaining = 0x7F;
+            } else {
+                self.hdma.remaining -= 1;
+            }
+        }
     }
 
     /// CPU T-cycles the CPU now has to wait for VRAM DMA.
@@ -933,18 +966,15 @@ impl Bus {
             seen + u32::from(std::mem::take(&mut self.half_dot))
         };
         self.if_reg |= self.ppu.tick(real);
-        // An HBlank copy moves one block per HBlank, paused while the CPU
-        // is halted. (Only the Color can start one.)
+        // An HBlank copy moves one block per HBlank. (Only the Color can
+        // start one.) The block runs once the CPU's instruction is done:
+        // see [`Bus::run_hdma`]. If the CPU is halted it waits for it to
+        // wake, and happens then if HBlank isn't over (SameBoy, Gambatte).
         for _ in 0..self.ppu.take_hblanks() {
             if self.hdma.active && !self.cpu_halted {
-                self.hdma_block();
-                self.dma_stall += 4; // an M-cycle to finish each block
-                if self.hdma.remaining == 0 {
-                    self.hdma.active = false;
-                    self.hdma.remaining = 0x7F;
-                } else {
-                    self.hdma.remaining -= 1;
-                }
+                self.hdma_requests += 1;
+            } else if self.hdma.active {
+                self.hdma_on_wake = true;
             }
         }
         self.cart.tick(real);
@@ -1409,29 +1439,46 @@ mod tests {
         assert_eq!(b.read(0xFF55), 0x03, "bit 7 = 0: running");
         assert_eq!(b.read(0x8000), 0, "nothing until an HBlank");
         b.tick(252); // line 0's HBlank begins
+        assert_eq!(
+            b.read(0x8000),
+            0,
+            "not before the CPU's instruction is done"
+        );
+        b.run_hdma();
         assert_eq!(vram_bytes(&b, 0x8000, 0x10), data[..0x10]);
         assert_eq!(b.read(0x8010), 0);
         assert_eq!(b.read(0xFF55), 0x02);
         assert_eq!(b.take_dma_stall(), 32 + 4);
         b.tick(456);
+        b.run_hdma();
         assert_eq!(vram_bytes(&b, 0x8000, 0x20), data[..0x20]);
         b.write(0xFF55, 0x00); // stop
         assert_eq!(b.read(0xFF55), 0x81, "stopped with 2 blocks left");
         b.tick(456);
+        b.run_hdma();
         assert_eq!(b.read(0x8020), 0, "no more after stopping");
     }
 
     #[test]
-    fn hblank_dma_finishes_and_pauses_while_the_cpu_is_halted() {
-        let mut b = hdma_bus(&[0x11; 0x20]);
-        b.write(0xFF55, 0x81); // 2 blocks
+    fn hblank_dma_waits_for_a_halted_cpu_to_wake_in_hblank() {
+        let mut b = hdma_bus(&[0x11; 0x30]);
+        b.write(0xFF55, 0x82); // 3 blocks
         b.cpu_halted = true;
-        b.tick(456);
-        assert_eq!(b.read(0x8000), 0, "halted: this HBlank is skipped");
+        b.tick(252 + 20); // line 0's HBlank begins, the CPU asleep
         b.cpu_halted = false;
+        b.run_hdma();
+        assert_eq!(vram_bytes(&b, 0x8000, 0x10), [0x11; 0x10], "woke in HBlank");
+        b.cpu_halted = true;
+        b.tick(456 + 200); // asleep through line 1's HBlank, into line 2
+        b.cpu_halted = false;
+        b.run_hdma();
+        assert_eq!(b.read(0x8010), 0, "woke after it: that block is skipped");
         b.tick(456);
+        b.run_hdma();
+        assert_eq!(b.read(0x8010), 0x11);
         b.tick(456);
-        assert_eq!(vram_bytes(&b, 0x8000, 0x20), [0x11; 0x20]);
+        b.run_hdma();
+        assert_eq!(vram_bytes(&b, 0x8000, 0x30), [0x11; 0x30]);
         assert_eq!(b.read(0xFF55), 0xFF, "finished");
     }
 

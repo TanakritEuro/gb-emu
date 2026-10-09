@@ -394,8 +394,9 @@ say what to work on next.
       (`late_sp*_2`), and a halt that catches the copy's last M-cycle (`late_halt_stat_2`)
 - [ ] The Color's VRAM DMA (`dma`: 113 failing). Under way: each copy (a whole GDMA, or an HDMA
       block) ends with an M-cycle more, and a source in VRAM or from $FE00 up reads $FF (Gambatte):
-      116 -> 140 of 229. Left: when an HDMA block starts in HBlank, and HDMA with HALT and speed
-      switches
+      116 -> 140 of 229. An HBlank block runs once the CPU's instruction is done, and one whose
+      HBlank began with the CPU halted runs when it wakes, if still in HBlank: 159 of 229. Left: HDMA
+      around speed switches, and a few HALT edges
 - [ ] The next largest groups (window, `arg`, sound, serial, mode 1, mode 0, LCD offset)
 
 **Done when:** the OAM and VRAM DMA groups pass, and each other group is either fixed or
