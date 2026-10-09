@@ -742,13 +742,15 @@ impl Cpu {
         }
         let pc = self.regs.pc;
         let opcode = bus.cpu_read(pc);
+        // The Color's HBlank DMA copies a block due by now here, after the
+        // fetch and before the instruction runs (SameBoy), while the CPU
+        // waits. It goes before an interrupt that's due too (Gambatte's
+        // hdma_vs_m0).
+        let stalled = bus.hdma_after_fetch();
         if self.ime && bus.pending_interrupts() != 0 {
             self.dispatch_interrupt(bus);
-            return Ok(self.ticked);
+            return Ok(self.ticked + stalled);
         }
-        // The Color's HBlank DMA copies a block due by now here, after the
-        // fetch and before the instruction runs (SameBoy), while the CPU waits.
-        let stalled = bus.hdma_after_fetch();
         let enable_ime_after = std::mem::take(&mut self.ime_pending);
         // After the HALT bug, PC isn't advanced past this opcode, so the
         // byte after HALT is read twice.
@@ -2394,6 +2396,39 @@ mod tests {
         bus.ie_reg = ie;
         bus.if_reg = if_;
         (cpu, bus)
+    }
+
+    #[test]
+    fn an_hblank_dma_block_goes_before_an_interrupt_due_at_the_same_fetch() {
+        // The block copies $C000-$C00F, where the dispatch is about to push
+        // PC: it must see the bytes from before the push.
+        let mut rom = rom_with_program(&[0x00]);
+        rom[0x143] = 0x80;
+        rom[0x14D] = crate::cartridge::header_checksum(&rom);
+        let mut bus = Bus::new(Cartridge::from_rom(rom).unwrap(), Model::Cgb);
+        let mut cpu = Cpu::new();
+        cpu.reset_post_boot(Model::Cgb);
+        bus.write(0xC000, 0x34);
+        bus.write(0xC001, 0x12);
+        for (reg, val) in [(0xFF51, 0xC0), (0xFF52, 0x00), (0xFF53, 0x00), (0xFF54, 0x00)] {
+            bus.write(reg, val);
+        }
+        while (bus.ppu.ly, bus.ppu.stat & 0x03) != (0, 3) {
+            bus.tick(1);
+        }
+        bus.write(0xFF55, 0x80); // one HBlank block
+        while bus.ppu.stat & 0x03 != 0 {
+            bus.tick(1);
+        }
+        bus.tick(2); // the block is due
+        cpu.regs.sp = 0xC002;
+        cpu.ime = true;
+        bus.write(0xFFFF, interrupt::STAT);
+        bus.if_reg |= interrupt::STAT;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.regs.pc, 0x48, "dispatched");
+        assert_eq!((bus.read(0x8000), bus.read(0x8001)), (0x34, 0x12), "copied first");
+        assert_ne!(bus.read(0xC000), 0x34, "then PC pushed");
     }
 
     #[test]
