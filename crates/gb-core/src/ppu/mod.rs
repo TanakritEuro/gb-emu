@@ -532,10 +532,23 @@ impl Ppu {
     }
 
     /// Whether the PPU holds the Color's palette memory: as VRAM, except
-    /// that on the first line after switching on it takes it 2 dots into
-    /// mode 3 (SameBoy).
+    /// that it takes it a dot into mode 3 in double speed, and on the first
+    /// line after switching on 6 dots into it (4 in double speed), and it
+    /// lets go 4 dots after HBlank begins, 2 in double speed (SameBoy's
+    /// cgb_palettes_blocked; Gambatte's cgbpal_m3 and ly0_late_cgbp tests
+    /// pin these).
     pub fn palettes_locked(&self, write: bool) -> bool {
-        self.mode3_locked(write, 2)
+        let (late, after) = match (self.double_speed, self.first_line) {
+            (false, false) => (0, 4),
+            (true, false) => (1, 2),
+            (false, true) => (6, 4),
+            (true, true) => (4, 2),
+        };
+        let drawing = self.mode3_locked(write, 0) && self.dot >= MODE3_DOT + late;
+        let hblank = self.lcd_on()
+            && self.ly < VBLANK_LINE
+            && (self.hblank_dot..self.hblank_dot + after).contains(&self.dot);
+        drawing || hblank
     }
 
     /// Held in mode 3 (see [`Ppu::vram_locked`]); on the Color's first
@@ -1399,9 +1412,9 @@ mod tests {
 
     #[test]
     fn the_colors_first_line_after_switching_on_takes_vram_late() {
-        // Mode 3 shows at dot 80, but the Color takes palette memory 2 dots
-        // later and VRAM 5 (SameBoy; AGE's vram-read-cgbBCE); the original
-        // takes VRAM at once.
+        // Mode 3 shows at dot 80, but the Color takes VRAM 5 dots later
+        // (SameBoy; AGE's vram-read-cgbBCE) and palette memory 6 (Gambatte's
+        // ly0_late_cgbpr); the original takes VRAM at once.
         let switched_on = |model| {
             let mut p = Ppu::with_model(model);
             p.write_reg(0xFF40, 0x11);
@@ -1417,14 +1430,35 @@ mod tests {
             (p.vram_locked(false), p.palettes_locked(false)),
             (false, false)
         );
-        p.tick(2);
+        p.tick(5);
         assert_eq!(
             (p.vram_locked(false), p.palettes_locked(true)),
-            (false, true)
+            (true, false)
         );
-        p.tick(3);
-        assert!(p.vram_locked(false) && p.vram_locked(true));
+        p.tick(1);
+        assert!(p.palettes_locked(false) && p.palettes_locked(true));
         assert!(switched_on(Model::Dmg).vram_locked(false));
+    }
+
+    #[test]
+    fn the_colors_palettes_stay_locked_into_hblank() {
+        // Line 1 (not the first after switching on): 4 dots into HBlank, 2
+        // in double speed, where the lock also starts a dot into mode 3.
+        for (double, start, after) in [(false, 0, 4), (true, 1, 2)] {
+            let mut p = Ppu::with_model(Model::Cgb);
+            p.double_speed = double;
+            p.tick(456 + MODE3_DOT - 1);
+            assert!(!p.palettes_locked(true), "mode 2");
+            p.tick(1 + start);
+            assert!(p.palettes_locked(true) && p.palettes_locked(false));
+            while p.stat & 0x03 != 0 {
+                p.tick(1);
+            }
+            p.tick(after - 1);
+            assert!(p.palettes_locked(true), "double speed {double}");
+            p.tick(1);
+            assert!(!p.palettes_locked(true), "double speed {double}");
+        }
     }
 
     #[test]
