@@ -2479,13 +2479,44 @@ mod tests {
         assert_eq!(cpu.regs.pc, 0x50);
     }
 
+    /// Runs the PPU on from where the boot ROM leaves it to line 0's dot 3
+    /// (where the Color's already is): the timing tests below count from
+    /// there.
+    fn to_line_0_dot_3(bus: &mut Bus) {
+        while (bus.ppu.ly, bus.ppu.dot) != (0, 3) {
+            bus.tick(1);
+        }
+    }
+
+    #[test]
+    fn clearing_if_as_an_interrupt_comes_keeps_the_interrupt() {
+        // LDH ($0F),A with A = 0: the write lands as its third M-cycle ends.
+        // Started at line 143's dot 443, that's dot 455, and VBlank's
+        // interrupt comes in the next dot: it stays. An M-cycle later the
+        // write clears it (gbmicrotest's vblank2_int_if_c and _d).
+        for (start, vblank) in [(443, true), (447, false)] {
+            let (mut cpu, mut bus) = setup_wram(&[0xE0, 0x0F]);
+            cpu.regs.a = 0;
+            while (bus.ppu.ly, bus.ppu.dot) != (143, start) {
+                bus.tick(1);
+            }
+            cpu.step(&mut bus).unwrap();
+            bus.tick(8);
+            assert_eq!(
+                bus.if_reg & interrupt::VBLANK != 0,
+                vblank,
+                "from dot {start}"
+            );
+        }
+    }
+
     #[test]
     fn each_access_sees_the_hardware_at_its_own_m_cycle() {
         // LDH A,($44) reads LY in its third M-cycle, 12 T-cycles in, and LY
-        // reads 1 from dot 454 of line 0. The boot ROM leaves the PPU 3 dots
-        // into line 0.
+        // reads 1 from dot 454 of line 0. Starting 3 dots into line 0:
         for (head_start, ly) in [(454 - 3 - 12, 1), (454 - 3 - 13, 0)] {
             let (mut cpu, mut bus) = setup_wram(&[0xF0, 0x44]);
+            to_line_0_dot_3(&mut bus);
             bus.tick(head_start);
             cpu.step(&mut bus).unwrap();
             assert_eq!(cpu.regs.a, ly, "{head_start} dots in");
@@ -2494,12 +2525,13 @@ mod tests {
 
     #[test]
     fn a_halted_cpu_looks_for_interrupts_2_dots_in_on_the_original_at_once_on_the_color() {
-        // HBlank's interrupt comes at dot 253 of line 0. The boot ROM leaves
-        // the PPU 3 dots in, so halted M-cycles span dots 3+4k to 7+4k, and
-        // the one from 251 to 255 has it 2 dots in.
+        // HBlank's interrupt comes at dot 253 of line 0. From 3 dots in,
+        // halted M-cycles span dots 3+4k to 7+4k, and the one from 251 to
+        // 255 has it 2 dots in.
         let wake_dot = |model| {
             let cart = Cartridge::from_rom(rom_with_program(&[])).unwrap();
             let mut bus = Bus::new(cart, model);
+            to_line_0_dot_3(&mut bus);
             bus.write(0xFF41, 0x08);
             bus.ie_reg = interrupt::STAT;
             bus.if_reg = 0xE0;
@@ -2518,7 +2550,7 @@ mod tests {
     #[test]
     fn halt_looks_for_a_pending_interrupt_an_m_cycle_after_its_own() {
         // HBlank's interrupt comes at dot 253 of line 0, and M-cycles end at
-        // dots 7, 11, ... (the PPU starts 3 dots in). NOPs, then HALT ; INC A
+        // dots 7, 11, ... (starting 3 dots in). NOPs, then HALT ; INC A
         // with IME off: HALT looks as the M-cycle after it ends. If the
         // interrupt has come by then, that's the HALT bug and INC A runs
         // twice; if not, the CPU sleeps, wakes, and runs it once (AGE's
@@ -2526,6 +2558,7 @@ mod tests {
         let inc_a_runs = |nops: usize| {
             let cart = Cartridge::from_rom(rom_with_program(&[])).unwrap();
             let mut bus = Bus::new(cart, Model::Dmg);
+            to_line_0_dot_3(&mut bus);
             let program = [vec![0x00; nops], vec![0x76, 0x3C, 0x18, 0xFE]].concat();
             for (i, &b) in program.iter().enumerate() {
                 bus.write(0xC000 + i as u16, b);
@@ -2550,6 +2583,7 @@ mod tests {
         // LD A,$08 ; LDH ($47),A in mid-line: BGP's color 1 goes from shade 1
         // ($04) to shade 2 ($08). For a dot it holds $04 | $08: shade 3.
         let (mut cpu, mut bus) = setup_wram(&[0x3E, 0x08, 0xE0, 0x47]);
+        to_line_0_dot_3(&mut bus);
         bus.write(0xFF47, 0x04);
         for row in 0..8 {
             bus.write(0x8000 + row * 2, 0xFF); // tile 0, every pixel color 1

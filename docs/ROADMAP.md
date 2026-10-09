@@ -328,6 +328,27 @@ combined ROM checks the same results by CRC and passes.)
 
 ---
 
+## Milestone 15 — gbmicrotest ✅
+
+GBMicrotest (`roms/gbmicrotest`) is 513 tiny tests, checked on an original Game Boy, that each read
+one register at one exact M-cycle and write a pass byte to $FF82. Most run straight from the
+boot ROM's hand-over without resetting the LCD, so they pin down exactly where the hardware is when
+a game starts.
+
+- [x] The hand-over: the original's boot ROM leaves the PPU at line 153's dot 395, near the end of
+      VBlank (LY already reads 0), not line 0's dot 3: 64 dots, a whole number of M-cycles, so the
+      phase Mooneye's boot tests pin is unchanged. gbmicrotest's `poweron_*` tests, and the 28
+      `hblank_int_scx*` tests and `line_65_ly`, which time from boot
+- [x] IF writes land as their M-cycle ends, so an interrupt raised in the dot after a write that
+      clears IF stays (`vblank_int_if_c`, `vblank2_int_if_c`, `lyc1_int_if_edge_c`)
+
+**Done when:** gbmicrotest's tests with a verdict pass on the original.
+(Before: 423/513. After: 480/513: 31 are test benches with no verdict, and 2 seem to expect the
+impossible: `halt_op_dupe_delay` reads DIV as $55 about 63 M-cycles after resetting it, and
+`stat_write_glitch_l154_d` expects no VBlank flag a whole frame after switching the LCD on.)
+
+---
+
 ## References
 
 - [Pan Docs](https://gbdev.io/pandocs/) — the hardware reference

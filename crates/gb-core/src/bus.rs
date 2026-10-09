@@ -470,7 +470,9 @@ impl Bus {
         let dmg = self.model == Model::Dmg;
         let double = self.double_speed;
         match addr {
-            0xFF0F => Late, // IF
+            // IF as the M-cycle ends: an interrupt raised in the dot after
+            // stays (gbmicrotest's vblank_int_if_c, lyc1_int_if_edge_c).
+            0xFF0F => EndThenDot,
             0xFF40 if dmg => Staged {
                 first: dmg_lcdc_first,
                 early: 2,

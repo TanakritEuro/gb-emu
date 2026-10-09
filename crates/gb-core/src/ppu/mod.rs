@@ -154,16 +154,23 @@ impl Ppu {
         Self::with_model(Model::Dmg)
     }
 
-    /// As the boot ROM leaves it when the game starts at $0100: on line 0,
-    /// 3 dots in. That phase between the PPU and the CPU is pinned by
-    /// Mooneye's tests that run from boot without switching the LCD off
-    /// (hblank_ly_scx_timing, di_timing, halt_ime1_timing2, intr_1_2_timing:
-    /// starting at dot 0, 1 or 2 fails some of them).
+    /// As the boot ROM leaves it when the game starts at $0100. The original
+    /// is near the end of VBlank, at line 153's dot 395 (LY already reads 0):
+    /// gbmicrotest's poweron tests read STAT, LY, OAM and VRAM at set
+    /// M-cycles from boot, and its first mode 2 comes 64 dots later. Within
+    /// the M-cycle the phase is pinned by Mooneye's tests that run from boot
+    /// without switching the LCD off (hblank_ly_scx_timing, di_timing,
+    /// halt_ime1_timing2, intr_1_2_timing).
     /// TODO(accuracy): the Color's boot ROM takes another time; it's given
-    /// the original's phase here.
+    /// line 0's dot 3, the original's phase.
     pub fn post_boot(model: Model) -> Self {
         let mut p = Self::with_model(model);
-        p.dot = 3;
+        if model == Model::Dmg {
+            p.ly = LAST_LINE;
+            p.dot = 395;
+        } else {
+            p.dot = 3;
+        }
         p
     }
 
@@ -1087,6 +1094,19 @@ mod tests {
             assert_eq!(p.stat & 0x03, 0, "{model:?}");
             assert_eq!(p.tick(1) & interrupt::STAT, interrupt::STAT, "{model:?}");
         }
+    }
+
+    #[test]
+    fn the_originals_boot_rom_hands_over_near_the_end_of_vblank() {
+        // Line 153, dot 395: VBlank, with LY already reading 0. Line 0's
+        // mode 2 comes 61 dots later, after VBlank's last dot of mode 0.
+        let mut p = Ppu::post_boot(Model::Dmg);
+        assert_eq!((p.read_reg(0xFF44), p.stat & 0x03), (0, 1));
+        p.tick(60);
+        assert_eq!(p.stat & 0x03, 0, "dot 455");
+        p.tick(1);
+        assert_eq!((p.ly, p.dot, p.stat & 0x03), (0, 0, 2));
+        assert_eq!(Ppu::post_boot(Model::Cgb).dot, 3, "the Color: line 0");
     }
 
     #[test]
