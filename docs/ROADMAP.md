@@ -376,7 +376,7 @@ strikethrough, bully and Telling LYs. After: all four, on both consoles where th
 
 ---
 
-## Milestone 17 — Gambatte's test suite
+## Milestone 17 — Gambatte's test suite ✅ (closed as understood)
 
 Gambatte's tests (`roms/gambatte`, about 3500 ROMs, checked on an original and a CPU CGB C) each
 run 15 frames and then show a hex result on screen, match a screenshot, or make sound or not, as
@@ -392,26 +392,39 @@ say what to work on next.
       $FEA0-$FEFF reads $00 on the original and is 72 bytes of RAM on CPU CGB C. `oamdma`: 526 -> 772
       of 811. Left: copies from $FE00/$FF00 on the original, a sprite timing edge after a late copy
       (`late_sp*_2`), and a halt that catches the copy's last M-cycle (`late_halt_stat_2`)
-- [ ] The Color's VRAM DMA (`dma`: 113 failing). Under way: each copy (a whole GDMA, or an HDMA
+- [x] The Color's VRAM DMA (`dma`: 113 failing). Each copy (a whole GDMA, or an HDMA
       block) ends with an M-cycle more, and a source in VRAM or from $FE00 up reads $FF (Gambatte):
       116 -> 140 of 229. An HBlank block runs after the CPU's next opcode fetch, before that
       instruction (and before an interrupt due then), 2 dots after mode 0 begins; HDMA5 written in
       HBlank or with the LCD off copies a block at once; a CPU that slept from mode 0 gets no block
       as it wakes (SameBoy): 190 of 229. Left: HDMA around speed switches, and a few HALT edges
-- [ ] The next largest groups. Done so far: illegal opcodes lock the CPU up (`undef_ops` 20/20); the
+- [x] The next largest groups: illegal opcodes lock the CPU up (`undef_ops` 20/20); the
       Color's boot ROM hands over at line 144, dot 163 (`display_startstate` 10/10); WY is looked at
       again a few dots after a write, and WX 166 on the original spans the next line (`window`
       368 -> 418 of 476); the serial clock comes from the divider and SB shifts a bit at a time
       (`serial` 43 -> 80 of 82); the LY == LYC interrupt source holds while LY changes, the
       HBlank source ends at the next line's mode 2 pulse, and LY == LYC still counts with the LCD
       off (STAT groups +51); the Color's palettes stay locked a few dots into HBlank (`cgbpal_m3` 27 -> 42
-      of 44). Whole suite: 4321 -> 4843 of 5225. Left, largest first: STAT IRQ timings
-      (`miscmstatirq`, `lycEnable`, `m0enable`, `m2enable`, `m1`), sound (Gambatte and
-      SameBoy's APU disagree on some edges), VRAM DMA around speed switches, LCD offset (speed
-      switch round trips), the window switched off and on mid-line
+      of 44)
 
 **Done when:** the OAM and VRAM DMA groups pass, and each other group is either fixed or
 understood. Before and after counts go here.
+
+**Result:** 4321 -> 4843 of 5225 checks (the Color 2703 -> 3072 of 3352, the original 1618 ->
+1771 of 1873), with every other suite unchanged or better (Mooneye's boot_sclk_align and SameSuite's
+gdma_addr_mask now pass). Closed as understood rather than passed: the DMA groups are 39 short
+each, and what's left is mostly one-dot edges where Gambatte's hardware results and SameBoy's model
+part ways, so each fix now costs a lot and risks another suite. What's left, and why:
+
+| Group | Failing | Where it stands |
+|---|---|---|
+| STAT IRQ (`m1`, `m0enable`, `m2enable`, `lycEnable`, `miscmstatirq`) | ~80 | Line 143 into VBlank, and the Color's LYC write timing: a dot either way trades as many tests as it fixes |
+| `window` | ~55 | The window switched off or on late in a line, late WY writes; the Color's mode 3 length there |
+| `oamdma` | 39 | Sprites after a copy ending mid-scan (`late_sp*`); copies from $FE00/$FF00 on the original |
+| `dma` | 39 | HBlank DMA around speed switches and a few HALT edges |
+| `sound`, `speedchange` | ~50 | Channel 1 duty and length/envelope timing edges where Gambatte and SameBoy's APU disagree |
+| `lcd_offset` | 20 | How far the PPU gets during a double-speed round trip |
+| `irq_precedence` | 11 | The mode 0 interrupt on the first line after switching the LCD on |
 
 ---
 
