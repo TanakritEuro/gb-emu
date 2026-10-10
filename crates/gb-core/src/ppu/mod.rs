@@ -131,6 +131,10 @@ pub struct Ppu {
     /// The original with WX = 166: the window is on from the next line's
     /// first pixel (see `Ppu::finish_line`).
     window_from_start: WindowFromStart,
+    /// The Color started the window at WX 166: from this dot on the HBlank
+    /// interrupt source is on, though mode 3 may go on (sprites at its
+    /// end): SameBoy's wx_166_interrupt_glitch. `u32::MAX` when not.
+    hblank_irq_from: u32,
     /// The dot where this line's mode 3 ends and HBlank begins.
     hblank_dot: u32,
     /// The LCD was just switched on and line 0 hasn't finished: a line with
@@ -278,6 +282,7 @@ impl Ppu {
             dot: 0,
             wy_triggered: false,
             window_from_start: WindowFromStart::No,
+            hblank_irq_from: u32::MAX,
             hblank_dot: HBLANK_DOT,
             first_line: false,
             wy_check_in: 0,
@@ -313,6 +318,7 @@ impl Ppu {
         w.u32(self.dot);
         w.bool(self.wy_triggered);
         w.u8(self.window_from_start as u8);
+        w.u32(self.hblank_irq_from);
         w.u8(self.wy_check_in as u8);
         w.u8(self.hblank_in);
         w.u16(self.hblank_dot as u16);
@@ -367,6 +373,7 @@ impl Ppu {
             2 => WindowFromStart::Counted,
             _ => return Err(StateError::Corrupt("window from start")),
         };
+        self.hblank_irq_from = r.u32()?;
         self.wy_check_in = u32::from(r.u8()?.min(6));
         self.hblank_in = r.u8()?.min(2);
         self.hblank_dot = u32::from(r.u16()?);
@@ -929,6 +936,14 @@ impl Ppu {
     /// does Mooneye's timing with the CPU halted (see `Cpu::halted_m_cycle`).
     fn check_stat_line(&mut self) {
         if !self.lcd_on() {
+            // Off, the LY == LYC source still counts, with the flag as it
+            // was left: enabling it then is an interrupt (Gambatte's
+            // lcdoff_lycirqen).
+            let line = self.stat & 0x40 != 0 && self.lyc_line;
+            if line && !self.stat_line {
+                self.pending_irq |= interrupt::STAT;
+            }
+            self.stat_line = line;
             return;
         }
         let mode = self.stat & 0x03;
@@ -947,12 +962,17 @@ impl Ppu {
             (ly, 455) => ly < VBLANK_LINE - 1,
             _ => false,
         };
+        // From the mode 2 pulse on, the HBlank source is off: the line is
+        // already counted as the next one's mode 2 (SameBoy's
+        // mode_for_interrupt), not into VBlank.
+        let mode2_next = self.ly < VBLANK_LINE - 1 && self.dot >= early_dot;
         let line = (self.stat & 0x40 != 0 && self.lyc_line)
             || (self.stat & 0x20 != 0 && mode2_pulse)
             || (self.stat & 0x10 != 0 && mode == 1)
             || (self.stat & 0x08 != 0
-                && mode == 0
+                && (mode == 0 || (mode == 3 && self.dot >= self.hblank_irq_from))
                 && self.ly < VBLANK_LINE
+                && !mode2_next
                 && (self.dot != self.hblank_dot || self.double_speed)
                 && !(self.first_line && self.dot < MODE3_DOT));
         if line && !self.stat_line {
@@ -1313,6 +1333,53 @@ mod tests {
         assert_eq!(p.read_reg(0xFF41) & 0x04, 0x04, "LY 0 == LYC 0");
         p.tick(1);
         assert_eq!(p.read_reg(0xFF41) & 0x04, 0, "LY reads 1 now");
+    }
+
+    #[test]
+    fn the_colors_window_at_wx_166_turns_the_hblank_source_on_in_mode_3() {
+        // The window starts at the last pixel; fetching it keeps mode 3
+        // going, but the HBlank interrupt comes as it starts (SameBoy).
+        let mode_at_irq = |wx| {
+            let mut p = Ppu::with_model(Model::Cgb);
+            p.lcdc = 0x91 | 0x20;
+            p.wx = wx;
+            p.write_reg(0xFF41, 0x08);
+            p.tick(456); // line 1
+            while p.tick(1) & interrupt::STAT == 0 {}
+            p.stat & 0x03
+        };
+        assert_eq!(mode_at_irq(166), 3);
+        assert_eq!(mode_at_irq(165), 0);
+    }
+
+    #[test]
+    fn with_the_lcd_off_enabling_the_lyc_source_on_a_held_match_interrupts() {
+        let mut p = stat_ppu(0x00);
+        p.write_reg(0xFF45, 0); // LY 0 == LYC 0
+        p.write_reg(0xFF40, 0x11); // off: the flag stays
+        p.write_reg(0xFF45, 0xFF); // not compared while off
+        p.write_reg(0xFF41, 0x40);
+        assert_eq!(p.tick(1) & interrupt::STAT, interrupt::STAT);
+        p.write_reg(0xFF41, 0x40);
+        assert_eq!(p.tick(1) & interrupt::STAT, 0, "already high");
+    }
+
+    #[test]
+    fn the_hblank_source_ends_before_the_next_lines_lyc_match() {
+        // HBlank holds the line high; LYC = the next line, written then,
+        // still makes an edge: the HBlank source ends at the mode 2 pulse,
+        // before the next line is compared.
+        let mut p = stat_ppu(0x48);
+        while (p.ly, p.dot) != (1, 300) {
+            p.tick(1);
+        }
+        assert_eq!(p.stat & 0x03, 0, "HBlank");
+        p.write_reg(0xFF45, 2);
+        assert_eq!(
+            count_stat(&mut p, 156 + 10),
+            1,
+            "LY == LYC as line 2 begins"
+        );
     }
 
     #[test]

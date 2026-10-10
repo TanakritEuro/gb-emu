@@ -333,6 +333,7 @@ impl Ppu {
             found[..usize::from(count)].sort_by_key(|s| s.x); // stable: OAM order breaks ties
             (found, count)
         };
+        self.hblank_irq_from = u32::MAX;
         let m = &mut self.m3;
         m.bg.clear();
         m.sprites_fifo.clear();
@@ -616,6 +617,10 @@ impl Ppu {
                 false
             };
             if activate {
+                if self.wx == 166 {
+                    // Only the Color gets here with WX 166.
+                    self.hblank_irq_from = self.dot + 1;
+                }
                 self.window_y = self.window_y.wrapping_add(1);
                 m.window_tile_x = 0;
                 m.bg.clear();
