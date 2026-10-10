@@ -402,9 +402,10 @@ say what to work on next.
       Color's boot ROM hands over at line 144, dot 163 (`display_startstate` 10/10); WY is looked at
       again a few dots after a write, and WX 166 on the original spans the next line (`window`
       368 -> 418 of 476); the serial clock comes from the divider and SB shifts a bit at a time
-      (`serial` 43 -> 80 of 82); the LY == LYC interrupt source holds while LY changes (STAT
-      groups +21); the Color's palettes stay locked a few dots into HBlank (`cgbpal_m3` 27 -> 42
-      of 44). Whole suite: 4321 -> 4813 of 5225. Left, largest first: STAT IRQ timings
+      (`serial` 43 -> 80 of 82); the LY == LYC interrupt source holds while LY changes, the
+      HBlank source ends at the next line's mode 2 pulse, and LY == LYC still counts with the LCD
+      off (STAT groups +51); the Color's palettes stay locked a few dots into HBlank (`cgbpal_m3` 27 -> 42
+      of 44). Whole suite: 4321 -> 4843 of 5225. Left, largest first: STAT IRQ timings
       (`miscmstatirq`, `lycEnable`, `m0enable`, `m2enable`, `m1`), sound (Gambatte and
       SameBoy's APU disagree on some edges), VRAM DMA around speed switches, LCD offset (speed
       switch round trips), the window switched off and on mid-line
